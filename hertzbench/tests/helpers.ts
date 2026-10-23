@@ -149,3 +149,16 @@ export function dhcpClientMessage(
     payload: body,
   });
 }
+
+/** Poll until `condition` holds. Fails the test after `timeoutMs` instead of hanging it. */
+export async function until(
+  condition: () => boolean,
+  what: string,
+  timeoutMs = 3000,
+): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
