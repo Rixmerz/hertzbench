@@ -11,6 +11,7 @@ import {
   BridgeStartError,
   type EndpointPublisher,
   IpBridge,
+  MdnsPublisher,
 } from "../bridge/mod.ts";
 import {
   type Clock,
@@ -425,7 +426,11 @@ function wifiNetwork(
   const spec = scenario.bridge;
   let bridge: IpBridge | undefined;
   if (spec?.kind === "ip") {
-    const publisher = ctx.hooks.publisher?.(spec) ?? null;
+    const publisher = ctx.hooks.publisher
+      ? ctx.hooks.publisher(spec)
+      : spec.mdns
+      ? new MdnsPublisher({ spec })
+      : null;
     bridge = new IpBridge({
       spec,
       nodes: new Map(onMedium.map((n) => [n.id, { ip: n.ip, mac: n.mac }])),
