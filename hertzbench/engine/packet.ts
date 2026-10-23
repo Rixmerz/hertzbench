@@ -14,14 +14,11 @@ const UDP_HEADER_BYTES = 8;
 
 export function macToBytes(mac: string): Uint8Array {
   const parts = mac.split(":");
-  const bytes = parts.map((p) => Number.parseInt(p, 16));
-  if (
-    parts.length !== 6 ||
-    bytes.some((b, i) => !Number.isInteger(b) || b < 0 || b > 255 || (parts[i] ?? "").length !== 2)
-  ) {
+  // parseInt alone takes "0g", "+1" or " 1" as a number: check the digits first.
+  if (parts.length !== 6 || parts.some((p) => !/^[0-9a-fA-F]{2}$/.test(p))) {
     throw new TypeError(`not a MAC address: ${JSON.stringify(mac)}`);
   }
-  return Uint8Array.from(bytes);
+  return Uint8Array.from(parts, (p) => Number.parseInt(p, 16));
 }
 
 export function macToString(bytes: Uint8Array, offset = 0): string {

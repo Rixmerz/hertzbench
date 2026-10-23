@@ -75,6 +75,8 @@ const MAX_RT = 0x10;
 const FIFO_DEPTH = 3;
 const MAX_PAYLOAD = 32;
 const SETTLE_MS = NRF24_SETTLE_US / 1000;
+/** Highest channel with a frequency (2525 MHz, §6.3). */
+const MAX_RF_CHANNEL = 125;
 /** RPD is set when the last packet arrived above this level (§6.4). */
 const RPD_THRESHOLD_DBM = -64;
 
@@ -469,10 +471,21 @@ export class Nrf24l01 implements SpiDevice, AirReceiver {
       this.#addressWidth(),
     );
     const expectAck = !entry.noAck && (this.peek(NRF_REG.EN_AA) & 0x01) !== 0;
-    const frame = this.#frame("nrf24", address, entry.payload, entry.noAck, this.#dynamic(0));
     this.#state = "tx_air";
-    this.#opts.transmit(frame);
-    this.#schedule(frame.airtimeMs, () => {
+    let airtimeMs: number;
+    if (this.#offAir()) {
+      airtimeMs = nrf24AirtimeUs(
+        address.length,
+        entry.payload.length,
+        this.#crcBytes(),
+        this.#dataRate(),
+      ) / 1000;
+    } else {
+      const frame = this.#frame("nrf24", address, entry.payload, entry.noAck, this.#dynamic(0));
+      this.#opts.transmit(frame);
+      airtimeMs = frame.airtimeMs;
+    }
+    this.#schedule(airtimeMs, () => {
       if (!expectAck) return this.#txSucceeded(entry);
       // Wait for the ACK until the next attempt is due: ARD after the end of this one.
       this.#state = "tx_wait_ack";
@@ -614,6 +627,7 @@ export class Nrf24l01 implements SpiDevice, AirReceiver {
 
   /** The receiver answers 130 us after the packet with an ACK on the same address. */
   #sendAck(pipe: number, h: Nrf24Header): void {
+    if (this.#offAir()) return;
     const ackPayload = (this.peek(NRF_REG.FEATURE) & 0x02)
       ? this.#tx.find((e) => e.ackPipe === pipe) ?? null
       : null;
@@ -650,6 +664,17 @@ export class Nrf24l01 implements SpiDevice, AirReceiver {
   #cancelTimer(): void {
     this.#timer?.();
     this.#timer = null;
+  }
+
+  /** RF_CH holds 7 bits, but the PHY has no frequency above channel 125: nobody would hear it. */
+  #offAir(): boolean {
+    const channel = this.peek(NRF_REG.RF_CH);
+    if (channel <= MAX_RF_CHANNEL) return false;
+    this.#warnOnce(
+      `RF_CH ${channel} is above channel ${MAX_RF_CHANNEL}, outside the 2400-2525 MHz ` +
+        `the nRF24L01+ is specified for; its packets are not put on the air`,
+    );
+    return true;
   }
 
   #warnOnce(message: string): void {

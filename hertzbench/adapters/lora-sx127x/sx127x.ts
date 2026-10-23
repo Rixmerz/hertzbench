@@ -323,7 +323,11 @@ export class Sx127x implements SpiDevice, AirReceiver {
     const rssiReg = quality.rssiDbm + this.#rssiOffset() - Math.min(0, quality.snrDb);
     this.#regs[REG.PKT_RSSI_VALUE] = Math.max(0, Math.min(255, Math.round(rssiReg)));
     this.#raise(IRQ.VALID_HEADER | IRQ.RX_DONE);
-    if (this.mode === MODE.RX_SINGLE) this.#enterMode(MODE.STDBY);
+    if (this.mode === MODE.RX_SINGLE) {
+      // The chip leaves RX single by itself: RegOpMode reads standby, as after an RX timeout.
+      this.#regs[REG.OP_MODE] = (this.peek(REG.OP_MODE) & ~0x07) | MODE.STDBY;
+      this.#enterMode(MODE.STDBY);
+    }
     return true;
   }
 
