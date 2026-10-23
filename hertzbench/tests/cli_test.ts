@@ -214,6 +214,10 @@ Deno.test("run: the BLE example connects three sensors, loses the one that walks
 
     const events = (await Deno.readTextFile(`${dir}/events.jsonl`)).trim().split("\n")
       .map((l) => JSON.parse(l));
+    // Host to host can never be quicker than one packet on the air (0.208 ms for these 18-byte PDUs).
+    const acl = events.filter((e) => e.type === "deliver" && e.kind === "ble-acl");
+    assert(acl.length > 50, `ble-acl deliveries: ${acl.length}`);
+    for (const e of acl) assert(e.delayMs >= 0.2, `ble-acl delay ${e.delayMs} ms`);
     const links = events.filter((e) => e.type === "ble-link");
     assertEquals(links.filter((e) => e.state === "up").length, 6, "three connections, both sides");
     const down = links.filter((e) => e.state === "down");

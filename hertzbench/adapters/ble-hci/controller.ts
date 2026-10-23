@@ -244,7 +244,7 @@ export class BleController implements AirReceiver {
   #initiator: Initiator | null = null;
   #scanTimer: (() => void) | null = null;
   #scanChannel = 0;
-  #scanWindow: { channel: number; until: number } | null = null;
+  #scanWindow: { channel: number; from: number; until: number } | null = null;
   #awaitScanRsp: { channel: number; advA: string; until: number } | null = null;
   /** The connection whose event holds the radio. */
   #active: Connection | null = null;
@@ -714,7 +714,7 @@ export class BleController implements AirReceiver {
       const now = this.#o.clock.now();
       const channel = BLE_ADV_CHANNELS[this.#scanChannel % 3] as number;
       this.#scanChannel++;
-      this.#scanWindow = { channel, until: now + params.windowMs };
+      this.#scanWindow = { channel, from: now, until: now + params.windowMs };
       this.#scanTimer = this.#at(now + params.intervalMs, openWindow);
     };
     openWindow();
@@ -988,14 +988,27 @@ export class BleController implements AirReceiver {
     });
   }
 
+  /**
+   * Whether the host had handed this item over by now. Host bytes are stamped
+   * on arrival in real time, while a paced connection event runs at its due
+   * time, which can be a little earlier: such an item waits for the next
+   * packet, or its ACL delay would come out shorter than its time on air.
+   */
+  #ready(item: TxItem): boolean {
+    return !item.acl || item.acl.enqueuedMs <= this.#o.clock.now();
+  }
+
   #nextItem(conn: Connection): TxItem {
-    if (!conn.unacked) conn.unacked = conn.queue[0] ?? EMPTY_PDU;
+    if (!conn.unacked) {
+      const head = conn.queue[0];
+      conn.unacked = head && this.#ready(head) ? head : EMPTY_PDU;
+    }
     return conn.unacked;
   }
 
   #sendData(conn: Connection): number {
     const item = this.#nextItem(conn);
-    const pending = conn.queue.length - (conn.queue[0] === item ? 1 : 0);
+    const pending = conn.queue.filter((queued) => queued !== item && this.#ready(queued)).length;
     const pdu = encodeDataPdu({
       llid: item.llid,
       nesn: conn.nesn,
@@ -1388,7 +1401,7 @@ export class BleController implements AirReceiver {
       });
     }
     const window = this.#scanWindow;
-    if (window && h.channel === window.channel && now < window.until) {
+    if (window && h.channel === window.channel && now >= window.from && now < window.until) {
       const advertising = pdu.type === ADV_PDU.advInd || pdu.type === ADV_PDU.advScanInd ||
         pdu.type === ADV_PDU.advNonconnInd;
       if (advertising) return this.#lock(frame, () => {});
