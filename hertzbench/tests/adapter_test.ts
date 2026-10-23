@@ -274,3 +274,14 @@ Deno.test("adapter: a board can reconnect after it drops", async () => {
     await b.adapter.close();
   }
 });
+
+Deno.test("adapter: closing releases pending waits instead of leaving their timers running", async () => {
+  const b = bench(["a"]);
+  const waiting = assertRejects(
+    () => b.adapter.waitConnected("a", 60_000),
+    Error,
+    "adapter closed",
+  );
+  await b.adapter.close();
+  await waiting;
+});

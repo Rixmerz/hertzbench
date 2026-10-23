@@ -1,12 +1,13 @@
 // `hertzbench run scenario.yaml` and `hertzbench validate scenario.yaml`.
 // Exit status: 0 the run passed, 1 an assertion failed or a board reported a
-// problem, 2 the scenario was invalid or the environment cannot run it.
+// problem, 2 the scenario was invalid or the environment cannot run it, 130
+// interrupted.
 
 import { PRODUCT } from "../brand.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
 import { renderReport } from "../orchestrator/report.ts";
-import { runScenario } from "../orchestrator/runner.ts";
+import { RunInterrupted, runScenario } from "../orchestrator/runner.ts";
 import { ScenarioError } from "../orchestrator/scenario.ts";
 
 const USAGE = `${PRODUCT.displayName}: simulate the radio network between boards
@@ -104,15 +105,31 @@ async function main(argv: string[]): Promise<number> {
       );
       return 0;
     }
-    const result = await runScenario(scenario, {
-      outDir: loaded.outDir,
-      outputs: loaded.outputs,
-      progress: args.quiet ? undefined : (line) => console.error(`[${PRODUCT.slug}] ${line}`),
-    });
+    // Ctrl-C and SIGTERM end the run through the runner, which stops every board.
+    // Exiting straight away would leave QEMU workers running.
+    const abort = new AbortController();
+    const onSignal = () => abort.abort();
+    const signals: Deno.Signal[] = Deno.build.os === "windows" ? ["SIGINT"] : ["SIGINT", "SIGTERM"];
+    for (const signal of signals) Deno.addSignalListener(signal, onSignal);
+    let result;
+    try {
+      result = await runScenario(scenario, {
+        signal: abort.signal,
+        outDir: loaded.outDir,
+        outputs: loaded.outputs,
+        progress: args.quiet ? undefined : (line) => console.error(`[${PRODUCT.slug}] ${line}`),
+      });
+    } finally {
+      for (const signal of signals) Deno.removeSignalListener(signal, onSignal);
+    }
     if (args.quiet) console.log(result.passed ? "RESULT: PASS" : "RESULT: FAIL");
     else console.log(renderReport(result));
     return result.passed ? 0 : 1;
   } catch (error) {
+    if (error instanceof RunInterrupted) {
+      console.error(`${PRODUCT.cli}: interrupted; boards stopped, no results written`);
+      return 130;
+    }
     if (error instanceof ScenarioError || error instanceof BoardError) {
       console.error(`${PRODUCT.cli}: ${error.message}`);
       return 2;

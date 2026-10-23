@@ -44,6 +44,12 @@ export interface RunOptions {
   startupTimeoutMs?: number;
   /** Progress lines for the person running the CLI. */
   progress?: (line: string) => void;
+  /** Abort to end the run early: boards are stopped and the run rejects with RunInterrupted. */
+  signal?: AbortSignal;
+}
+
+export class RunInterrupted extends Error {
+  override name = "RunInterrupted";
 }
 
 export interface NodeReport {
@@ -142,24 +148,42 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     await Promise.allSettled(running.map((board) => board.stop()));
   };
 
+  const interrupted = new Promise<never>((_, reject) => {
+    const stop = () => reject(new RunInterrupted("run interrupted"));
+    if (options.signal?.aborted) stop();
+    else options.signal?.addEventListener("abort", stop, { once: true });
+  });
+  // Nobody may be awaiting `interrupted` when the run ends normally.
+  interrupted.catch(() => {});
+
   try {
     progress(`starting ${scenario.nodes.length} board(s)`);
-    await Promise.all(scenario.nodes.map(async (node) => {
-      const board = await launchers[node.board].start({
-        node,
-        netPort: ports.get(node.id) ?? null,
-        peers: peersOf(node.id),
-        gateway: { ip: gatewayIp, mac: GATEWAY_MAC, subnetMask: "255.255.255.0" },
-        clock,
-        outDir: options.outDir,
-        onSerial: (text) => log.append({ type: "serial", t: clock.now(), node: node.id, text }),
-        onProblem: (message) => problems.push(message),
-      });
-      running.push(board);
-      clocks.set(node.id, board.clockDescription);
-    }));
+    // allSettled, not all: a board that fails must not leave its siblings
+    // half-started and unowned while the first rejection unwinds the run.
+    const started = await Promise.race([
+      Promise.allSettled(scenario.nodes.map(async (node) => {
+        const board = await launchers[node.board].start({
+          node,
+          netPort: ports.get(node.id) ?? null,
+          peers: peersOf(node.id),
+          gateway: { ip: gatewayIp, mac: GATEWAY_MAC, subnetMask: "255.255.255.0" },
+          clock,
+          outDir: options.outDir,
+          onSerial: (text) => log.append({ type: "serial", t: clock.now(), node: node.id, text }),
+          onProblem: (message) => problems.push(message),
+        });
+        running.push(board);
+        clocks.set(node.id, board.clockDescription);
+      })),
+      interrupted,
+    ]);
+    for (const outcome of started) if (outcome.status === "rejected") throw outcome.reason;
+
     const startupTimeout = options.startupTimeoutMs ?? 30_000;
-    await Promise.all(mediumIds.map((id) => adapter.waitConnected(id, startupTimeout)));
+    await Promise.race([
+      Promise.all(mediumIds.map((id) => adapter.waitConnected(id, startupTimeout))),
+      interrupted,
+    ]);
     progress(`all boards connected; running for ${scenario.durationMs} ms`);
 
     clock.restart();
@@ -173,7 +197,10 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         }
       });
     }
-    await new Promise<void>((resolve) => clock.schedule(scenario.durationMs, resolve));
+    await Promise.race([
+      new Promise<void>((resolve) => clock.schedule(scenario.durationMs, resolve)),
+      interrupted,
+    ]);
   } finally {
     await stopAll();
     await adapter.close();

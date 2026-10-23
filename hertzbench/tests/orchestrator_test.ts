@@ -10,6 +10,7 @@ import {
   metricsDocument,
   parseScenario,
   renderReport,
+  RunInterrupted,
   runScenario,
   scriptedLauncher,
 } from "../orchestrator/mod.ts";
@@ -314,4 +315,65 @@ Deno.test("link rules expand patterns to ordered pairs, never to self", () => {
     ["sensor-2", "gw"],
   ]);
   assertEquals(expandLinkRule({ ...rule, from: "*", to: "*" }, ["a", "b"]).length, 2);
+});
+
+Deno.test("runner: aborting ends a long run promptly, stops every board and releases everything", async () => {
+  const stopped: string[] = [];
+  const tracking: BoardLauncher = {
+    fidelity: "test",
+    async start(ctx) {
+      const inner = await scriptedLauncher.start(ctx);
+      return {
+        clockDescription: inner.clockDescription,
+        async stop() {
+          stopped.push(ctx.node.id);
+          await inner.stop();
+        },
+      };
+    },
+  };
+  const dir = await Deno.makeTempDir({ prefix: "hzb-abort-" });
+  try {
+    await Deno.writeTextFile(`${dir}/s.yaml`, TWO_NODES.replace("duration: 1s", "duration: 10m"));
+    const loaded = await loadScenario(`${dir}/s.yaml`, `${dir}/out`);
+    const controller = new AbortController();
+    const started = performance.now();
+    setTimeout(() => controller.abort(), 300);
+    await assertRejects(
+      () =>
+        runScenario(loaded.scenario, {
+          outDir: loaded.outDir,
+          outputs: loaded.outputs,
+          launchers: { scripted: tracking },
+          signal: controller.signal,
+        }),
+      RunInterrupted,
+    );
+    assert(performance.now() - started < 5000, "an abort must not wait out the duration");
+    assertEquals(stopped.sort(), ["a", "b"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runner: a board that fails to start does not leave its sibling running", async () => {
+  const stopped: string[] = [];
+  const mixed: BoardLauncher = {
+    fidelity: "test",
+    async start(ctx) {
+      if (ctx.node.id === "b") throw new BoardError("b failed to start");
+      const inner = await scriptedLauncher.start(ctx);
+      // Make "a" finish starting after "b" has already failed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        clockDescription: inner.clockDescription,
+        async stop() {
+          stopped.push(ctx.node.id);
+          await inner.stop();
+        },
+      };
+    },
+  };
+  await assertRejects(() => runFrom(TWO_NODES, { scripted: mixed }), BoardError, "b failed");
+  assertEquals(stopped, ["a"]);
 });

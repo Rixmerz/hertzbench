@@ -95,4 +95,4 @@ Paths are relative to the scenario file. Defaults are `metrics.json`, `air.pcap`
 
 ## Exit status
 
-`0` the run passed. `1` an assertion failed, or a board or the adapter reported a problem. `2` the scenario is invalid, a firmware path is missing, or the host cannot run it (for example, no libqemu).
+`0` the run passed. `1` an assertion failed, or a board or the adapter reported a problem. `2` the scenario is invalid, a firmware path is missing, or the host cannot run it (for example, no libqemu). `130` interrupted with Ctrl-C or SIGTERM: every board is stopped and no results are written.

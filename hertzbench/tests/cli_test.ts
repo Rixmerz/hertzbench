@@ -185,3 +185,51 @@ Deno.test("usage: no arguments and --help print usage; an unknown command exits 
   const noFile = await hertzbench(["run"]);
   assertEquals(noFile.code, 2);
 });
+
+Deno.test("SIGINT: the CLI stops the run, exits 130 and writes no results", async () => {
+  await inTempDir(async (dir) => {
+    await Deno.writeTextFile(`${dir}/long.yaml`, SHORT.replace("duration: 1s", "duration: 10m"));
+    const child = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-net=127.0.0.1",
+        "--allow-read",
+        "--allow-write",
+        "--allow-run",
+        "--allow-env",
+        MAIN,
+        "run",
+        `${dir}/long.yaml`,
+        "--out",
+        `${dir}/out`,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    // Wait for the run to be underway (the CLI reports it on stderr), then interrupt.
+    const reader = child.stderr.pipeThrough(new TextDecoderStream()).getReader();
+    let seen = "";
+    while (!seen.includes("running for")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      seen += value;
+    }
+    child.kill("SIGINT");
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      seen += value;
+    }
+    const status = await child.status;
+    await child.stdout.cancel();
+    assertEquals(status.code, 130, seen);
+    assertStringIncludes(seen, "interrupted");
+    let wrote = true;
+    try {
+      await Deno.stat(`${dir}/out/metrics.json`);
+    } catch {
+      wrote = false;
+    }
+    assertEquals(wrote, false);
+  });
+});

@@ -31,7 +31,8 @@ interface Port {
   conn: Deno.TcpConn | null;
   /** Writes are chained so frames reach the board in the order the engine delivered them. */
   writes: Promise<void>;
-  waiters: Set<() => void>;
+  /** Pending waitConnected calls; each is called with nothing on connect, or an error on close. */
+  waiters: Set<(error?: Error) => void>;
   loops: Promise<void>[];
 }
 
@@ -85,21 +86,23 @@ export class QemuWifiL2Adapter {
     return this.#ports.get(nodeId)?.conn != null;
   }
 
-  /** Resolve when the board's QEMU has connected; reject after `timeoutMs`. */
+  /** Resolve when the board's QEMU has connected; reject after `timeoutMs` or when the adapter closes. */
   waitConnected(nodeId: string, timeoutMs: number): Promise<void> {
     const port = this.#ports.get(nodeId);
     if (!port) return Promise.reject(new Error(`node ${JSON.stringify(nodeId)} is not attached`));
     if (port.conn) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
-      const done = () => {
+      const settle = (error?: Error) => {
         clearTimeout(timer);
-        resolve();
+        port.waiters.delete(settle);
+        if (error) reject(error);
+        else resolve();
       };
-      const timer = setTimeout(() => {
-        port.waiters.delete(done);
-        reject(new Error(`node ${nodeId}: the board did not connect within ${timeoutMs} ms`));
-      }, timeoutMs);
-      port.waiters.add(done);
+      const timer = setTimeout(
+        () => settle(new Error(`node ${nodeId}: the board did not connect within ${timeoutMs} ms`)),
+        timeoutMs,
+      );
+      port.waiters.add(settle);
     });
   }
 
@@ -107,6 +110,9 @@ export class QemuWifiL2Adapter {
     this.#closed = true;
     const loops: Promise<void>[] = [];
     for (const port of this.#ports.values()) {
+      for (const settle of [...port.waiters]) {
+        settle(new Error(`node ${port.nodeId}: adapter closed`));
+      }
       port.listener.close();
       port.conn?.close();
       port.conn = null;
@@ -127,8 +133,7 @@ export class QemuWifiL2Adapter {
         }
         conn.setNoDelay(true);
         port.conn = conn;
-        for (const wake of [...port.waiters]) wake();
-        port.waiters.clear();
+        for (const settle of [...port.waiters]) settle();
         port.loops.push(this.#readLoop(port, conn));
       }
     } catch (error) {
