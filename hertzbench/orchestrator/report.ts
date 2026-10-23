@@ -4,27 +4,47 @@
 
 import type { LinkStats } from "../engine/mod.ts";
 import { PRODUCT } from "../brand.ts";
+import type { Phy } from "./radios.ts";
 import type { RunResult } from "./runner.ts";
 
-const WIFI_FIDELITY = {
-  component: "qemu-wifi-l2 adapter",
-  protocol: "wi-fi/ip",
-  level: "F2",
-  meaning: "same firmware binary, frames captured at the netdev (layer 2 and up)",
-} as const;
+/** The protocol path of a run, per PHY (PLAN.md D10: say how faithful the result is). */
+const ADAPTER_FIDELITY: Record<
+  Phy,
+  { component: string; protocol: string; level: string; meaning: string }
+> = {
+  wifi: {
+    component: "qemu-wifi-l2 adapter",
+    protocol: "wi-fi/ip",
+    level: "F2",
+    meaning: "same firmware binary, frames captured at the netdev (layer 2 and up)",
+  },
+  lora: {
+    component: "lora-sx127x model over spi-link",
+    protocol: "lora",
+    level: "F1",
+    meaning: "same firmware binary, the SX127x modelled at its SPI register interface",
+  },
+  nrf24: {
+    component: "nrf24 model over spi-link",
+    protocol: "nrf24",
+    level: "F1",
+    meaning: "same firmware binary, the nRF24L01+ modelled at its SPI command interface",
+  },
+};
 
-const ESPNOW_FIDELITY = {
+const ESPNOW_FIDELITY: (typeof ADAPTER_FIDELITY)[Phy] = {
   component: "qemu-wifi-l2 adapter",
   protocol: "esp-now",
   level: "F1",
   meaning:
     "same firmware binary, 802.11 action frames bridged by the QEMU fork's MAC model as pseudo-Ethernet",
-} as const;
+};
 
 /** The protocol rows that apply to this run: ESP-NOW only when ESP-NOW crossed the medium. */
 function protocolFidelity(result: RunResult) {
   const espnow = result.events.some((e) => e.type === "tx" && e.kind === "espnow");
-  return espnow ? [WIFI_FIDELITY, ESPNOW_FIDELITY] : [WIFI_FIDELITY];
+  const phy = ADAPTER_FIDELITY[result.scenario.phy];
+  return espnow ? [phy, ESPNOW_FIDELITY] : [phy];
 }
 
 export function linkJson(link: LinkStats) {
@@ -50,13 +70,18 @@ export function linkJson(link: LinkStats) {
   };
 }
 
-/** The contents of metrics.json. `schema` changes if a field is renamed or removed. */
+/**
+ * The contents of metrics.json. `schema` changes if a field is renamed or
+ * removed or changes type. 2: `phy` and per-node `radio` added, node `channel`
+ * may be null (LoRa has no channel number).
+ */
 export function metricsDocument(result: RunResult) {
   const { scenario, metrics } = result;
   return {
-    schema: 1,
+    schema: 2,
     tool: PRODUCT.slug,
     scenario: scenario.name,
+    phy: scenario.phy,
     seed: scenario.seed,
     duration_ms: scenario.durationMs,
     // Latency is the delay the channel model assigned. It is not measured on a guest clock.
@@ -75,6 +100,7 @@ export function metricsDocument(result: RunResult) {
       mac: n.mac,
       position: n.position,
       channel: n.channel,
+      radio: n.radio,
       on_medium: n.onMedium,
       clock: n.clock,
     })),
@@ -177,17 +203,21 @@ export function renderReport(result: RunResult): string {
   for (const line of new Set(result.nodes.map((n) => `${n.board}: ${n.fidelity}`))) {
     out.push(`  ${line}`);
   }
-  out.push("  latency below is MODELLED by the channel model, not measured on a guest clock");
+  out.push(
+    scenario.phy === "wifi"
+      ? "  latency below is MODELLED by the channel model, not measured on a guest clock"
+      : "  latency below is MODELLED: time on air from the chip's registers plus propagation",
+  );
   out.push("");
   out.push("Nodes");
   out.push(
     ...table(
-      ["node", "board", "ip", "channel", "position", "clock"],
+      ["node", "board", "ip", "radio", "position", "clock"],
       result.nodes.map((n) => [
         n.id,
         n.board,
-        n.ip,
-        String(n.channel),
+        scenario.phy === "wifi" ? n.ip : "-",
+        n.radio,
         n.onMedium
           ? `(${n.position.x}, ${n.position.y}${
             n.position.z === undefined ? "" : `, ${n.position.z}`

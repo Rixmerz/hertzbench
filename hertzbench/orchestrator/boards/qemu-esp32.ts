@@ -1,14 +1,16 @@
 // The real board: a Velxio ESP32 worker (backend/app/services/esp32_worker.py)
 // started headless with one JSON config line on stdin, as
-// test/backend/integration/test_esp32_examples_qemu.py does. Its Wi-Fi NIC is
-// attached to this run's adapter instead of SLIRP through two config fields
-// that the core patch in docs/upstream-sync.md adds.
+// test/backend/integration/test_esp32_examples_qemu.py does. On a Wi-Fi
+// scenario its NIC is attached to this run's adapter instead of SLIRP; on a
+// LoRa or nRF24 scenario its SPI bus reaches the chip model over spi-link.
+// Both go through config fields the core patches in docs/upstream-sync.md add.
 //
 // Not runnable on a host without libqemu-xtensa; docs/e2e-esp32.md says how.
 
 import { fileURLToPath } from "node:url";
 import { workerNetworkConfig } from "../../adapters/qemu-wifi-l2/mod.ts";
 import { buildEfuseImage } from "../../adapters/qemu-wifi-l2/mod.ts";
+import { workerRadioSpiConfig } from "../../adapters/spi-link/mod.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -243,7 +245,13 @@ async function startEsp32(ctx: BoardContext, firmwareCache: FirmwareCache): Prom
     machine: "esp32-picsimlab",
     wifi_enabled: true,
   };
-  if (ctx.netPort !== null) {
+  const radio = node.radio;
+  if (ctx.netPort !== null && radio.phy === "lora") {
+    const { cs, reset } = radio.pins;
+    Object.assign(config, workerRadioSpiConfig(ctx.netPort, cs, reset === null ? [] : [reset]));
+  } else if (ctx.netPort !== null && radio.phy === "nrf24") {
+    Object.assign(config, workerRadioSpiConfig(ctx.netPort, radio.pins.csn, [radio.pins.ce]));
+  } else if (ctx.netPort !== null) {
     // Distinct station MAC per board, and the NIC on the engine instead of SLIRP.
     const efusePath = `${ctx.outDir}/efuse-${node.id}.bin`;
     await Deno.writeFile(efusePath, buildEfuseImage(node.mac));

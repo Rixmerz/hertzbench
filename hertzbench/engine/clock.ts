@@ -85,6 +85,18 @@ export class ManualClock implements Clock {
     this.advanceTo(this.#now + deltaMs);
   }
 
+  /** When the earliest pending callback is due, or null when nothing is pending. */
+  nextDueMs(): number | null {
+    return this.#queue.reduce<number | null>(
+      (min, p) => (min === null || p.at < min ? p.at : min),
+      null,
+    );
+  }
+
+  cancelAll(): void {
+    this.#queue = [];
+  }
+
   /** Run every scheduled callback, however far in the future. */
   runAll(): void {
     while (this.#queue.length > 0) {
@@ -93,6 +105,73 @@ export class ManualClock implements Clock {
       if (!next) break;
       this.#now = Math.max(this.#now, next.at);
       next.fn();
+    }
+  }
+}
+
+/**
+ * Discrete events paced to real time, for chip-level radios whose protocols
+ * live below the timer resolution: an nRF24 ACK follows its packet by 130 us,
+ * and a setTimeout fires 1 to 4 ms late. Each callback runs when real time
+ * reaches it, in due-time order, and sees `now()` equal to its own due time,
+ * so a chain of sub-millisecond steps keeps its order against a later deadline
+ * however late the timer fired. Outside a callback `now()` is real time.
+ * Firmware polling the chip sees results at timer granularity; durations the
+ * engine models (time on air, latency) stay exact.
+ */
+export class PacedClock implements Clock {
+  readonly kind = "wall";
+  readonly #origin = performance.now();
+  readonly #events = new ManualClock();
+  #timer: ReturnType<typeof setTimeout> | null = null;
+  #armedFor = Infinity;
+  #draining = false;
+
+  now(): number {
+    return this.#draining ? this.#events.now() : Math.max(this.#real(), this.#events.now());
+  }
+
+  schedule(atMs: number, fn: () => void): () => void {
+    const cancel = this.#events.schedule(atMs, fn);
+    if (!this.#draining) this.#arm();
+    return cancel;
+  }
+
+  cancelAll(): void {
+    this.#events.cancelAll();
+    if (this.#timer !== null) clearTimeout(this.#timer);
+    this.#timer = null;
+    this.#armedFor = Infinity;
+  }
+
+  #real(): number {
+    return performance.now() - this.#origin;
+  }
+
+  #arm(): void {
+    const next = this.#events.nextDueMs();
+    if (next === null) {
+      if (this.#timer !== null) clearTimeout(this.#timer);
+      this.#timer = null;
+      this.#armedFor = Infinity;
+      return;
+    }
+    if (this.#timer !== null && this.#armedFor <= next) return;
+    if (this.#timer !== null) clearTimeout(this.#timer);
+    this.#armedFor = next;
+    this.#timer = setTimeout(() => this.#drain(), Math.max(0, next - this.#real()));
+  }
+
+  #drain(): void {
+    this.#timer = null;
+    this.#armedFor = Infinity;
+    this.#draining = true;
+    try {
+      // Everything due by now, including what those callbacks schedule for before now.
+      this.#events.advanceTo(Math.max(this.#real(), this.#events.now()));
+    } finally {
+      this.#draining = false;
+      this.#arm();
     }
   }
 }

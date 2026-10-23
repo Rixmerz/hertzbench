@@ -168,6 +168,7 @@ export function simulateScenarioTraffic(
   });
   const sinks = new Map<string, RecordingSink>();
   for (const node of onMedium) {
+    if (node.radio.phy !== "wifi") throw new Error(`${node.id}: this rig is Wi-Fi only`);
     const sink = new RecordingSink(clock);
     sinks.set(node.id, sink);
     medium.addNode(
@@ -235,6 +236,7 @@ export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic
   });
   const models = new Map<string, EspNowForkModel>();
   for (const node of onMedium) {
+    if (node.radio.phy !== "wifi") throw new Error(`${node.id}: ESP-NOW needs a Wi-Fi node`);
     const model = new EspNowForkModel({
       mac: node.mac,
       channel: node.radio.channel,

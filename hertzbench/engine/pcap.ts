@@ -1,22 +1,29 @@
-// Classic libpcap writer. One record per frame put on the air, stamped with
-// engine time. Losses are not in the capture (pcap has no way to say
-// "dropped"); they are in the event log and metrics.json.
+// Classic libpcap writer, one link type per file: Ethernet for Wi-Fi/IP,
+// LoRaTap for LoRa, a private one for nRF24, radiotap for ESP-NOW as 802.11.
+// One record per frame put on the air, stamped with engine time. Losses are not
+// in the capture (pcap has no way to say "dropped"); they are in the event log
+// and metrics.json.
 //
-// A classic capture has one link type. The runner writes every frame as the
-// netdev carries it to an Ethernet capture, and ESP-NOW frames a second time,
-// converted to 802.11 (espnowToRadiotap), to a radiotap capture: in the first
-// they are the fork's pseudo-Ethernet, which Wireshark cannot decode.
+// The runner writes every Wi-Fi frame as the netdev carries it to the Ethernet
+// capture, and ESP-NOW frames a second time, converted to 802.11
+// (espnowToRadiotap), to a radiotap capture: in the first they are the fork's
+// pseudo-Ethernet, which Wireshark cannot decode.
 
 const GLOBAL_HEADER_BYTES = 24;
 const RECORD_HEADER_BYTES = 16;
 export const LINKTYPE_ETHERNET = 1;
 export const LINKTYPE_IEEE802_11_RADIOTAP = 127;
+/** LoRaTap pseudo-header followed by the LoRa payload (tcpdump.org link-layer header types). */
+export const LINKTYPE_LORATAP = 270;
+/** Reserved for private use; hertzbench puts nRF24 frames here (docs/fidelity.md says how). */
+export const LINKTYPE_USER0 = 147;
 const SNAPLEN = 65535;
 
 export class PcapWriter {
   readonly #epochMs: number;
   readonly #chunks: Uint8Array[] = [];
   #packets = 0;
+  #lastMs = -Infinity;
 
   /** `epochMs` is the Unix time of engine time 0, so the capture has real-looking timestamps. */
   constructor(epochMs: number, linkType = LINKTYPE_ETHERNET) {
@@ -37,6 +44,9 @@ export class PcapWriter {
   }
 
   addFrame(tMs: number, frame: Uint8Array): void {
+    // Records stay in time order for the same reason the event log does (EventLog.append).
+    tMs = Math.max(tMs, this.#lastMs);
+    this.#lastMs = tMs;
     const totalUs = Math.round((this.#epochMs + tMs) * 1000);
     const captured = Math.min(frame.length, SNAPLEN);
     const header = new DataView(new ArrayBuffer(RECORD_HEADER_BYTES));

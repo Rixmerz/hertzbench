@@ -7,13 +7,20 @@ import type { ScenarioNode } from "../scenario.ts";
 
 export interface PeerInfo {
   id: string;
+  /** 1-based position in the scenario's node list; scripted nRF24 boards derive addresses from it. */
+  index: number;
   ip: string;
   mac: string;
 }
 
 export interface BoardContext {
   node: ScenarioNode;
-  /** The node's listener on the adapter, or null for the internet-gateway node, which keeps SLIRP. */
+  /** 1-based position of the node in the scenario's node list. */
+  nodeIndex: number;
+  /**
+   * The node's listener on its adapter: qemu-wifi-l2 for a Wi-Fi node, spi-link
+   * for a LoRa or nRF24 node; null for the internet-gateway node, which keeps SLIRP.
+   */
   netPort: number | null;
   /** Every other board on the medium. */
   peers: readonly PeerInfo[];

@@ -23,6 +23,7 @@ import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2
 import { BROADCAST_TARGET } from "../scenario.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "./espnow-fork-model.ts";
+import { startScriptedRadioBoard } from "./scripted-radio.ts";
 
 const DHCP_RETRY_MS = 1000;
 const DHCP_MAX_TRIES = 10;
@@ -59,13 +60,13 @@ class ScriptedBoard implements RunningBoard {
   readonly #espnowQueue: { dst: string; label: string; body: Uint8Array }[] = [];
   #espnowInFlight: string | null = null;
 
-  constructor(ctx: BoardContext, conn: Deno.TcpConn) {
+  constructor(ctx: BoardContext, conn: Deno.TcpConn, channel: number) {
     this.#ctx = ctx;
     this.#conn = conn;
     this.#xid = Number.parseInt(ctx.node.mac.slice(-2), 16) * 0x10001 + 0xc0de0000;
     this.#espnow = new EspNowForkModel({
       mac: ctx.node.mac,
-      channel: ctx.node.radio.channel,
+      channel,
       clock: ctx.clock,
       output: (frame) => this.#send(frame),
       onReceive: (src, _dst, body) => {
@@ -255,8 +256,9 @@ export const scriptedLauncher: BoardLauncher = {
     if (ctx.netPort === null) {
       throw new BoardError(`${ctx.node.id}: a scripted board needs a medium port`);
     }
+    if (ctx.node.radio.phy !== "wifi") return await startScriptedRadioBoard(ctx, ctx.netPort);
     const conn = await Deno.connect({ hostname: LOOPBACK, port: ctx.netPort });
     conn.setNoDelay(true);
-    return new ScriptedBoard(ctx, conn);
+    return new ScriptedBoard(ctx, conn, ctx.node.radio.channel);
   },
 };

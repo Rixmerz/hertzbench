@@ -9,6 +9,10 @@ export type DropReason =
   | "extra_loss" // the scenario's per-link loss override
   | "channel_mismatch" // sender and receiver radios are on different channels
   | "no_peer" // the receiving board had not connected to its adapter port
+  | "collision" // another frame on the same channel overlapped it and was not 6 dB weaker
+  | "noise" // the chip-level PHY lost it to the error rate at its SNR
+  | "phy_mismatch" // the receiver listened on the channel with other modem settings
+  | "not_listening" // the receiver left its receive state before the frame ended
   | "ack_timeout" // an ESP-NOW ACK that would reach its sender after the fork's 10 ms wait
   | "ack_unmatched"; // an ESP-NOW ACK for no frame its receiver holds that still waits for one
 
@@ -28,6 +32,9 @@ export type FrameKind =
   | "ipv4"
   | "espnow" // an ESP-NOW action frame, in the QEMU fork's pseudo-Ethernet
   | "espnow-ack" // the fork's ACK for a unicast one
+  | "lora"
+  | "nrf24"
+  | "nrf24-ack"
   | "other";
 
 interface Stamped {
@@ -45,6 +52,9 @@ export type EngineEvent =
     kind: FrameKind;
     dst: string;
     src: string;
+    /** Chip-level PHYs: time on air and the modem settings the chip used, read from its registers. */
+    airtimeMs?: number;
+    radio?: Record<string, string | number | boolean>;
   })
   | (Stamped & {
     type: "deliver";
@@ -97,9 +107,17 @@ export type NewEvent = EngineEvent extends infer E ? E extends EngineEvent ? Omi
 
 export class EventLog {
   readonly #events: EngineEvent[] = [];
+  #lastT = -Infinity;
 
+  /**
+   * Times never step backwards: with a paced clock an event logged from a
+   * timer carries its due time, which can be earlier than an I/O event logged
+   * just before it; such an event is stamped with the later time.
+   */
   append(event: NewEvent): void {
-    this.#events.push({ ...event, seq: this.#events.length } as EngineEvent);
+    const t = Math.max(event.t, this.#lastT);
+    this.#lastT = t;
+    this.#events.push({ ...event, t, seq: this.#events.length } as EngineEvent);
   }
 
   get events(): readonly EngineEvent[] {

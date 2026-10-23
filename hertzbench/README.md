@@ -7,7 +7,8 @@ emulation).
 
 The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
 a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
-build, run and steer those scenarios, and **Phase 4**, ESP-NOW between the boards.
+build, run and steer those scenarios, **Phase 3**, LoRa and nRF24 radio chips modelled at their SPI
+interface, and **Phase 4**, ESP-NOW between the boards.
 
 ## Status
 
@@ -21,7 +22,8 @@ build, run and steer those scenarios, and **Phase 4**, ESP-NOW between the board
 | MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                |
 | `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                 |
 | ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and through the CLI with scripted boards; **not run against QEMU**, see [ESP-NOW](#esp-now)      |
-| LoRa, BLE, nRF24, mobile bridge, canvas                                                                | later phases                                                                                                                                                |
+| LoRa (SX127x) and nRF24L01+ chip models over `spi-link` (Phase 3)                                      | see `adapters/lora-sx127x/`, `adapters/nrf24/` and `scenarios/examples/lora-gateway-6-*.yaml`                                                               |
+| BLE, mobile bridge, canvas                                                                             | later phases                                                                                                                                                |
 
 ## Quick start (no QEMU needed)
 

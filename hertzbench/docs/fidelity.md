@@ -16,7 +16,8 @@ Every protocol and board declares how faithful it is (PLAN.md D10). `hertzbench 
 | `esp32` board | F2 for Wi-Fi/IP, F1 for ESP-NOW | The classic ESP32 only, machine `esp32-picsimlab`. The C3 asserts in eFuse reload when a NIC is attached, and the S3 machine models no radio (`esp32_worker.py`, `wifi_nic_arg`). |
 | `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings, and sends ESP-NOW through a model of the fork's MAC (`orchestrator/boards/espnow-fork-model.ts`). It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
 | Internet gateway node (`internet_gateway: true`) | n/a | The one board that keeps SLIRP. See below. |
-| BLE, LoRa, nRF24 | not yet | ADR [0002](adr/0002-ble-approach.md) (BLE, F3). |
+| LoRa (SX127x) and nRF24L01+ (Phase 3) | **F1** | The same firmware binary; the radio chip is modelled at its SPI interface (`adapters/lora-sx127x/`, `adapters/nrf24/`, over `adapters/spi-link/`). |
+| BLE | not yet | ADR [0002](adr/0002-ble-approach.md) (F3). |
 
 ## Clock and latency
 
