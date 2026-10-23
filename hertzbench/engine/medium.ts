@@ -43,6 +43,15 @@ export interface LinkOverride {
   extraLatencyMs: number;
 }
 
+/** What the runner and the timeline do to a medium, whichever PHY it carries. */
+export interface MediumControl {
+  moveNode(id: string, position: Position): void;
+  setLinkOverride(from: string, to: string, override: LinkOverride): void;
+  startPhase(label: string): void;
+  node(id: string): Readonly<{ position: Position }>;
+  close(): void;
+}
+
 export interface MediumOptions {
   seed: number;
   environment: Environment;

@@ -8,7 +8,11 @@ export type DropReason =
   | "retry_exhausted" // every MAC attempt failed on the channel
   | "extra_loss" // the scenario's per-link loss override
   | "channel_mismatch" // sender and receiver radios are on different channels
-  | "no_peer"; // the receiving board had not connected to its adapter port
+  | "no_peer" // the receiving board had not connected to its adapter port
+  | "collision" // another frame on the same channel overlapped it and was not 6 dB weaker
+  | "noise" // the chip-level PHY lost it to the error rate at its SNR
+  | "phy_mismatch" // the receiver listened on the channel with other modem settings
+  | "not_listening"; // the receiver left its receive state before the frame ended
 
 export type FrameKind =
   | "arp"
@@ -18,6 +22,9 @@ export type FrameKind =
   | "icmp"
   | "ipv4"
   | "espnow-pseudo-ethernet"
+  | "lora"
+  | "nrf24"
+  | "nrf24-ack"
   | "other";
 
 interface Stamped {
@@ -35,6 +42,9 @@ export type EngineEvent =
     kind: FrameKind;
     dst: string;
     src: string;
+    /** Chip-level PHYs: time on air and the modem settings the chip used, read from its registers. */
+    airtimeMs?: number;
+    radio?: Record<string, string | number | boolean>;
   })
   | (Stamped & {
     type: "deliver";
