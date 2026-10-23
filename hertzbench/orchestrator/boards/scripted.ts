@@ -23,6 +23,7 @@ import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2
 import { BROADCAST_TARGET } from "../scenario.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "./espnow-fork-model.ts";
+import { startScriptedBleBoard } from "./scripted-ble.ts";
 import { startScriptedRadioBoard } from "./scripted-radio.ts";
 
 const DHCP_RETRY_MS = 1000;
@@ -256,6 +257,7 @@ export const scriptedLauncher: BoardLauncher = {
     if (ctx.netPort === null) {
       throw new BoardError(`${ctx.node.id}: a scripted board needs a medium port`);
     }
+    if (ctx.node.radio.phy === "ble") return await startScriptedBleBoard(ctx, ctx.netPort);
     if (ctx.node.radio.phy !== "wifi") return await startScriptedRadioBoard(ctx, ctx.netPort);
     const conn = await Deno.connect({ hostname: LOOPBACK, port: ctx.netPort });
     conn.setNoDelay(true);

@@ -1,6 +1,6 @@
 # ADR 0002: BLE approach (F3, HCI-over-UART shim)
 
-- Status: Accepted for Phase 0. Phase 6 depends on the Phase 1 spike described below.
+- Status: Accepted for Phase 0. Implemented in Phase 6 (2026-10) **without the gate below having been run**: no host used so far has libqemu or ESP-IDF. See "Phase 6" at the end.
 - Date: 2026-10-22
 - Evidence: [discovery.md](../discovery.md), Q4.
 
@@ -42,3 +42,14 @@ Use **F3**: a simulation-only firmware build in which the Bluedroid host stack r
 - **Dedicated UART.** One UART is taken for HCI. Sketches that need every UART must be told so, and the adapter must reject the conflict up front, not at run time.
 - **Velxio coupling.** Only the worker's existing UART commands are used (`uart_send`, `uart_tx`). The fork and the worker need no BLE change, which keeps the upstream merge cost at zero for this part.
 - **Open risk.** The on-chip controller may be the only thing the firmware's BLE library will start. If so, the F3 shim needs a different ESP-IDF configuration than the one planned here. That is the Phase 1 spike's question, not this ADR's.
+
+## Phase 6
+
+The owner asked for Phase 6 on a host without libqemu or ESP-IDF, so it was built against the HCI specification and tested with scripted hosts instead of after the gate. What was built, and where this ADR's consequences went:
+
+- **The controller is the engine's.** `adapters/ble-hci/` holds a virtual controller per node that answers HCI over H4 and plays the link layer (advertising, scanning, connections, retransmission, supervision timeout) on the chip-level air, so every packet pays the channel model. What it models and leaves out is in [fidelity.md](../fidelity.md#ble).
+- **The transport is the worker's own UART commands**, as decided: the ESP32 board relays `uart_tx` events of the radio's `hci_uart` to the node's `ble-hci` port and answers with `uart_send`. No Velxio file changed, and the fork is untouched.
+- **The firmware variant is hertzbench-owned**: `scenarios/examples/fw/ble-sensor` is an ESP-IDF project with `CONFIG_BT_CONTROLLER_DISABLED=y` and Bluedroid attached to an H4 driver on UART1 through `esp_bluedroid_attach_hci_driver`, after ESP-IDF's `bluedroid_host_only_uart` example. Velxio's compile pipeline builds Arduino sketches from its own template, which keeps the on-chip controller, and Arduino's `BLEDevice` starts that controller; so the variant is built with `idf.py` and handed to the scenario as a `.bin`. No core patch.
+- **The second firmware is visible** in the scenario (`radios: [{ phy: ble, hci_uart: 1 }]`) and the CLI labels BLE F3.
+- **UART0 is refused** for `hci_uart` when the scenario is read, not at run time.
+- **The risk this ADR names is still open**: whether Bluedroid starts host-only against this controller. The first step of the BLE run in [e2e-esp32.md](../e2e-esp32.md#the-ble-example) is the gate. If the stack cannot run host-only, the fallback is still the Arduino BLE API shim of PLAN §7, which needs its own ADR.

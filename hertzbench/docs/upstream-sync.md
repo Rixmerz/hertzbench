@@ -17,7 +17,7 @@ git merge upstream/master   # or cherry-pick specific commits
 
 ## Patches
 
-Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`). Phase 4 (ESP-NOW) touches **none** either: it rides on patch 1, which already puts each board's NIC on the engine and gives it its own station MAC, and the QEMU fork is used as it is (ADR 0001). Its sketches go through Velxio's compiler unchanged.
+Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`). Phase 4 (ESP-NOW) touches **none** either: it rides on patch 1, which already puts each board's NIC on the engine and gives it its own station MAC, and the QEMU fork is used as it is (ADR 0001). Its sketches go through Velxio's compiler unchanged. Phase 6 (BLE) touches **none**: the ESP32 board relays the firmware's HCI UART through the worker's existing `uart_tx` event and `uart_send` command, and its firmware is an ESP-IDF project hertzbench builds itself instead of a change to Velxio's template (ADR 0002).
 
 | # | File | Commit subject | Upstreamable |
 |---|---|---|---|
@@ -60,3 +60,4 @@ Recorded so a merge that moves them gets noticed:
 - `esp32_worker.py` stdin protocol: one JSON config line, then `{"cmd": "stop"}` to end the run; stdout JSON lines with `uart_tx`, `serial_output`, `system` and `error` events.
 - `espidf_compiler.compile(files, board_fqbn)` returns `binary_content` (base64) and rewrites any `WiFi.begin()` to SSID `Espressif`, open auth, channel 5 (`espidf_compiler.py`, `_QEMU_WIFI_SSID` and `_QEMU_WIFI_CHANNEL`). The example sketch says so explicitly.
 - `QEMU_ESP32_LIB` names the libqemu shared library, as in `esp32_lib_manager.py`.
+- `esp32_worker.py` `uart_send` command, `{"cmd": "uart_send", "uart": N, "data": "<base64>"}` (header line 17), feeds bytes to any UART through `qemu_picsimlab_uart_receive`, and the `uart_tx` event, `{"type": "uart_tx", "uart": N, "byte": V}` (header line 32), reports every byte any UART sends. The BLE relay uses both on the radio's `hci_uart`; `tests/cli_test.ts` pins the shapes with a stand-in worker.

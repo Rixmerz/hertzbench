@@ -132,3 +132,75 @@ Deno.test("chip radios: metric assertions accept the lora, nrf24 and nrf24-ack f
     assertEquals(s.assertions.length, 1);
   }
 });
+
+// ── BLE ─────────────────────────────────────────────────────────────────────
+
+function bleScenario(central: string, peripheral = "{ advertise: true }", radio = "{ phy: ble }") {
+  return `
+name: ble
+duration: 5s
+nodes:
+  - { id: gw, board: scripted, position: [0, 0], radios: [${radio}], firmware: ${central} }
+  - { id: s1, board: scripted, position: [5, 0], radios: [${radio}], firmware: ${peripheral} }
+`;
+}
+
+Deno.test("ble: defaults are 0 dBm with HCI on UART1, and a script reads advertise, connect and gatt sends", () => {
+  const s = parseScenario(bleScenario(
+    "{ connect: { peers: [s1] }, send: [{ to: s1, every: 1s, count: 2 }] }",
+    "{ advertise: { name: probe, interval: 40ms }, send: [{ to: gw, every: 1s, count: 2 }] }",
+  ));
+  assertEquals(s.phy, "ble");
+  assertEquals(s.nodes[0]!.radio, { phy: "ble", txPowerDbm: 0, antennaGainDbi: 0, hciUart: 1 });
+  const gw = s.nodes[0]!.firmware;
+  const s1 = s.nodes[1]!.firmware;
+  assert(gw.kind === "script" && s1.kind === "script");
+  assertEquals(gw.ble, {
+    advertise: null,
+    connect: { peers: ["s1"], intervalMs: 30, timeoutMs: 1000 },
+    scan: false,
+  });
+  assertEquals(s1.ble?.advertise, { name: "probe", intervalMs: 40 });
+  assertEquals(gw.send[0]?.via, "gatt");
+  // `advertise: true` advertises the node's own id.
+  const plain = parseScenario(bleScenario("{ connect: { peers: [s1] } }")).nodes[1]!.firmware;
+  assert(plain.kind === "script" && plain.ble?.advertise?.name === "s1");
+  assertEquals(
+    parseScenario(bleScenario("{}", "{}", "{ phy: ble, hci_uart: 2 }")).nodes[0]!.radio,
+    {
+      phy: "ble",
+      txPowerDbm: 0,
+      antennaGainDbi: 0,
+      hciUart: 2,
+    },
+  );
+});
+
+Deno.test("ble: UART0, link-layer timings it cannot take and sends without a connection are refused", () => {
+  expectError(bleScenario("{}", "{}", "{ phy: ble, hci_uart: 0 }"), "UART0 is the serial console");
+  expectError(bleScenario("{ connect: { peers: [s1], interval: 31ms } }"), "multiple of 1.25 ms");
+  expectError(bleScenario("{ connect: { peers: [s1], interval: 5ms } }"), "between 7.5 ms");
+  expectError(
+    bleScenario("{ connect: { peers: [s1], interval: 100ms, timeout: 150ms } }"),
+    "more than twice the connection interval",
+  );
+  expectError(bleScenario("{ connect: { peers: [nobody] } }"), "connect.peers[0]");
+  expectError(bleScenario("{ connect: { peers: [gw] } }"), "cannot connect to itself");
+  expectError(
+    bleScenario("{ send: [{ to: s1, every: 1s, count: 1 }] }"),
+    "neither gw nor s1 connects to the other",
+  );
+  expectError(
+    bleScenario("{ connect: { peers: [s1] }, send: [{ to: s1, every: 1s, count: 1, port: 9 }] }"),
+    "GATT has no ports",
+  );
+  expectError(
+    bleScenario(
+      "{ connect: { peers: [s1] }, send: [{ to: s1, every: 1s, count: 1, payload: fifteen-bytes-x }] }",
+    ),
+    "within 14 bytes",
+  );
+  expectError(bleScenario("{ advertise: true, connect: { peers: [s1] } }"), "not both");
+  expectError(bleScenario("{ listen: true }"), "not a BLE notion");
+  expectError(scenario("{ phy: nrf24 }", "", "{ advertise: true }"), "is a BLE notion");
+});

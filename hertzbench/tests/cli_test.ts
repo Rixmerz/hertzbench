@@ -162,6 +162,18 @@ Deno.test("validate: accepts the examples and the firmware they name", async () 
   }
 });
 
+Deno.test("validate: accepts the scripted BLE example, and names the firmware the ESP32 one needs built", async () => {
+  const scripted = await hertzbench(["validate", `${EXAMPLES}ble-sensors-scripted.yaml`]);
+  assertEquals(scripted.code, 0, scripted.stdout + scripted.stderr);
+  assertStringIncludes(scripted.stdout, "ok (4 nodes");
+  const esp32 = await hertzbench(["validate", `${EXAMPLES}ble-sensors-3-nodes.yaml`]);
+  // The scenario itself is valid: the only complaint is the image docs/e2e-esp32.md says to build.
+  assertEquals(esp32.code, 2, esp32.stdout + esp32.stderr);
+  assertStringIncludes(esp32.stderr, "firmware not found");
+  assertStringIncludes(esp32.stderr, "fw/ble-sensor/build/ble-sensor-flash.bin");
+  assertEquals(esp32.stderr.split("does not exist").length - 1, 3, esp32.stderr);
+});
+
 Deno.test("validate: accepts the LoRa examples, 1 gateway and 6 nodes each", async () => {
   for (const file of ["lora-gateway-6-nodes.yaml", "lora-gateway-6-scripted.yaml"]) {
     const run = await hertzbench(["validate", `${EXAMPLES}${file}`]);
@@ -185,6 +197,57 @@ async function assertMonotonic(dir: string): Promise<void> {
     offset += 16 + view.getUint32(offset + 8, true);
   }
 }
+
+Deno.test("run: the BLE example connects three sensors, loses the one that walks away, and writes LE and HCI captures", async () => {
+  await inTempDir(async (dir) => {
+    const run = await hertzbench(["run", `${EXAMPLES}ble-sensors-scripted.yaml`, "--out", dir]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "ble: F3");
+    assertStringIncludes(run.stdout, "disconnected (0x08 supervision timeout)");
+
+    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/metrics.json`));
+    assertEquals(metrics.phy, "ble");
+    assertEquals(metrics.passed, true);
+    assertEquals(metrics.nodes[0].channel, null);
+    assertEquals(metrics.fidelity[0].level, "F3");
+    await assertMonotonic(dir);
+
+    const events = (await Deno.readTextFile(`${dir}/events.jsonl`)).trim().split("\n")
+      .map((l) => JSON.parse(l));
+    // Host to host can never be quicker than one packet on the air (0.208 ms for these 18-byte PDUs).
+    const acl = events.filter((e) => e.type === "deliver" && e.kind === "ble-acl");
+    assert(acl.length > 50, `ble-acl deliveries: ${acl.length}`);
+    for (const e of acl) assert(e.delayMs >= 0.2, `ble-acl delay ${e.delayMs} ms`);
+    const links = events.filter((e) => e.type === "ble-link");
+    assertEquals(links.filter((e) => e.state === "up").length, 6, "three connections, both sides");
+    const down = links.filter((e) => e.state === "down");
+    assertEquals(down.map((e) => `${e.node}-${e.peer}-${e.reason}`).sort(), [
+      "gw-sensor-3-8",
+      "sensor-3-gw-8",
+    ]);
+
+    const pcap = await Deno.readFile(`${dir}/air.pcap`);
+    const view = new DataView(pcap.buffer);
+    assertEquals(view.getUint32(20, true), 256, "LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR");
+    // First record: pseudo-header, then the advertising access address 0x8e89bed6.
+    assertEquals(view.getUint32(24 + 16 + 10, true), 0x8e89bed6);
+
+    for (const node of ["gw", "sensor-1", "sensor-2", "sensor-3"]) {
+      const snoop = await Deno.readFile(`${dir}/hci-${node}.btsnoop`);
+      assertEquals(new TextDecoder().decode(snoop.subarray(0, 7)), "btsnoop");
+      assertEquals(new DataView(snoop.buffer).getUint32(12), 1002, "H4 datalink");
+    }
+    // BlueZ's own decoder reads the HCI the hosts and controllers exchanged.
+    const btmon = await new Deno.Command("btmon", { args: ["-r", `${dir}/hci-gw.btsnoop`] })
+      .output().catch(() => null);
+    if (btmon) {
+      const text = new TextDecoder().decode(btmon.stdout);
+      assertStringIncludes(text, "LE Connection Complete");
+      assertStringIncludes(text, "ATT: Handle Value Notification (0x1b)");
+      assertStringIncludes(text, "Reason: Connection Timeout (0x08)");
+    }
+  });
+});
 
 Deno.test("run: the LoRa example loses more the farther the node, and writes a LoRaTap capture", async () => {
   await inTempDir(async (dir) => {
@@ -418,6 +481,62 @@ Deno.test("exit 2: a LoRa ESP32 board whose worker dies fails fast, and the work
     assert(!log.includes("radio_spi"), log);
     // A LoRa node gets no Wi-Fi engine port and no eFuse image.
     await assertRejects(() => Deno.stat(`${dir}/out/efuse-a.bin`), Deno.errors.NotFound);
+  });
+});
+
+// A stand-in for backend/app/services/esp32_worker.py that speaks only its
+// stdin/stdout protocol: the firmware side of an HCI UART sends HCI Reset as
+// `uart_tx` events on UART1 and prints on UART0 once the controller's Command
+// Complete comes back as `uart_send` commands.
+const FAKE_HCI_WORKER = `
+import base64, json, sys
+config = json.loads(sys.stdin.readline())
+sys.stderr.write("config " + json.dumps(sorted(config)) + "\\n")
+def emit(event):
+    print(json.dumps(event), flush=True)
+for byte in (0x01, 0x03, 0x0c, 0x00):
+    emit({"type": "uart_tx", "uart": 1, "byte": byte})
+received = b""
+for line in sys.stdin:
+    command = json.loads(line)
+    if command.get("cmd") == "stop":
+        break
+    if command.get("cmd") == "uart_send" and command.get("uart") == 1:
+        received += base64.b64decode(command["data"])
+        if received.startswith(bytes((0x04, 0x0e, 0x04, 0x01, 0x03, 0x0c, 0x00))):
+            for byte in b"hci reset ok\\n":
+                emit({"type": "uart_tx", "uart": 0, "byte": byte})
+            received = b""
+`;
+
+Deno.test("run: an ESP32 BLE board relays its HCI UART through the worker's uart_tx and uart_send", async () => {
+  await inTempDir(async (dir) => {
+    await Deno.writeFile(`${dir}/libqemu-xtensa.so`, new Uint8Array(0));
+    await Deno.writeFile(`${dir}/fw.bin`, new Uint8Array(16));
+    await Deno.writeTextFile(`${dir}/fake_worker.py`, FAKE_HCI_WORKER);
+    // HERTZBENCH_PYTHON runs the worker script; this one ignores it and runs the fake.
+    await Deno.writeTextFile(`${dir}/python`, `#!/bin/sh\nexec python3 ${dir}/fake_worker.py\n`);
+    await Deno.chmod(`${dir}/python`, 0o755);
+    await Deno.writeTextFile(
+      `${dir}/ble.yaml`,
+      `name: relay\nduration: 2s\nnodes:\n` +
+        `  - { id: a, board: esp32, firmware: ./fw.bin, position: [0, 0], radios: [{ phy: ble }] }\n` +
+        `  - { id: b, board: esp32, firmware: ./fw.bin, position: [5, 0], radios: [{ phy: ble }] }\n` +
+        `assertions:\n  - serial: { node: a, contains: "hci reset ok", within: 2s }\n` +
+        `  - serial: { node: b, contains: "hci reset ok", within: 2s }\n`,
+    );
+    const run = await hertzbench(["run", `${dir}/ble.yaml`, "--out", `${dir}/out`], {
+      QEMU_ESP32_LIB: `${dir}/libqemu-xtensa.so`,
+      HERTZBENCH_PYTHON: `${dir}/python`,
+    });
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "F3 for BLE");
+    // The relay added nothing to the worker's config: no Wi-Fi engine port, no radio_spi.
+    const log = await Deno.readTextFile(`${dir}/out/worker-a.stderr.log`);
+    assertStringIncludes(log, 'config ["firmware_b64", "lib_path", "machine", "wifi_enabled"]');
+    // Both directions are in the node's HCI capture.
+    const snoop = await Deno.readFile(`${dir}/out/hci-a.btsnoop`);
+    assertEquals(new DataView(snoop.buffer).getUint32(16), 4, "first record: the 4-byte Reset");
   });
 });
 

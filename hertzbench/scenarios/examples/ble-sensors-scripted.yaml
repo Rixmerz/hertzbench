@@ -1,0 +1,66 @@
+# One BLE central (gw) and three sensor peripherals with scripted boards
+# instead of ESP32 firmware. A scripted board plays the host side through a
+# small TypeScript HCI host over the same ble-hci socket the ESP32 board's
+# UART relay uses, so the virtual controllers, the air, the captures and the
+# metrics run without libqemu and finish in seconds. ble-sensors-3-nodes.yaml
+# is the same experiment with real firmware.
+#
+# Indoor office (exponent 3), no shadowing, 0 dBm, 1M PHY: the -97 dBm
+# sensitivity is reached at about 78 m. The gateway connects to the three
+# sensors through its filter accept list (30 ms interval, 1 s supervision
+# timeout) and each sensor notifies a reading every 200 ms. At 4 s sensor-3
+# walks from 40 m to 150 m: its packets stop arriving, both controllers drop
+# the connection after the 1 s timeout (reason 0x08), and the gateway keeps
+# scanning for it.
+name: ble-sensors-scripted
+seed: 11
+duration: 8s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: gw
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      connect: { peers: [sensor-1, sensor-2, sensor-3], interval: 30ms, timeout: 1s }
+  - id: sensor-1
+    board: scripted
+    position: [5, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 50ms }
+      send: [{ to: gw, every: 200ms, count: 35, payload: reading }]
+  - id: sensor-2
+    board: scripted
+    position: [0, 20]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 50ms }
+      send: [{ to: gw, every: 200ms, count: 35, start: 60ms, payload: reading }]
+  - id: sensor-3
+    board: scripted
+    position: [-40, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 50ms }
+      send: [{ to: gw, every: 200ms, count: 35, start: 120ms, payload: reading }]
+timeline:
+  - at: 4s
+    label: walked-away
+    move: { node: sensor-3, to: [-150, 0] }
+assertions:
+  - serial: { node: gw, contains: "ble connected to sensor-1 as central", within: 2s }
+  - serial: { node: sensor-1, contains: "ble connected to gw as peripheral", within: 2s }
+  - serial: { node: gw, contains: 'ble rx "reading:5" from sensor-3', within: 4s }
+  - serial: { node: gw, contains: "ble disconnected from sensor-3 reason=0x08" }
+  - serial: { node: sensor-3, contains: "ble disconnected from gw reason=0x08" }
+  # Host to host: the link layer retransmits until the packet gets through, so a
+  # reading is late, never lost, while the connection holds. The delay is the
+  # wait for the next connection event (30 ms) plus any retries.
+  - metric: { link: "sensor-*->gw", phase: start, kind: ble-acl, loss_pct: { eq: 0 } }
+  - metric: { link: "sensor-1->gw", kind: ble-acl, loss_pct: { eq: 0 }, latency_p95_ms: { lt: 35 } }
+  # On the air, after the walk: the gateway keeps polling a peripheral that hears nothing.
+  - metric: { link: "gw->sensor-3", phase: walked-away, kind: ble-data, loss_pct: { gt: 90 } }
+  - metric: { link: "gw->sensor-1", phase: walked-away, kind: ble-data, loss_pct: { lt: 5 } }
