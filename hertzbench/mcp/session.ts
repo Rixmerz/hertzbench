@@ -308,7 +308,10 @@ export class Session {
     const from = live.position(node);
     if (phase !== null) live.startPhase(phase);
     live.moveNode(node, to);
-    const peers = run.loaded.scenario.nodes.filter((n) => !n.internetGateway && n.id !== node);
+    // Only the Wi-Fi medium reports a budget; on the chip-level air the move stands without one.
+    const peers = run.loaded.scenario.phy === "wifi"
+      ? run.loaded.scenario.nodes.filter((n) => !n.internetGateway && n.id !== node)
+      : [];
     return {
       node,
       from,

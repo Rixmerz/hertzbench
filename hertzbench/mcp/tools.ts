@@ -316,7 +316,7 @@ export function tools(session: Session): ToolDefinition[] {
     {
       name: "move_node",
       description:
-        "Move a node now, while the run is in progress. The channel model uses the new position for every later frame. Returns the new distance, RSSI and SNR to each other node.",
+        "Move a node now, while the run is in progress. The channel model uses the new position for every later frame. Returns the new distance, RSSI and SNR to each other node on a Wi-Fi run; on LoRa, nRF24 and BLE runs that list is empty.",
       inputSchema: {
         type: "object",
         properties: { node: { type: "string" }, position: POSITION_SCHEMA, phase: PHASE_SCHEMA },
