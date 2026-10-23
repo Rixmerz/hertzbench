@@ -1,7 +1,6 @@
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { computeMetrics, type EngineEvent } from "../engine/mod.ts";
 import {
-  type BoardContext,
   BoardError,
   type BoardLauncher,
   evaluateAssertions,
