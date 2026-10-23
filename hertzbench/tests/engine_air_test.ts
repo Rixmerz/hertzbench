@@ -10,6 +10,7 @@ import {
   EventLog,
   type Hearing,
   ManualClock,
+  PacedClock,
   type Position,
   type ReceptionQuality,
 } from "../engine/mod.ts";
@@ -201,4 +202,36 @@ Deno.test("air: same seed, same outcomes at a marginal SNR; another seed differs
   assertEquals(run(1), first);
   assert(first.some((o) => o.endsWith("deliver")) && first.some((o) => o.endsWith("noise")));
   assert(JSON.stringify(run(2)) !== JSON.stringify(first));
+});
+
+Deno.test("paced clock: a sub-millisecond chain beats a later deadline even when the timer fires late", async () => {
+  const clock = new PacedClock();
+  const seen: string[] = [];
+  const dueAndNow: [number, number][] = [];
+  const start = clock.now();
+  await new Promise<void>((resolve) => {
+    clock.schedule(start + 1.5, () => {
+      seen.push("deadline");
+      resolve();
+    });
+    clock.schedule(start + 0.33, () => {
+      dueAndNow.push([start + 0.33, clock.now()]);
+      seen.push("end of packet");
+      const ack = clock.now() + 0.13;
+      clock.schedule(ack, () => {
+        dueAndNow.push([ack, clock.now()]);
+        seen.push("ack sent");
+        const ackEnd = clock.now() + 0.07;
+        clock.schedule(ackEnd, () => {
+          dueAndNow.push([ackEnd, clock.now()]);
+          seen.push("ack received");
+        });
+      });
+    });
+  });
+  assertEquals(seen, ["end of packet", "ack sent", "ack received", "deadline"]);
+  for (const [due, now] of dueAndNow) assertEquals(now, due);
+  // Outside a callback it is real time again, which never runs behind.
+  assert(clock.now() >= start + 1.5);
+  clock.cancelAll();
 });

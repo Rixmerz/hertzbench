@@ -132,6 +132,102 @@ Deno.test("validate: accepts the examples and the firmware they name", async () 
   }
 });
 
+Deno.test("validate: accepts the LoRa examples, 1 gateway and 6 nodes each", async () => {
+  for (const file of ["lora-gateway-6-nodes.yaml", "lora-gateway-6-scripted.yaml"]) {
+    const run = await hertzbench(["validate", `${EXAMPLES}${file}`]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "ok (7 nodes");
+  }
+});
+
+/** Times in events.jsonl and in the capture never step backwards. */
+async function assertMonotonic(dir: string): Promise<void> {
+  const times = (await Deno.readTextFile(`${dir}/events.jsonl`)).trim().split("\n")
+    .map((line) => JSON.parse(line).t as number);
+  times.forEach((t, i) => assert(i === 0 || t >= times[i - 1]!, `event ${i} steps back`));
+  const pcap = await Deno.readFile(`${dir}/air.pcap`);
+  const view = new DataView(pcap.buffer);
+  let previous = -Infinity;
+  for (let offset = 24; offset < pcap.length;) {
+    const us = view.getUint32(offset, true) * 1e6 + view.getUint32(offset + 4, true);
+    assert(us >= previous, `pcap record at ${offset} steps back`);
+    previous = us;
+    offset += 16 + view.getUint32(offset + 8, true);
+  }
+}
+
+Deno.test("run: the LoRa example loses more the farther the node, and writes a LoRaTap capture", async () => {
+  await inTempDir(async (dir) => {
+    const run = await hertzbench(["run", `${EXAMPLES}lora-gateway-6-scripted.yaml`, "--out", dir]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "lora: F1");
+    assertStringIncludes(run.stdout, "lora 868.1 MHz SF7 BW125 CR4/5");
+
+    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/metrics.json`));
+    assertEquals(metrics.schema, 2);
+    assertEquals(metrics.phy, "lora");
+    assertEquals(metrics.warnings, []);
+    const loss = (from: string) =>
+      metrics.links.find((l: { from: string; to: string }) => l.from === from && l.to === "gw")
+        .loss_pct as number;
+    const losses = [1, 2, 3, 4, 5, 6].map((n) => loss(`node-${n}`));
+    losses.forEach((l, i) => assert(i === 0 || l >= losses[i - 1]!, `loss ${losses}`));
+    assertEquals(losses[0], 0);
+    assertEquals(losses[5], 100);
+
+    const pcap = await Deno.readFile(`${dir}/air.pcap`);
+    assertEquals(new DataView(pcap.buffer).getUint32(20, true), 270, "LINKTYPE_LORATAP");
+    assertEquals(new DataView(pcap.buffer).getUint32(24 + 16 + 4), 868_099_976);
+    const tx = (await Deno.readTextFile(`${dir}/events.jsonl`)).split("\n")
+      .find((l) => l.includes('"type":"tx"'))!;
+    assertEquals(JSON.parse(tx).radio.sf, 7);
+    assertStringIncludes(
+      await Deno.readTextFile(`${dir}/serial-gw.log`),
+      'rx "reading:0 from node-1"',
+    );
+    await assertMonotonic(dir);
+  });
+});
+
+Deno.test("run: an nRF24 write is acknowledged across the air; a node out of range gets MAX_RT", async () => {
+  await inTempDir(async (dir) => {
+    await Deno.writeTextFile(
+      `${dir}/nrf.yaml`,
+      `
+name: nrf24-scripted
+seed: 5
+duration: 2s
+environment: { preset: indoor_office, shadowing_sigma_db: 0 }
+nodes:
+  - { id: gw, board: scripted, position: [0, 0], radios: [{ phy: nrf24 }], firmware: {} }
+  - id: near
+    board: scripted
+    position: [5, 0]
+    radios: [{ phy: nrf24 }]
+    firmware: { send: [{ to: gw, every: 200ms, count: 5, payload: t }] }
+  - id: far
+    board: scripted
+    position: [400, 0]
+    radios: [{ phy: nrf24 }]
+    firmware: { send: [{ to: gw, every: 200ms, count: 5, start: 100ms, payload: t }] }
+assertions:
+  - serial: { node: near, contains: "tx t:0 from near ok" }
+  - serial: { node: gw, contains: 'rx "t:4 from near" pipe=1' }
+  - serial: { node: far, contains: "tx t:0 from far failed" }
+  - metric: { link: "near->gw", kind: nrf24, loss_pct: { eq: 0 }, sent: { eq: 5 } }
+  - metric: { link: "gw->near", kind: nrf24-ack, loss_pct: { eq: 0 } }
+  - metric: { link: "far->gw", kind: nrf24, loss_pct: { eq: 100 }, sent: { eq: 80 } }
+`,
+    );
+    const run = await hertzbench(["run", `${dir}/nrf.yaml`, "--out", `${dir}/out`]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "nrf24: F1");
+    const pcap = await Deno.readFile(`${dir}/out/air.pcap`);
+    assertEquals(new DataView(pcap.buffer).getUint32(20, true), 147, "LINKTYPE_USER0");
+    await assertMonotonic(`${dir}/out`);
+  });
+});
+
 Deno.test("exit 2: an invalid scenario names the field, a missing sketch names the node", async () => {
   await inTempDir(async (dir) => {
     await Deno.writeTextFile(`${dir}/bad.yaml`, SHORT.replace("duration: 1s", "duration: 1"));

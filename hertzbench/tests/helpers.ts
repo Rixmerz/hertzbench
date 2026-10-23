@@ -166,6 +166,7 @@ export function simulateScenarioTraffic(
   });
   const sinks = new Map<string, RecordingSink>();
   for (const node of onMedium) {
+    if (node.radio.phy !== "wifi") throw new Error(`${node.id}: this rig is Wi-Fi only`);
     const sink = new RecordingSink(clock);
     sinks.set(node.id, sink);
     medium.addNode(

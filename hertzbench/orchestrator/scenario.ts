@@ -11,10 +11,10 @@ import {
   type Obstacle,
   type Point2,
   type Position,
-  type RadioConfig,
 } from "../engine/channel.ts";
 import type { FrameKind } from "../engine/events.ts";
 import { macToBytes } from "../engine/packet.ts";
+import { type NodeRadio, parseNodeRadio, type Phy } from "./radios.ts";
 
 export class ScenarioError extends Error {
   override name = "ScenarioError";
@@ -23,7 +23,8 @@ export class ScenarioError extends Error {
 export type BoardKind = "esp32" | "scripted";
 
 export interface ScriptedSend {
-  to: string;
+  /** The receiving node; null on LoRa, whose PHY has no addresses (every listener hears it). */
+  to: string | null;
   everyMs: number;
   count: number;
   startMs: number;
@@ -34,14 +35,19 @@ export interface ScriptedSend {
 export type FirmwareSpec =
   | { kind: "sketch"; path: string }
   | { kind: "binary"; path: string }
-  | { kind: "script"; send: ScriptedSend[] };
+  | {
+    kind: "script";
+    send: ScriptedSend[];
+    /** Chip radios: keep the receiver on between sends. Defaults to true for a node that sends nothing. */
+    listen: boolean;
+  };
 
 export interface ScenarioNode {
   id: string;
   board: BoardKind;
   firmware: FirmwareSpec;
   position: Position;
-  radio: RadioConfig;
+  radio: NodeRadio;
   ip: string;
   mac: string;
   /** Keeps SLIRP: the board reaches the host network but is not on the medium. */
@@ -108,6 +114,8 @@ export interface Outputs {
 
 export interface Scenario {
   name: string;
+  /** Every node's radio has this PHY: one medium per run. */
+  phy: Phy;
   seed: number;
   durationMs: number;
   environment: Environment;
@@ -302,29 +310,20 @@ function parseBoard(value: unknown, path: string): BoardKind {
   return fail(path, `unknown board ${JSON.stringify(board)} (esp32, esp32-devkit-v1, scripted)`);
 }
 
-function parseRadio(value: unknown, path: string): RadioConfig {
-  if (value === undefined) return { channel: 6, txPowerDbm: 15, antennaGainDbi: 0 };
-  const radios = list(value, path);
-  if (radios.length !== 1) fail(path, "Phase 1 supports exactly one Wi-Fi radio per node");
-  const radio = record(radios[0], `${path}[0]`);
-  known(radio, ["phy", "channel", "tx_power_dbm", "antenna_gain_dbi"], `${path}[0]`);
-  if (radio.phy !== "wifi") fail(`${path}[0].phy`, 'only phy "wifi" exists in Phase 1');
-  return {
-    channel: int(radio.channel ?? 6, `${path}[0].channel`, 1, 14),
-    txPowerDbm: num(radio.tx_power_dbm ?? 15, `${path}[0].tx_power_dbm`, -20, 30),
-    antennaGainDbi: num(radio.antenna_gain_dbi ?? 0, `${path}[0].antenna_gain_dbi`, -20, 30),
-  };
-}
+const READERS = { fail, record, num, int, known };
 
-function parseScript(value: unknown, path: string): FirmwareSpec {
+function parseScript(value: unknown, path: string, phy: Phy): FirmwareSpec {
   const obj = record(value, path);
-  known(obj, ["send"], path);
+  known(obj, ["send", "listen"], path);
   const send = list(obj.send ?? [], `${path}.send`).map((raw, i): ScriptedSend => {
     const p = `${path}.send[${i}]`;
     const entry = record(raw, p);
     known(entry, ["to", "every", "count", "start", "port", "payload"], p);
+    if (phy === "lora" && entry.to !== undefined) {
+      fail(`${p}.to`, "LoRa has no addresses: every listening node hears a send; leave `to` out");
+    }
     return {
-      to: text(entry.to, `${p}.to`),
+      to: phy === "lora" ? null : text(entry.to, `${p}.to`),
       everyMs: parseDuration(entry.every, `${p}.every`),
       count: int(entry.count, `${p}.count`, 1, 100_000),
       startMs: entry.start === undefined ? 0 : parseDuration(entry.start, `${p}.start`),
@@ -332,11 +331,15 @@ function parseScript(value: unknown, path: string): FirmwareSpec {
       payload: entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`),
     };
   });
-  return { kind: "script", send };
+  if (obj.listen !== undefined && typeof obj.listen !== "boolean") {
+    fail(`${path}.listen`, "expected true or false");
+  }
+  const listen = typeof obj.listen === "boolean" ? obj.listen : send.length === 0;
+  return { kind: "script", send, listen };
 }
 
-function parseFirmware(board: BoardKind, value: unknown, path: string): FirmwareSpec {
-  if (board === "scripted") return parseScript(value ?? {}, path);
+function parseFirmware(board: BoardKind, value: unknown, path: string, phy: Phy): FirmwareSpec {
+  if (board === "scripted") return parseScript(value ?? {}, path, phy);
   const file = text(value, path);
   return { kind: file.endsWith(".bin") ? "binary" : "sketch", path: file };
 }
@@ -403,13 +406,19 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
     const baseId = text(obj.id, `${path}.id`);
     const count = obj.count === undefined ? 1 : int(obj.count, `${path}.count`, 1, 10);
     const board = parseBoard(obj.board, `${path}.board`);
-    const radio = parseRadio(obj.radios, `${path}.radios`);
+    const radio = parseNodeRadio(READERS, obj.radios, `${path}.radios`);
     const internetGateway = obj.internet_gateway === true;
     if (obj.internet_gateway !== undefined && typeof obj.internet_gateway !== "boolean") {
       fail(`${path}.internet_gateway`, "expected true or false");
     }
     if (internetGateway && (board !== "esp32" || count !== 1)) {
       fail(`${path}.internet_gateway`, "must be a single esp32 node");
+    }
+    if (radio.phy !== "wifi" && internetGateway) {
+      fail(`${path}.internet_gateway`, "is a Wi-Fi notion; a LoRa or nRF24 node has no IP network");
+    }
+    if (radio.phy !== "wifi" && obj.ip !== undefined) {
+      fail(`${path}.ip`, "is a Wi-Fi notion; a LoRa or nRF24 node has no IP address");
     }
     for (let k = 0; k < count; k++) {
       const index = nodes.length + 1;
@@ -421,7 +430,7 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
       nodes.push({
         id: count === 1 ? baseId : `${baseId}-${k + 1}`,
         board,
-        firmware: parseFirmware(board, obj.firmware, `${path}.firmware`),
+        firmware: parseFirmware(board, obj.firmware, `${path}.firmware`, radio.phy),
         position: positionFor(obj.position, k, count, `${path}.position`),
         radio,
         ip: explicitIp ?? `${subnetPrefix}.${FIRST_HOST + index - 1}`,
@@ -498,6 +507,9 @@ const FRAME_KINDS: readonly FrameKind[] = [
   "icmp",
   "ipv4",
   "espnow-pseudo-ethernet",
+  "lora",
+  "nrf24",
+  "nrf24-ack",
   "other",
 ];
 
@@ -616,6 +628,7 @@ function checkReferences(scenario: Scenario): void {
   scenario.nodes.forEach((node, i) => {
     if (node.firmware.kind !== "script") return;
     node.firmware.send.forEach((send, j) => {
+      if (send.to === null) return;
       if (!medium.includes(send.to)) {
         fail(
           `nodes[${i}].firmware.send[${j}].to`,
@@ -672,14 +685,30 @@ export function parseScenario(yamlText: string): Scenario {
   known(root, TOP_LEVEL, "scenario");
   const { environment, retryLimit } = parseEnvironment(root.environment, "environment");
   const subnetPrefix = parseSubnet(root.network, "network");
+  // Read in the order of the file's sections, so the first error reported is the first one there.
+  const name = text(root.name, "name");
+  const seed = int(root.seed ?? 1, "seed", 0, 2 ** 32 - 1);
+  const durationMs = parseDuration(root.duration, "duration");
+  const nodes = parseNodes(root.nodes, subnetPrefix);
+  const phy = nodes[0]?.radio.phy ?? "wifi";
+  const other = nodes.find((n) => n.radio.phy !== phy);
+  if (other) {
+    fail(
+      "nodes",
+      `a scenario runs one PHY, but ${
+        nodes[0]?.id
+      } uses ${phy} and ${other.id} uses ${other.radio.phy}`,
+    );
+  }
   const scenario: Scenario = {
-    name: text(root.name, "name"),
-    seed: int(root.seed ?? 1, "seed", 0, 2 ** 32 - 1),
-    durationMs: parseDuration(root.duration, "duration"),
+    name,
+    phy,
+    seed,
+    durationMs,
     environment,
     retryLimit,
     subnetPrefix,
-    nodes: parseNodes(root.nodes, subnetPrefix),
+    nodes,
     links: list(root.links ?? [], "links").map((l, i) => parseLinkRule(l, `links[${i}]`)),
     timeline: parseTimeline(root.timeline),
     assertions: list(root.assertions ?? [], "assertions").map((a, i) =>

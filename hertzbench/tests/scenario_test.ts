@@ -46,7 +46,7 @@ Deno.test("a minimal scenario gets sensible defaults", () => {
     ["a", "192.168.4.11", "02:68:7a:62:01:01"],
     ["b", "192.168.4.12", "02:68:7a:62:01:02"],
   ]);
-  assertEquals(s.nodes[0]!.radio, { channel: 6, txPowerDbm: 15, antennaGainDbi: 0 });
+  assertEquals(s.nodes[0]!.radio, { phy: "wifi", channel: 6, txPowerDbm: 15, antennaGainDbi: 0 });
 });
 
 Deno.test("count expands to id-1..n on a grid, with distinct addresses and MACs", () => {
@@ -159,10 +159,14 @@ Deno.test("Phase 1 scale: 2 to 10 boards", () => {
   assertEquals(parseScenario(`name: t\nduration: 5s\nnodes:\n${ten.join("\n")}`).nodes.length, 10);
 });
 
-Deno.test("one radio per node, wifi only, in range", () => {
+Deno.test("one radio per node, one PHY per scenario, in range", () => {
   expectError(
     MINIMAL.replace("position: [0, 0] }", "position: [0, 0], radios: [{ phy: lora }] }"),
-    "wifi",
+    "a scenario runs one PHY",
+  );
+  expectError(
+    MINIMAL.replace("position: [0, 0] }", "position: [0, 0], radios: [{ phy: zigbee }] }"),
+    "expected one of wifi, lora, nrf24",
   );
   expectError(
     MINIMAL.replace(

@@ -196,7 +196,7 @@ Deno.test("runner: a scripted run delivers its datagrams and writes every output
       assert((await Deno.stat(path)).size > 0, path);
     }
     const doc = JSON.parse(await Deno.readTextFile(loaded.outputs.metrics));
-    assertEquals(doc.schema, 1);
+    assertEquals(doc.schema, 2);
     assertEquals(doc.latency, "modelled");
     assertEquals(doc.passed, true);
     assert(renderReport(result).includes("RESULT: PASS"));

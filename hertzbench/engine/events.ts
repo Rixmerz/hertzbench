@@ -88,9 +88,17 @@ export type NewEvent = EngineEvent extends infer E ? E extends EngineEvent ? Omi
 
 export class EventLog {
   readonly #events: EngineEvent[] = [];
+  #lastT = -Infinity;
 
+  /**
+   * Times never step backwards: with a paced clock an event logged from a
+   * timer carries its due time, which can be earlier than an I/O event logged
+   * just before it; such an event is stamped with the later time.
+   */
   append(event: NewEvent): void {
-    this.#events.push({ ...event, seq: this.#events.length } as EngineEvent);
+    const t = Math.max(event.t, this.#lastT);
+    this.#lastT = t;
+    this.#events.push({ ...event, t, seq: this.#events.length } as EngineEvent);
   }
 
   get events(): readonly EngineEvent[] {

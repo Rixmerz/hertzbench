@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "exports": "./cli/main.ts",
   "tasks": {
-    "check": "deno check engine/mod.ts adapters/qemu-wifi-l2/mod.ts orchestrator/mod.ts cli/main.ts tests/",
+    "check": "deno check engine/mod.ts adapters/qemu-wifi-l2/mod.ts adapters/spi-link/mod.ts adapters/lora-sx127x/mod.ts adapters/nrf24/mod.ts orchestrator/mod.ts cli/main.ts tests/",
     "test": "deno test --allow-net=127.0.0.1 --allow-read --allow-write --allow-run --allow-env tests/",
     "hertzbench": "deno run --allow-net=127.0.0.1 --allow-read --allow-write --allow-run --allow-env cli/main.ts",
     "install-cli": "deno install --global --force --name hertzbench --allow-net=127.0.0.1 --allow-read --allow-write --allow-run --allow-env --config deno.json cli/main.ts && deno install --global --force --name hzb --allow-net=127.0.0.1 --allow-read --allow-write --allow-run --allow-env --config deno.json cli/main.ts"

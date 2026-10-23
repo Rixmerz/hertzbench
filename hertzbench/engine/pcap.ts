@@ -20,6 +20,7 @@ export class PcapWriter {
   readonly #epochMs: number;
   readonly #chunks: Uint8Array[] = [];
   #packets = 0;
+  #lastMs = -Infinity;
 
   /** `epochMs` is the Unix time of engine time 0, so the capture has real-looking timestamps. */
   constructor(epochMs: number, linkType = LINKTYPE_ETHERNET) {
@@ -40,6 +41,9 @@ export class PcapWriter {
   }
 
   addFrame(tMs: number, frame: Uint8Array): void {
+    // Records stay in time order for the same reason the event log does (EventLog.append).
+    tMs = Math.max(tMs, this.#lastMs);
+    this.#lastMs = tMs;
     const totalUs = Math.round((this.#epochMs + tMs) * 1000);
     const captured = Math.min(frame.length, SNAPLEN);
     const header = new DataView(new ArrayBuffer(RECORD_HEADER_BYTES));

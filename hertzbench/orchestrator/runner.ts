@@ -5,16 +5,20 @@
 
 import { QemuWifiL2Adapter } from "../adapters/qemu-wifi-l2/mod.ts";
 import {
+  type Clock,
   computeMetrics,
   type EngineEvent,
   EventLog,
   Medium,
+  type MediumControl,
   type MetricsReport,
+  PacedClock,
   PcapWriter,
   type Position,
   VirtualGateway,
   WallClock,
 } from "../engine/mod.ts";
+import { createAirNetwork, declaredMismatches, type NetworkSetup } from "./air-network.ts";
 import { type AssertionResult, evaluateAssertions } from "./assertions.ts";
 import {
   BoardError,
@@ -24,6 +28,7 @@ import {
 } from "./boards/board.ts";
 import { esp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
+import { describeRadio } from "./radios.ts";
 import { metricsDocument } from "./report.ts";
 import {
   type BoardKind,
@@ -63,7 +68,10 @@ export interface NodeReport {
   ip: string;
   mac: string;
   position: Position;
-  channel: number;
+  /** Wi-Fi or nRF24 channel; null for LoRa, which `radio` describes by frequency. */
+  channel: number | null;
+  /** The declared radio in one line, e.g. "lora 868.1 MHz SF7 BW125 CR4/5". */
+  radio: string;
   onMedium: boolean;
   clock: string;
   fidelity: string;
@@ -107,29 +115,15 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   const progress = options.progress ?? (() => {});
   await Deno.mkdir(options.outDir, { recursive: true });
 
-  const clock = new WallClock();
+  // Chip radios have sub-millisecond protocol timing (an nRF24 ACK 130 us after
+  // its packet) that plain timers cannot keep in order; Wi-Fi does not.
+  const clock = scenario.phy === "wifi" ? new WallClock() : new PacedClock();
   const log = new EventLog();
-  const pcap = new PcapWriter(Date.now());
   const problems: string[] = [];
   const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
   const mediumIds = onMedium.map((n) => n.id);
-
   const gatewayIp = `${scenario.subnetPrefix}.${GATEWAY_HOST}`;
-  const gateway = new VirtualGateway({
-    mac: GATEWAY_MAC,
-    ip: gatewayIp,
-    subnetMask: "255.255.255.0",
-    leases: new Map(onMedium.map((n) => [n.mac, n.ip])),
-  });
-  const medium = new Medium({
-    seed: scenario.seed,
-    environment: scenario.environment,
-    clock,
-    log,
-    gateway,
-    retryLimit: scenario.retryLimit,
-    tap: (tMs, _node, frame) => pcap.addFrame(tMs, frame),
-  });
+
   const interrupted = new Promise<never>((_, reject) => {
     const stop = () => reject(new RunInterrupted("run interrupted"));
     if (options.signal?.aborted) stop();
@@ -150,23 +144,25 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     problems.push(message);
     if (!startupOver) failStartup(new BoardError(startupMessage(problems)));
   };
-  const adapter = new QemuWifiL2Adapter(
-    (id, frame) => medium.transmit(id, frame),
-    (id, message) => reportProblem(`${id}: ${message}`),
-  );
+  const networkContext = {
+    clock,
+    log,
+    epochMs: Date.now(),
+    onProblem: (id: string, message: string) => reportProblem(`${id}: ${message}`),
+  };
+  const network = scenario.phy === "wifi"
+    ? wifiNetwork(scenario, gatewayIp, networkContext)
+    : createAirNetwork(scenario, networkContext);
+  const { medium, ports } = network;
 
-  const ports = new Map<string, number>();
-  for (const node of onMedium) {
-    const attachment = adapter.listen(node.id);
-    ports.set(node.id, attachment.port);
-    medium.addNode(
-      { id: node.id, mac: node.mac, position: node.position, radio: node.radio },
-      attachment.sink,
-    );
-  }
-
+  const indexOf = (id: string) => scenario.nodes.findIndex((n) => n.id === id) + 1;
   const peersOf = (id: string): PeerInfo[] =>
-    onMedium.filter((n) => n.id !== id).map((n) => ({ id: n.id, ip: n.ip, mac: n.mac }));
+    onMedium.filter((n) => n.id !== id).map((n) => ({
+      id: n.id,
+      index: indexOf(n.id),
+      ip: n.ip,
+      mac: n.mac,
+    }));
   const running: RunningBoard[] = [];
   const clocks = new Map<string, string>();
   const stopAll = async () => {
@@ -191,6 +187,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       try {
         board = await launchers[node.board].start({
           node,
+          nodeIndex: indexOf(node.id),
           netPort: ports.get(node.id) ?? null,
           peers: peersOf(node.id),
           gateway: { ip: gatewayIp, mac: GATEWAY_MAC, subnetMask: "255.255.255.0" },
@@ -214,7 +211,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     const startupTimeout = options.startupTimeoutMs ?? 30_000;
     try {
       await Promise.race([
-        Promise.all(mediumIds.map((id) => adapter.waitConnected(id, startupTimeout))),
+        Promise.all(mediumIds.map((id) => network.waitConnected(id, startupTimeout))),
         interrupted,
         startupFailed,
       ]);
@@ -246,13 +243,14 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     startupOver = true;
     await startAll;
     await stopAll();
-    await adapter.close();
+    await network.close();
     medium.close();
     clock.cancelAll();
   }
 
   const events = log.events.map((event) => ({ ...event, t: event.t - zeroMs }));
   const metrics = computeMetrics(events, scenario.durationMs);
+  metrics.warnings.push(...network.warnings, ...declaredMismatches(scenario, events));
   const assertions = evaluateAssertions(scenario.assertions, events, metrics.phases);
   const nodes = scenario.nodes.map((node): NodeReport => ({
     id: node.id,
@@ -260,7 +258,8 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     ip: node.ip,
     mac: node.mac,
     position: node.internetGateway ? node.position : medium.node(node.id).position,
-    channel: node.radio.channel,
+    channel: node.radio.phy === "lora" ? null : node.radio.channel,
+    radio: describeRadio(node.radio),
     onMedium: !node.internetGateway,
     clock: clocks.get(node.id) ?? "not started",
     fidelity: launchers[node.board].fidelity,
@@ -275,8 +274,57 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     passed: problems.length === 0 && assertions.every((a) => a.passed),
     files: [],
   };
-  result.files = await writeOutputs(result, options, pcap);
+  result.files = await writeOutputs(result, options, network.pcap);
   return result;
+}
+
+/** Phase 1's network: the Wi-Fi medium with its virtual gateway, reached over qemu-wifi-l2. */
+function wifiNetwork(
+  scenario: Scenario,
+  gatewayIp: string,
+  ctx: {
+    clock: Clock;
+    log: EventLog;
+    epochMs: number;
+    onProblem(nodeId: string, message: string): void;
+  },
+): NetworkSetup {
+  const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
+  const pcap = new PcapWriter(ctx.epochMs);
+  const gateway = new VirtualGateway({
+    mac: GATEWAY_MAC,
+    ip: gatewayIp,
+    subnetMask: "255.255.255.0",
+    leases: new Map(onMedium.map((n) => [n.mac, n.ip])),
+  });
+  const medium = new Medium({
+    seed: scenario.seed,
+    environment: scenario.environment,
+    clock: ctx.clock,
+    log: ctx.log,
+    gateway,
+    retryLimit: scenario.retryLimit,
+    tap: (tMs, _node, frame) => pcap.addFrame(tMs, frame),
+  });
+  const adapter = new QemuWifiL2Adapter((id, frame) => medium.transmit(id, frame), ctx.onProblem);
+  const ports = new Map<string, number>();
+  for (const node of onMedium) {
+    if (node.radio.phy !== "wifi") throw new Error(`${node.id}: not a Wi-Fi node`);
+    const attachment = adapter.listen(node.id);
+    ports.set(node.id, attachment.port);
+    medium.addNode(
+      { id: node.id, mac: node.mac, position: node.position, radio: node.radio },
+      attachment.sink,
+    );
+  }
+  return {
+    medium,
+    ports,
+    waitConnected: (id, timeoutMs) => adapter.waitConnected(id, timeoutMs),
+    close: () => adapter.close(),
+    pcap,
+    warnings: [],
+  };
 }
 
 /** What went wrong before the run began, for the person who has to fix it. */
@@ -285,7 +333,11 @@ function startupMessage(problems: readonly string[], cause?: string): string {
   return `${lines.join("\n")}\n  (worker logs are in the output directory)`;
 }
 
-function applyLinkRule(medium: Medium, rule: LinkRule, mediumIds: readonly string[]): void {
+function applyLinkRule(
+  medium: MediumControl,
+  rule: LinkRule,
+  mediumIds: readonly string[],
+): void {
   for (const [from, to] of expandLinkRule(rule, mediumIds)) {
     medium.setLinkOverride(from, to, {
       extraLossPct: rule.extraLossPct,

@@ -16,6 +16,7 @@ import {
 } from "../../engine/mod.ts";
 import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2/mod.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
+import { startScriptedRadioBoard } from "./scripted-radio.ts";
 
 const DHCP_RETRY_MS = 1000;
 const DHCP_MAX_TRIES = 10;
@@ -189,6 +190,7 @@ export const scriptedLauncher: BoardLauncher = {
     if (ctx.netPort === null) {
       throw new BoardError(`${ctx.node.id}: a scripted board needs a medium port`);
     }
+    if (ctx.node.radio.phy !== "wifi") return await startScriptedRadioBoard(ctx, ctx.netPort);
     const conn = await Deno.connect({ hostname: LOOPBACK, port: ctx.netPort });
     conn.setNoDelay(true);
     return new ScriptedBoard(ctx, conn);
