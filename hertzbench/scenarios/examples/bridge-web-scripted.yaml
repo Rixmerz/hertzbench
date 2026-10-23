@@ -36,7 +36,7 @@ nodes:
 bridge:
   id: phone
   position: [3, 0]
-  listen: 127.0.0.1           # 0.0.0.0 to reach it from the LAN; mDNS then turns on
+  listen: 127.0.0.1 # 0.0.0.0 to reach it from the LAN; mDNS then turns on
   expose:
     - { node: web, port: 80, service: http, listen_port: 8080 }
     - { node: web, port: 1883, service: mqtt, listen_port: 1883 }
