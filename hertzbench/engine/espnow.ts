@@ -127,3 +127,52 @@ export function parseEspNowBody(body: Uint8Array): Uint8Array | null {
   if (length < 0 || e + ELEMENT_FIXED_BYTES + length > body.length) return null;
   return body.subarray(e + ELEMENT_FIXED_BYTES, e + ELEMENT_FIXED_BYTES + length);
 }
+
+// ── the same frames as 802.11, for Wireshark ────────────────────────────────
+
+/** Radiotap header with one field, the channel: version, pad, length, present, then freq and flags. */
+const RADIOTAP_BYTES = 12;
+const RADIOTAP_PRESENT_CHANNEL = 1 << 3;
+const RADIOTAP_CHANNEL_2GHZ = 0x0080;
+const DOT11_HEADER_BYTES = 24;
+const DOT11_ACK_BYTES = 10;
+
+/**
+ * An ESP-NOW pseudo-Ethernet frame as the 802.11 frame it stands for, behind a
+ * radiotap header (pcap link type 127). The action frame's BSSID is the
+ * broadcast address and its sequence number is 0: the fork does not carry
+ * either. Whether the guest's frame body ends in an FCS is not known (the fork
+ * passes the DMA length through), so the radiotap header does not claim one.
+ */
+export function espnowToRadiotap(frame: Uint8Array): Uint8Array | null {
+  const espnow = parseEspNow(frame);
+  if (!espnow) return null;
+  const dot11Bytes = espnow.type === "action"
+    ? DOT11_HEADER_BYTES + espnow.body.length
+    : DOT11_ACK_BYTES;
+  const out = new Uint8Array(RADIOTAP_BYTES + dot11Bytes);
+  const view = new DataView(out.buffer);
+  view.setUint16(2, RADIOTAP_BYTES, true);
+  view.setUint32(4, RADIOTAP_PRESENT_CHANNEL, true);
+  const mhz = espnow.channel === 14
+    ? 2484
+    : espnow.channel >= 1 && espnow.channel <= 13
+    ? 2407 + 5 * espnow.channel
+    : 0;
+  view.setUint16(8, mhz, true);
+  view.setUint16(10, RADIOTAP_CHANNEL_2GHZ, true);
+
+  const d = RADIOTAP_BYTES;
+  if (espnow.type === "ack") {
+    out[d] = 0xd4; // control frame, subtype ACK
+    out.set(macToBytes(espnow.dst), d + 4);
+    return out;
+  }
+  out[d] = 0xd0; // management frame, subtype action
+  out[d + 1] = espnow.protected ? 0x40 : 0;
+  out.set(macToBytes(espnow.dst), d + 4);
+  out.set(macToBytes(espnow.src), d + 10);
+  out.fill(0xff, d + 16, d + 22);
+  out.set(espnow.body, d + DOT11_HEADER_BYTES);
+  return out;
+}

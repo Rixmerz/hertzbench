@@ -7,8 +7,10 @@ import { QemuWifiL2Adapter } from "../adapters/qemu-wifi-l2/mod.ts";
 import {
   computeMetrics,
   type EngineEvent,
+  espnowToRadiotap,
   EventLog,
   type LinkBudget,
+  LINKTYPE_IEEE802_11_RADIOTAP,
   Medium,
   type MetricsReport,
   PcapWriter,
@@ -136,7 +138,9 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
 
   const clock = new WallClock();
   const log = new EventLog();
-  const pcap = new PcapWriter(Date.now());
+  const epochMs = Date.now();
+  const pcap = new PcapWriter(epochMs);
+  const pcap80211 = new PcapWriter(epochMs, LINKTYPE_IEEE802_11_RADIOTAP);
   const problems: string[] = [];
   const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
   const mediumIds = onMedium.map((n) => n.id);
@@ -155,7 +159,11 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     log,
     gateway,
     retryLimit: scenario.retryLimit,
-    tap: (tMs, _node, frame) => pcap.addFrame(tMs, frame),
+    tap: (tMs, _node, frame) => {
+      pcap.addFrame(tMs, frame);
+      const dot11 = espnowToRadiotap(frame);
+      if (dot11) pcap80211.addFrame(tMs, dot11);
+    },
   });
   const interrupted = new Promise<never>((_, reject) => {
     const stop = () => reject(new RunInterrupted("run interrupted"));
@@ -333,7 +341,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     passed: problems.length === 0 && assertions.every((a) => a.passed),
     files: [],
   };
-  result.files = await writeOutputs(result, options, pcap);
+  result.files = await writeOutputs(result, options, pcap, pcap80211);
   return result;
 }
 
@@ -358,10 +366,16 @@ function applyLinkRule(
   return pairs;
 }
 
+/** Where the 802.11 view of the ESP-NOW frames goes: next to the pcap, `air.pcap` -> `air-80211.pcap`. */
+export function dot11CapturePath(pcapPath: string): string {
+  return pcapPath.endsWith(".pcap") ? `${pcapPath.slice(0, -5)}-80211.pcap` : `${pcapPath}-80211`;
+}
+
 async function writeOutputs(
   result: RunResult,
   options: RunOptions,
   pcap: PcapWriter,
+  pcap80211: PcapWriter,
 ): Promise<string[]> {
   const files: string[] = [];
   const write = async (path: string, data: string | Uint8Array) => {
@@ -372,6 +386,9 @@ async function writeOutputs(
   };
   await write(options.outputs.metrics, JSON.stringify(metricsDocument(result), null, 2) + "\n");
   await write(options.outputs.pcap, pcap.toBytes());
+  if (pcap80211.packetCount > 0) {
+    await write(dot11CapturePath(options.outputs.pcap), pcap80211.toBytes());
+  }
   await write(
     options.outputs.events,
     result.events.map((e) => JSON.stringify(e)).join("\n") + (result.events.length ? "\n" : ""),

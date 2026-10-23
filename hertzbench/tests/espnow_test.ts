@@ -10,6 +10,7 @@ import {
   type EngineEvent,
   environmentFromPreset,
   ESPNOW_ACK_TIMEOUT_MS,
+  espnowToRadiotap,
   type FrameSink,
   macToBytes,
   ManualClock,
@@ -19,7 +20,12 @@ import {
 } from "../engine/mod.ts";
 import { EventLog, Medium } from "../engine/mod.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "../orchestrator/boards/espnow-fork-model.ts";
-import { loadScenario, type RunResult, runScenario } from "../orchestrator/mod.ts";
+import {
+  dot11CapturePath,
+  loadScenario,
+  type RunResult,
+  runScenario,
+} from "../orchestrator/mod.ts";
 import { macFor } from "./helpers.ts";
 
 const A = macFor(1);
@@ -67,6 +73,64 @@ Deno.test("espnow: built frames are the fork's bytes, and the body round-trips i
     Array.from(buildEspNowAck({ dst: A, src: B, channel: 5 })),
     Array.from(forkBytes(A, B, 0xa5, 0x1d)),
   );
+});
+
+Deno.test("espnow: the 802.11 view of an action frame and its ACK, behind radiotap", () => {
+  const action = espnowToRadiotap(forkBytes(B, A, 0xb6, 0x0d, [127, 9, 9]))!;
+  assertEquals(Array.from(action), [
+    // radiotap: version 0, pad, length 12, present = channel; 2437 MHz, 2 GHz
+    0,
+    0,
+    12,
+    0,
+    0x08,
+    0,
+    0,
+    0,
+    0x85,
+    0x09,
+    0x80,
+    0x00,
+    // 802.11: action, protected; duration 0; dst; src; BSSID broadcast; sequence 0
+    0xd0,
+    0x40,
+    0,
+    0,
+    ...macToBytes(B),
+    ...macToBytes(A),
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0,
+    0,
+    127,
+    9,
+    9,
+  ]);
+  const ack = espnowToRadiotap(forkBytes(A, B, 0xa1, 0x1d))!;
+  assertEquals(Array.from(ack), [
+    0,
+    0,
+    12,
+    0,
+    0x08,
+    0,
+    0,
+    0,
+    0x6c,
+    0x09,
+    0x80,
+    0x00, // 2412 MHz
+    0xd4,
+    0,
+    0,
+    0,
+    ...macToBytes(A),
+  ]);
+  assertEquals(espnowToRadiotap(new Uint8Array(60)), null);
 });
 
 // ── the fork model ───────────────────────────────────────────────────────────
@@ -316,12 +380,19 @@ Deno.test("espnow: the channel is the one the guest wrote into byte 12", () => {
 
 // ── scripted ESP-NOW boards through the adapter, on the wall clock ───────────
 
-async function runYaml(yaml: string) {
+/** Run a scenario; returns its result and the 802.11 capture, read before the files go. */
+async function runYaml(yaml: string): Promise<{ result: RunResult; dot11: Uint8Array | null }> {
   const dir = await Deno.makeTempDir({ prefix: "hzb-espnow-" });
   try {
     await Deno.writeTextFile(`${dir}/s.yaml`, yaml);
     const loaded = await loadScenario(`${dir}/s.yaml`, `${dir}/out`);
-    return await runScenario(loaded.scenario, { outDir: loaded.outDir, outputs: loaded.outputs });
+    const result = await runScenario(loaded.scenario, {
+      outDir: loaded.outDir,
+      outputs: loaded.outputs,
+    });
+    const dot11Path = dot11CapturePath(loaded.outputs.pcap);
+    const dot11 = result.files.includes(dot11Path) ? await Deno.readFile(dot11Path) : null;
+    return { result, dot11 };
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -351,7 +422,7 @@ ${assertions}`;
 }
 
 Deno.test("runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics count both", async () => {
-  const result = await runYaml(espnowPair(
+  const { result, dot11 } = await runYaml(espnowPair(
     0,
     `assertions:
   - serial: { node: b, contains: "espnow rx hello:0 from a" }
@@ -370,10 +441,23 @@ Deno.test("runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard,
   assertEquals(serial(result, "b").filter((t) => t.startsWith("espnow rx hello")).length, 20);
   assertEquals(serial(result, "b").filter((t) => t === "espnow tx ok to broadcast").length, 5);
   assert(!result.events.some((e) => e.type === "tx" && e.node === "a" && e.kind === "espnow-ack"));
+
+  // Every ESP-NOW frame and ACK on the air is in the 802.11 capture, as radiotap.
+  assert(dot11, "an ESP-NOW run writes the 802.11 capture");
+  const view = new DataView(dot11.buffer);
+  assertEquals(view.getUint32(20, true), 127);
+  let records = 0;
+  for (let offset = 24; offset < dot11.length; records++) {
+    offset += 16 + view.getUint32(offset + 8, true);
+  }
+  const onAir = result.events.filter((e) =>
+    e.type === "tx" && (e.kind === "espnow" || e.kind === "espnow-ack")
+  );
+  assertEquals(records, onAir.length);
 });
 
 Deno.test("runner: 15 ms more on the a->b leg fails every ESP-NOW send at the sender, and says why", async () => {
-  const result = await runYaml(espnowPair(15));
+  const { result } = await runYaml(espnowPair(15));
   const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
   assertEquals(link.espnow!.sends, 20);
   assertEquals(link.espnow!.outcomes, { ack_timeout: 20 });
