@@ -370,3 +370,63 @@ Deno.test("mcp drive: on a LoRa run only the antenna gain is the medium's to cha
     await client.ok("stop");
   });
 });
+
+Deno.test("mcp drive: open_view serves the agent's run once; get_view_state draws a LoRa run's links", async () => {
+  await withServer(async (client) => {
+    const opened = await client.ok("open_view", {});
+    assertEquals(opened.already_open, false);
+    const again = await client.ok("open_view", { port: 1 });
+    assertEquals(again, { url: opened.url, already_open: true });
+
+    await client.ok("run_scenario", { path: `${EXAMPLES}lora-gateway-6-scripted.yaml` });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    const state = await client.ok("get_view_state", {});
+    assertEquals(state.scene.phy, "lora");
+    assertEquals(state.scene.links.length, 42);
+    const gw = state.scene.links.find((l: Json) => l.from === "node-1" && l.to === "gw");
+    assertEquals([gw.signal, gw.required_snr_db], ["good", -7.5]);
+    const page = await fetch(new URL("/api/view", opened.url));
+    const served = await page.json();
+    assertEquals(served.scene.links.length, 42, "the page and the tool show the same links");
+    assertEquals(served.status.run_id, state.status.run_id);
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: get_report gives the CLI's report once the run has finished", async () => {
+  await withServer(async (client) => {
+    await client.ok("create_scenario", { path: "pair.yaml", yaml: PAIR });
+    await client.ok("run_scenario", { path: "pair.yaml" });
+    assertStringIncludes(await client.refused("get_report"), "when a run finishes");
+    await pollStatus(client, (s) => s.state === "finished", "the run to finish");
+    const { report } = await client.ok("get_report");
+    assertStringIncludes(report, "pair  (seed 5, 2000 ms)");
+    assertStringIncludes(report, "RESULT: PASS");
+  });
+});
+
+// No tool may run a host command, directly or by proxy: no argument names a
+// program, an interpreter, a library or the environment it runs in.
+const HOST_EXEC_KEYS =
+  /^(command|cmd|commands|shell|exec|execute|argv|args|env|environment_variables|interpreter|python|program|binary|executable|library|lib|lib_path|script|cwd)$/i;
+
+Deno.test("mcp drive: no tool takes a command, a program or an environment to run", async () => {
+  await withServer(async (client) => {
+    const listed = (await client.request("tools/list")).result!.tools as Json[];
+    assert(listed.length >= 20, `${listed.length} tools`);
+    const keys = (schema: Json, path: string): string[] => {
+      if (typeof schema !== "object" || schema === null) return [];
+      return Object.entries(schema.properties ?? {}).flatMap(([key, sub]) => [
+        `${path}.${key}`,
+        ...keys(sub, `${path}.${key}`),
+        ...keys((sub as Json).items, `${path}.${key}[]`),
+      ]);
+    };
+    for (const tool of listed) {
+      assert(!/exec|shell|command|spawn/i.test(tool.name), tool.name);
+      for (const key of keys(tool.inputSchema, tool.name)) {
+        assert(!HOST_EXEC_KEYS.test(key.split(".").pop()!.replace("[]", "")), key);
+      }
+    }
+  });
+});

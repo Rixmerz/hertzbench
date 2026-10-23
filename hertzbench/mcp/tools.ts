@@ -9,7 +9,9 @@ import { BoardError } from "../orchestrator/boards/board.ts";
 import { ESP32_FIDELITY, resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { scriptedLauncher } from "../orchestrator/boards/scripted.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
+import { renderReport } from "../orchestrator/report.ts";
 import { CAPTURE_KINDS, type CaptureKind } from "../orchestrator/runner.ts";
+import { viewState } from "../view/scene.ts";
 import { EVENT_TYPES } from "../engine/mod.ts";
 import {
   BOARD_NAMES,
@@ -184,7 +186,10 @@ function optionalObject(args: Args, key: string): Record<string, unknown> | unde
 
 const EDIT_NOTE = "the file was rewritten from its data: comments and the original layout are gone";
 
-export function tools(session: Session): ToolDefinition[] {
+/** Starts the view of the session on a loopback port, or returns the one already serving it. */
+export type ViewOpener = (port: number) => { url: string; already_open: boolean };
+
+export function tools(session: Session, openView?: ViewOpener): ToolDefinition[] {
   /** Apply `edit` to the scenario file at `path`, inside the workspace, after checking the result. */
   const editFile = async (path: string, edit: ScenarioEdit) => {
     if (!/\.ya?ml$/.test(path)) throw new ToolError("path must end in .yaml or .yml");
@@ -780,6 +785,75 @@ export function tools(session: Session): ToolDefinition[] {
             optionalText(args, "path"),
           );
         }),
+    },
+    {
+      name: "get_report",
+      description:
+        "The text report `hertzbench run` prints for a finished run: every node with its board, radio, clock and fidelity, the per-link table, the assertions with their verdicts, warnings and the files written.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      call: (args) => {
+        known(args, []);
+        const run = session.run;
+        if (!run) throw new ToolError("no run yet: call run_scenario first");
+        if (!run.result) {
+          throw new ToolError(
+            `the report is made when a run finishes; this one is ${run.state}. ` +
+              "get_metrics has the numbers so far",
+          );
+        }
+        return Promise.resolve({ state: run.state, report: renderReport(run.result) });
+      },
+    },
+    {
+      name: "open_view",
+      description:
+        "Serve the visual layer of this server's runs on a loopback port and return its URL for a person to open: a map of the nodes, links colored by signal or loss, the link table and a packet timeline; dragging a node there calls move_node. Nothing is launched: the URL is only returned. One view per server; a second call returns the same URL.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          port: {
+            type: "integer",
+            minimum: 0,
+            maximum: 65535,
+            description: "Loopback port. Default 0: a free one",
+          },
+        },
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["port"]);
+        if (!openView) throw new ToolError("this server has no view to open");
+        const port = optionalInt(args, "port", 0, 65535) ?? 0;
+        try {
+          return Promise.resolve(openView(port));
+        } catch (error) {
+          if (error instanceof Deno.errors.AddrInUse) {
+            throw new ToolError(`port ${port} is in use; pass another, or 0 for a free one`);
+          }
+          throw error;
+        }
+      },
+    },
+    {
+      name: "get_view_state",
+      description:
+        "What the view draws now, as data: the status, every directed link with its distance, RSSI, SNR, rate, signal quality (Wi-Fi by the rate the SNR allows; LoRa, nRF24 and BLE by the share of frames their PHY loses at that SNR), loss over the last 2 s and any forced chaos, the walls, and the packet timeline after `since` (pass back next_since).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          since: {
+            type: "integer",
+            minimum: -1,
+            description: "Timeline entries after this sequence number. Default -1: all",
+          },
+        },
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["since"]);
+        const since = optionalInt(args, "since", -1, Number.MAX_SAFE_INTEGER) ?? -1;
+        return Promise.resolve(viewState(session, since));
+      },
     },
     {
       name: "stop",

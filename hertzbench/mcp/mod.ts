@@ -4,26 +4,29 @@
 
 import denoConfig from "../deno.json" with { type: "json" };
 import { PRODUCT } from "../brand.ts";
-import { serveView } from "../view/server.ts";
+import { serveView, type ViewServer } from "../view/server.ts";
 import { McpServer, serveLines } from "./protocol.ts";
 import { Session, type SessionOptions } from "./session.ts";
-import { resources, tools } from "./tools.ts";
+import { resources, tools, type ViewOpener } from "./tools.ts";
 
 export { McpServer, serveLines, ToolError } from "./protocol.ts";
 export { Session } from "./session.ts";
-export { resources, tools } from "./tools.ts";
+export { resources, tools, type ViewOpener } from "./tools.ts";
 
-const INSTRUCTIONS =
-  `${PRODUCT.displayName} simulates the radio network between emulated boards. ` +
-  "Typical loop: list_boards, read an example resource, create_scenario, validate_scenario, " +
-  "run_scenario, poll get_status until running, then move_node / inject_fault and read " +
-  "get_metrics and get_serial; the run ends by itself at its duration, or call stop. " +
-  "Boards marked fidelity none (scripted) are traffic generators, not firmware.";
+const INSTRUCTIONS = `${PRODUCT.displayName} simulates the radio network between emulated boards ` +
+  "(Wi-Fi/IP, ESP-NOW, LoRa, nRF24, BLE). Typical loop: list_boards, read an example resource, " +
+  "create_scenario (or read_scenario and edit_scenario, add_node, remove_node), " +
+  "validate_scenario, run_scenario, poll get_status until running. While it runs: move_node, " +
+  "inject_fault (loss, latency, jitter, interference), set_channel, set_radio, start_phase, " +
+  "send_serial; read get_serial, get_metrics, get_events, get_view_state and export_capture. " +
+  "The run ends by itself at its duration (then get_report), or call stop. open_view gives a " +
+  "person a live map. Boards marked fidelity none (scripted) are traffic generators, not " +
+  "firmware. No tool runs host commands.";
 
-export function createServer(session: Session): McpServer {
+export function createServer(session: Session, openView?: ViewOpener): McpServer {
   return new McpServer({
     info: { name: PRODUCT.slug, version: denoConfig.version, instructions: INSTRUCTIONS },
-    tools: tools(session),
+    tools: tools(session, openView),
     resources,
   });
 }
@@ -38,10 +41,17 @@ export async function runMcpServer(
 ): Promise<void> {
   const log = (line: string) => console.error(`[${PRODUCT.slug}] ${line}`);
   const session = new Session({ ...options, progress: options.progress ?? log });
-  const view = options.viewPort === undefined
+  // At most one view per server: from --view-port, or the first open_view.
+  let view: ViewServer | null = options.viewPort === undefined
     ? null
     : serveView(session, { port: options.viewPort });
   if (view) log(`view: ${view.url}`);
+  const openView: ViewOpener = (port) => {
+    if (view) return { url: view.url, already_open: true };
+    view = serveView(session, { port });
+    log(`view: ${view.url}`);
+    return { url: view.url, already_open: false };
+  };
   // A signal ends the server the way end of input does, so the run in progress
   // is stopped below and no board is left running.
   const shutdown = new AbortController();
@@ -50,7 +60,7 @@ export async function runMcpServer(
   for (const signal of signals) Deno.addSignalListener(signal, onSignal);
   try {
     await serveLines(
-      createServer(session),
+      createServer(session, openView),
       Deno.stdin.readable,
       Deno.stdout.writable,
       shutdown.signal,
