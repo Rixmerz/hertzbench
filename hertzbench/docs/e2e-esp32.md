@@ -68,9 +68,28 @@ Open `air.pcap` in Wireshark. It has Ethernet frames: DHCP, ARP and the UDP data
 - `metric ... no frames crossed a matching link`: nothing was sent between those nodes. Check the sketch's peer addresses against the report's `ip` column.
 - `metric ... loss_pct` too high before the move: the link is already near the edge. Change `tx_power_dbm` or the positions, or lower the wall's `attenuation_db`. `hertzbench/tests/orchestrator_test.ts` checks the example's geometry against the engine with synthetic traffic, so a failure here with a clean engine check points at the traffic, not the model.
 
+## The ESP-NOW example
+
+`scenarios/examples/espnow-mesh-5-nodes.yaml` runs five ESP32 boards: a gateway (`fw/espnow-gateway`) and four sensors (`fw/espnow-sensor`) on Wi-Fi channel 1. Same needs as above; the sketches use the `esp_now_*` API of whichever arduino-esp32 core Velxio's compiler picks (2.x or 3.x; both callback signatures are guarded). **Never compiled or run**: the host this was written on has neither the toolchain nor libqemu.
+
+```bash
+cd hertzbench
+deno task hertzbench run scenarios/examples/espnow-mesh-5-nodes.yaml --out /tmp/hzb-espnow
+```
+
+60 s of engine time; at 30 s sensor-4 walks from 18 m to 44 m. Settle these in order, after steps 0 and 1 of "First run" above:
+
+1. **ADR 0001 gate: distinct MACs, one frame, one ACK.** Each `serial-<node>.log` starts with `espnow up mac=02:68:7a:62:01:0N channel=1`, N going from 1 (gw) to 5 (sensor-4). In `events.jsonl`, `"kind":"espnow"` frames from `02:68:7a:62:01:02` to `:01`, then `"kind":"espnow-ack"` frames back, and `"type":"espnow-send"` events with `"outcome":"acked"`. `serial-sensor-1.log` shows `espnow tx ok to gw`. If every source MAC is `10:01:00:c4:0a:24`, the eFuse image was not read. If the frames arrive and no ACK comes back, the shipped library differs from the public fork. Either way stop and record it in ADR 0001: the F3 fallback may be needed.
+2. **The frames are the fork's encoding.** No `"kind":"other"` frames of 14 bytes or more from the boards apart from ARP or DHCP. If ESP-NOW shows up as `other`, byte 12 or 13 differs from `0xA0|channel` and `0x0d`/`0x1d`; compare with `hw/misc/esp32_wifi_ap.c` in the shipped library.
+3. **The channel.** No `sends ESP-NOW on channel` warning in the report. If one appears, `esp_wifi_set_channel` did not take effect, or the fork maps the register write to another channel (`hw/misc/esp32_ana.c:41-45`); set the scenario's `channel` to what the warning says.
+4. **Which tx-done the driver reports.** Before the move, the sensors' `espnow tx ok` lines should match the report's `acked` counts. If every send reports at once, success or failure, the driver takes the fork's first tx-done interrupt (raised as the frame leaves) and not the ACK timer's ([fidelity.md](fidelity.md#esp-now)). Record it there.
+5. **The ACK window.** After the move, the ESP-NOW table shows sensor-4's `acked %` falling and `frame_lost` and `ack_timeout` rising, and `serial-sensor-4.log` shows `espnow tx fail to gw`. The firmware's own failures should roughly match `frame_lost + ack_timeout + no_ack`; near 10 ms of round trip they may differ by a few frames, because the engine judges on its own clock.
+
+Open `air-80211.pcap` in Wireshark: the action frames should decode as 802.11 action, category vendor specific, Espressif OUI `18:fe:34`. If every frame shows 4 extra bytes at the end, the guest's body carries an FCS; record it in [fidelity.md](fidelity.md#esp-now).
+
 ## Without libqemu
 
-`scenarios/examples/udp-3-scripted.yaml` is the same experiment with scripted boards. It needs only Deno, takes 6 s and exercises the adapter, engine, metrics, pcap and assertions, but it says nothing about firmware.
+`scenarios/examples/udp-3-scripted.yaml` and `espnow-mesh-scripted.yaml` are the same experiments with scripted boards. They need only Deno, take 6 s each and exercise the adapter, engine, metrics, pcaps and assertions, but they say nothing about firmware.
 
 ```bash
 cd hertzbench

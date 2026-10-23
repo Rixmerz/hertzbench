@@ -6,8 +6,8 @@ AGPLv3, based on [Velxio](https://github.com/davidmonterocrespo24/velxio) (which
 emulation).
 
 The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
-a channel model, run headless from a scenario file, and **Phase 2**, an MCP server so an AI agent
-can build, run and steer those scenarios.
+a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
+build, run and steer those scenarios, and **Phase 4**, ESP-NOW between the boards.
 
 ## Status
 
@@ -20,7 +20,8 @@ can build, run and steer those scenarios.
 | ESP32 boards under QEMU                                                                                | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first |
 | MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                |
 | `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                 |
-| ESP-NOW, LoRa, BLE, nRF24, mobile bridge, canvas                                                       | later phases                                                                                                                                                |
+| ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and through the CLI with scripted boards; **not run against QEMU**, see [ESP-NOW](#esp-now)      |
+| LoRa, BLE, nRF24, mobile bridge, canvas                                                                | later phases                                                                                                                                                |
 
 ## Quick start (no QEMU needed)
 
@@ -51,6 +52,29 @@ To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin d
 
 `hzb` is the short alias. Exit status: 0 passed, 1 an assertion failed, 2 invalid scenario or a host
 that cannot run it, 130 interrupted (boards are stopped first).
+
+## ESP-NOW
+
+```bash
+cd hertzbench
+deno task hertzbench run scenarios/examples/espnow-mesh-scripted.yaml --out /tmp/hzb-espnow
+```
+
+A gateway and four sensors on channel 1, scripted boards again. The sensors send readings to the
+gateway over unicast ESP-NOW and the gateway broadcasts a beacon. A wall stands between the gateway
+and the two farther sensors. At 3 s sensor-4 walks away: its frames need more retries, some run past
+the 10 ms the QEMU fork waits for an ACK, most are lost. The report has an ESP-NOW table with each
+link's sends as the sender's firmware sees them (`acked`, `frame_lost`, `ack_timeout`, `no_ack`) and
+the round trip of each ACK. `air-80211.pcap` holds the frames as 802.11 for Wireshark.
+
+With real firmware the boards run the production ESP-NOW stack. The fork's Wi-Fi MAC model turns
+their 802.11 action frames into pseudo-Ethernet on the same netdev as Wi-Fi/IP, and the engine
+carries them. `scenarios/examples/espnow-mesh-5-nodes.yaml` and its sketches in
+`scenarios/examples/fw/espnow-*` do it with five ESP32 boards; they need libqemu and the ESP-IDF
+toolchain, and have **not been run**: see
+[docs/e2e-esp32.md](docs/e2e-esp32.md#the-esp-now-example). What the engine models, the 10 ms ACK
+rule, and what is read from the fork's code rather than measured are in
+[docs/fidelity.md](docs/fidelity.md#esp-now).
 
 ## Use it from Claude Code (MCP)
 
@@ -87,9 +111,9 @@ board N (QEMU) ──┘   (loopback TCP)     switch + channel model   └──
 ## Layout
 
 ```
-engine/          RF engine: channel model, medium, switch, gateway, metrics, pcap
+engine/          RF engine: channel model, medium, switch, gateway, ESP-NOW framing, metrics, pcap
 adapters/        qemu-wifi-l2 (QEMU stream netdev <-> engine), eFuse image builder
-orchestrator/    scenario parser, runner, assertions, report, boards (esp32, scripted)
+orchestrator/    scenario parser, runner, assertions, report, boards (esp32, scripted, ESP-NOW fork model)
 mcp/             MCP server: JSON-RPC over stdio, tools, resources, the live run
 cli/             hertzbench run | validate | mcp
 scenarios/       examples/

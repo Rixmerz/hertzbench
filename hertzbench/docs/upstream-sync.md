@@ -17,7 +17,7 @@ git merge upstream/master   # or cherry-pick specific commits
 
 ## Patches
 
-Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`).
+Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`). Phase 4 (ESP-NOW) touches **none** either: it rides on patch 1, which already puts each board's NIC on the engine and gives it its own station MAC, and the QEMU fork is used as it is (ADR 0001). Its sketches go through Velxio's compiler unchanged.
 
 | # | File | Commit subject | Upstreamable |
 |---|---|---|---|
