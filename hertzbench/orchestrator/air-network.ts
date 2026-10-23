@@ -26,6 +26,7 @@ import {
   type BtsnoopWriter,
   isBleFrame,
 } from "../adapters/ble-hci/mod.ts";
+import type { RunningBridge } from "../bridge/mod.ts";
 import type { Scenario } from "./scenario.ts";
 
 export interface NetworkSetup {
@@ -41,6 +42,8 @@ export interface NetworkSetup {
   warnings: string[];
   /** BLE only: each node's HCI traffic, written as hci-<node>.btsnoop. */
   hciCaptures?: Map<string, BtsnoopWriter>;
+  /** The mobile bridge's station on this medium, when the scenario has one. */
+  bridge?: RunningBridge;
 }
 
 export interface AirNetworkContext {

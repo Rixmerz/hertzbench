@@ -5,6 +5,14 @@
 
 import { QemuWifiL2Adapter } from "../adapters/qemu-wifi-l2/mod.ts";
 import {
+  BRIDGE_FIDELITY,
+  bridgeLines,
+  type BridgeReport,
+  BridgeStartError,
+  type EndpointPublisher,
+  IpBridge,
+} from "../bridge/mod.ts";
+import {
   type Clock,
   computeMetrics,
   type EngineEvent,
@@ -18,6 +26,7 @@ import {
   PacedClock,
   PcapWriter,
   type Position,
+  substream,
   VirtualGateway,
   WallClock,
 } from "../engine/mod.ts";
@@ -31,10 +40,11 @@ import {
 } from "./boards/board.ts";
 import { createEsp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
-import { describeRadio } from "./radios.ts";
+import { describeRadio, type NodeRadio } from "./radios.ts";
 import { metricsDocument } from "./report.ts";
 import {
   type BoardKind,
+  type BridgeSpec,
   GATEWAY_HOST,
   GATEWAY_MAC,
   type LinkRule,
@@ -61,6 +71,13 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Called once, at time zero, with live control over the run (the MCP server's live tools). */
   onUnderway?: (run: LiveRun) => void;
+  /** Replace the parts of the mobile bridge that touch the host's network or radio (tests). */
+  bridge?: BridgeHooks;
+}
+
+export interface BridgeHooks {
+  /** Announces the IP bridge's endpoints; default: mDNS when the scenario asks for it. */
+  publisher?: (spec: Extract<BridgeSpec, { kind: "ip" }>) => EndpointPublisher | null;
 }
 
 /**
@@ -86,6 +103,8 @@ export interface LiveRun {
   /** Applies the rule now; returns the directed pairs it set. */
   setLink(rule: LinkRule): [string, string][];
   startPhase(label: string): void;
+  /** The mobile bridge, with its host endpoints once started; null when the scenario has none. */
+  bridge(): BridgeReport | null;
 }
 
 export class RunInterrupted extends Error {
@@ -94,7 +113,8 @@ export class RunInterrupted extends Error {
 
 export interface NodeReport {
   id: string;
-  board: BoardKind;
+  /** "bridge" for the mobile bridge's station, which is not a board. */
+  board: BoardKind | "bridge";
   ip: string;
   mac: string;
   position: Position;
@@ -117,6 +137,7 @@ export interface RunResult {
   /** Every assertion passed and no board or adapter problem was reported. */
   passed: boolean;
   files: string[];
+  bridge: BridgeReport | null;
 }
 
 export function expandLinkRule(rule: LinkRule, mediumIds: readonly string[]): [string, string][] {
@@ -150,7 +171,9 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   const log = new EventLog();
   const problems: string[] = [];
   const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
-  const mediumIds = onMedium.map((n) => n.id);
+  const boardIds = onMedium.map((n) => n.id);
+  // The bridge is a station like the boards: links, moves and metrics name it too.
+  const mediumIds = scenario.bridge ? [...boardIds, scenario.bridge.id] : boardIds;
   const gatewayIp = `${scenario.subnetPrefix}.${GATEWAY_HOST}`;
 
   const interrupted = new Promise<never>((_, reject) => {
@@ -180,7 +203,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     onProblem: (id: string, message: string) => reportProblem(`${id}: ${message}`),
   };
   const network = scenario.phy === "wifi"
-    ? wifiNetwork(scenario, gatewayIp, networkContext)
+    ? wifiNetwork(scenario, gatewayIp, { ...networkContext, hooks: options.bridge ?? {} })
     : createAirNetwork(scenario, networkContext);
   const { medium, ports } = network;
 
@@ -241,7 +264,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     const startupTimeout = options.startupTimeoutMs ?? 30_000;
     try {
       await Promise.race([
-        Promise.all(mediumIds.map((id) => network.waitConnected(id, startupTimeout))),
+        Promise.all(boardIds.map((id) => network.waitConnected(id, startupTimeout))),
         interrupted,
         startupFailed,
       ]);
@@ -253,6 +276,15 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     }
     startupOver = true;
     zeroMs = clock.now();
+    if (network.bridge) {
+      try {
+        await network.bridge.start();
+      } catch (error) {
+        if (error instanceof BridgeStartError) throw new BoardError(error.message);
+        throw error;
+      }
+      for (const line of bridgeLines(network.bridge.report())) progress(line);
+    }
     progress(`all boards connected; running for ${scenario.durationMs} ms`);
 
     for (const rule of scenario.links) applyLinkRule(medium, rule, mediumIds);
@@ -282,6 +314,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
           whileActive();
           medium.startPhase(label);
         },
+        bridge: () => network.bridge?.report() ?? null,
       };
       endLive = () => {
         live.active = false;
@@ -306,6 +339,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     startupOver = true;
     await startAll;
     await stopAll();
+    await network.bridge?.close();
     await network.close();
     medium.close();
     clock.cancelAll();
@@ -327,6 +361,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     clock: clocks.get(node.id) ?? "not started",
     fidelity: launchers[node.board].fidelity,
   }));
+  if (scenario.bridge) nodes.push(bridgeNode(scenario.bridge, medium.node(scenario.bridge.id)));
   const result: RunResult = {
     scenario,
     nodes,
@@ -336,6 +371,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     problems,
     passed: problems.length === 0 && assertions.every((a) => a.passed),
     files: [],
+    bridge: network.bridge?.report() ?? null,
   };
   result.files = await writeOutputs(result, options, network);
   return result;
@@ -350,6 +386,7 @@ function wifiNetwork(
     log: EventLog;
     epochMs: number;
     onProblem(nodeId: string, message: string): void;
+    hooks: BridgeHooks;
   },
 ): NetworkSetup {
   const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
@@ -385,14 +422,51 @@ function wifiNetwork(
       attachment.sink,
     );
   }
+  const spec = scenario.bridge;
+  let bridge: IpBridge | undefined;
+  if (spec?.kind === "ip") {
+    const publisher = ctx.hooks.publisher?.(spec) ?? null;
+    bridge = new IpBridge({
+      spec,
+      nodes: new Map(onMedium.map((n) => [n.id, { ip: n.ip, mac: n.mac }])),
+      clock: ctx.clock,
+      transmit: (frame) => medium.transmit(spec.id, frame),
+      log: (text) => ctx.log.append({ type: "serial", t: ctx.clock.now(), node: spec.id, text }),
+      rng: substream(scenario.seed, `bridge:${spec.id}`),
+      ...(publisher ? { publisher } : {}),
+    });
+    if (spec.radio.phy !== "wifi") throw new Error("the IP bridge needs a Wi-Fi radio");
+    medium.addNode(
+      { id: spec.id, mac: spec.mac, position: spec.position, radio: spec.radio },
+      bridge.sink,
+    );
+  }
   return {
     medium,
     ports,
+    ...(bridge ? { bridge } : {}),
     waitConnected: (id, timeoutMs) => adapter.waitConnected(id, timeoutMs),
     close: () => adapter.close(),
     pcap,
     dot11Pcap,
     warnings: [],
+  };
+}
+
+/** The bridge's station in the report's node table. */
+function bridgeNode(spec: BridgeSpec, onMedium: { position: Position }): NodeReport {
+  const radio: NodeRadio = spec.radio;
+  return {
+    id: spec.id,
+    board: "bridge",
+    ip: spec.kind === "ip" ? spec.ip : "",
+    mac: spec.mac,
+    position: onMedium.position,
+    channel: radio.phy === "wifi" ? radio.channel : null,
+    radio: radio.phy === "ble" ? `ble 1M ${radio.txPowerDbm} dBm` : describeRadio(radio),
+    onMedium: true,
+    clock: "wall clock (host proxy)",
+    fidelity: BRIDGE_FIDELITY[spec.kind],
   };
 }
 
