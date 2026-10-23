@@ -1,7 +1,7 @@
 // The real entrypoint: `hertzbench` as a separate process, the way a person or
 // CI runs it. Nothing here imports the orchestrator.
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 
 const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
 const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
@@ -360,6 +360,34 @@ Deno.test("exit 2: a worker that dies during start-up fails fast, lists why, and
     assert(!log.includes("wifi_l2_port must be"), log);
     assert(!log.includes("efuse_image must be"), log);
     assertEquals((await Deno.stat(`${dir}/out/efuse-a.bin`)).size, 512);
+  });
+});
+
+Deno.test("exit 2: a LoRa ESP32 board whose worker dies fails fast, and the worker accepted radio_spi", async () => {
+  await inTempDir(async (dir) => {
+    await Deno.writeFile(`${dir}/libqemu-xtensa.so`, new Uint8Array(0));
+    await Deno.writeFile(`${dir}/fw.bin`, new Uint8Array(16));
+    await Deno.writeTextFile(
+      `${dir}/lora.yaml`,
+      `name: dying-lora\nduration: 60s\nnodes:\n` +
+        `  - { id: a, board: esp32, firmware: ./fw.bin, position: [0, 0], radios: [{ phy: lora }] }\n` +
+        `  - { id: b, board: esp32, firmware: ./fw.bin, position: [5, 0], radios: [{ phy: lora }] }\n`,
+    );
+    const started = performance.now();
+    const run = await hertzbench(["run", `${dir}/lora.yaml`, "--out", `${dir}/out`], {
+      QEMU_ESP32_LIB: `${dir}/libqemu-xtensa.so`,
+    });
+    assert(performance.now() - started < 25_000, "must not wait for the 30 s connect timeout");
+    assertEquals(run.code, 2, run.stdout + run.stderr);
+    assertStringIncludes(run.stderr, "worker exited early");
+
+    // The cross-language contract: the worker read radio_spi from the
+    // launcher's config, found it valid, and got as far as loading libqemu.
+    const log = await Deno.readTextFile(`${dir}/out/worker-a.stderr.log`);
+    assertStringIncludes(log, "Loading library");
+    assert(!log.includes("radio_spi"), log);
+    // A LoRa node gets no Wi-Fi engine port and no eFuse image.
+    await assertRejects(() => Deno.stat(`${dir}/out/efuse-a.bin`), Deno.errors.NotFound);
   });
 });
 
