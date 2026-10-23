@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by hertzbench contributors, 2026-10 (see hertzbench/docs/upstream-sync.md)
 """
 esp32_worker.py — Standalone ESP32 QEMU subprocess worker.
 
@@ -422,9 +423,19 @@ _WIFI_MACHINES = {'esp32-picsimlab'}
 _WIFI_MAC_RANGES = ((0x3ff73000, 0x3ff74000), (0x60033000, 0x60034000))
 
 
+def valid_tcp_port(value: object) -> bool:
+    """True for a real TCP port number (1-65535); bool is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 65536
+
+
 def wifi_nic_arg(machine: str, wifi_enabled: bool,
-                 hostfwd_port: int = 0) -> str | None:
+                 hostfwd_port: int = 0, l2_port: int = 0) -> str | None:
     """The `-nic` value for this machine, or None if it gets no radio.
+
+    `l2_port` (hertzbench): when set, the NIC is a QEMU `stream` netdev that
+    connects to the hertzbench engine on 127.0.0.1:<l2_port> instead of
+    SLIRP. There is then no NAT, DHCP or DNS from QEMU, and `hostfwd_port`
+    is ignored because it is a SLIRP feature.
 
     On the classic ESP32 the radio is attached whether or not the sketch
     appears to use it, because a real ESP32 has one either way. It used to be
@@ -469,10 +480,30 @@ def wifi_nic_arg(machine: str, wifi_enabled: bool,
         # The S3 machine models no radio (hw/xtensa/esp32s3.c never looks for
         # the NIC), so handing it one would leave an unconsumed netdev.
         return None
+    if l2_port:
+        if not valid_tcp_port(l2_port):
+            raise ValueError(f'l2_port must be a TCP port number, got {l2_port!r}')
+        return (f'stream,model={model},server=off,'
+                f'addr.type=inet,addr.host=127.0.0.1,addr.port={l2_port}')
     arg = f'user,model={model},net=192.168.4.0/24'
     if wifi_enabled and hostfwd_port:
         arg += f',hostfwd=tcp::{hostfwd_port}-192.168.4.15:80'
     return arg
+
+
+def efuse_drive_args(image_path: str) -> list[str]:
+    """QEMU arguments that give the classic ESP32 machine its own eFuse image.
+
+    Without one every instance reads the same default station MAC from
+    hw/nvram/esp32_efuse.c, and the fork drops frames whose source is its own
+    MAC, so two boards cannot hear each other. QEMU's option parser treats a
+    comma as a separator, so a comma in the path is doubled.
+    """
+    escaped = image_path.replace(',', ',,')
+    return [
+        '-drive', f'file={escaped},if=none,format=raw,id=hzb-efuse',
+        '-global', 'driver=nvram.esp32.efuse,property=drive,value=hzb-efuse',
+    ]
 
 
 def _explain_pif_fault(chunk: bytes) -> str | None:
@@ -687,6 +718,16 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     initial_sensors   = cfg.get('sensors', [])
     wifi_enabled      = cfg.get('wifi_enabled', False)
     wifi_hostfwd_port = cfg.get('wifi_hostfwd_port', 0)
+    # hertzbench: attach the Wi-Fi NIC to its engine instead of SLIRP, and give
+    # this instance its own eFuse image (station MAC). Both optional.
+    wifi_l2_port      = cfg.get('wifi_l2_port', 0)
+    efuse_image       = cfg.get('efuse_image')
+    if wifi_l2_port and not valid_tcp_port(wifi_l2_port):
+        _log(f'wifi_l2_port must be a TCP port number, got {wifi_l2_port!r} — exiting')
+        os._exit(1)
+    if efuse_image is not None and not (isinstance(efuse_image, str) and os.path.isfile(efuse_image)):
+        _log(f'efuse_image must be the path of an existing file, got {efuse_image!r} — exiting')
+        os._exit(1)
 
     # Adjust GPIO pinmap based on chip: ESP32-C3 has only 22 GPIOs; the
     # ESP32-S3 has 49 (GPIO0..48). The identity pinmap's length is what
@@ -886,13 +927,19 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     # ── WiFi NIC (slirp user-mode networking) ──────────────────────────────
     # Always present on the classic ESP32, on the C3 only for a sketch that
     # uses WiFi — see wifi_nic_arg().
-    nic_arg = wifi_nic_arg(machine, wifi_enabled, wifi_hostfwd_port)
+    nic_arg = wifi_nic_arg(machine, wifi_enabled, wifi_hostfwd_port, wifi_l2_port)
     if nic_arg:
         args_list.extend([b'-nic', nic_arg.encode()])
         _log(f'WiFi radio attached (sketch wants WiFi: {wifi_enabled}): -nic {nic_arg}')
     elif wifi_enabled:
         _log(f'WiFi requested but machine {machine} models no radio — '
              'the sketch will fault if it touches the MAC')
+    if efuse_image:
+        if machine in _WIFI_MACHINES:
+            args_list.extend(a.encode() for a in efuse_drive_args(efuse_image))
+            _log(f'eFuse image attached: {efuse_image}')
+        else:
+            _log(f'efuse_image ignored: only the classic ESP32 machine takes it, not {machine}')
 
     argc = len(args_list)
     argv = (ctypes.c_char_p * argc)(*args_list)
