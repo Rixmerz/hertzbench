@@ -16,6 +16,7 @@ import {
   type LinkBudget,
   linkBudgetAt,
   type Position,
+  withInterference,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
 import type { DropReason, EventLog, FrameKind } from "./events.ts";
@@ -187,16 +188,20 @@ export class AirMedium implements MediumControl {
   }
 
   #budget(sender: NodeState, receiver: NodeState, signal: ChipSignal): LinkBudget {
-    return linkBudgetAt(
-      this.#opts.environment,
-      {
-        position: sender.position,
-        txPowerDbm: signal.txPowerDbm,
-        antennaGainDbi: sender.antennaGainDbi,
-      },
-      receiver,
-      signal,
-      this.#shadowingDb(sender.id, receiver.id),
+    const interferenceDb = this.#overrides.get(`${sender.id}>${receiver.id}`)?.interferenceDb ?? 0;
+    return withInterference(
+      linkBudgetAt(
+        this.#opts.environment,
+        {
+          position: sender.position,
+          txPowerDbm: signal.txPowerDbm,
+          antennaGainDbi: sender.antennaGainDbi,
+        },
+        receiver,
+        signal,
+        this.#shadowingDb(sender.id, receiver.id),
+      ),
+      interferenceDb,
     );
   }
 
@@ -273,8 +278,10 @@ export class AirMedium implements MediumControl {
       const lostToNoise = rng.next() < per;
       const extraLoss = (override?.extraLossPct ?? 0) > 0 &&
         rng.next() * 100 < (override?.extraLossPct ?? 0);
+      // Drawn last, and only when set, so a run without it keeps every earlier draw.
+      const extraJitter = override?.extraJitterMs ? rng.next() * override.extraJitterMs : 0;
       const delayMs = frame.airtimeMs + (budget.distanceM / SPEED_OF_LIGHT_M_S) * 1000 +
-        environment.baseLatencyMs + (override?.extraLatencyMs ?? 0);
+        environment.baseLatencyMs + (override?.extraLatencyMs ?? 0) + extraJitter;
       const payload = frame.payload.slice();
 
       this.#after(delayMs, () => {

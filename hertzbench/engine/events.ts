@@ -91,6 +91,8 @@ export type EngineEvent =
     to: string;
     extraLossPct: number;
     extraLatencyMs: number;
+    extraJitterMs?: number;
+    interferenceDb?: number;
   })
   | (Stamped & {
     type: "espnow-send";

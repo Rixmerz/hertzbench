@@ -160,7 +160,12 @@ Deno.test("scene links: loss counts only the recent window, overrides follow the
   assertEquals(links[1]!.window_frames, 0);
   assertEquals(links[1]!.window_loss_pct, null);
   assertEquals(links[1]!.loss, "idle");
-  assertEquals(links[1]!.override, { extra_loss_pct: 30, extra_latency_ms: 0 });
+  assertEquals(links[1]!.override, {
+    extra_loss_pct: 30,
+    extra_latency_ms: 0,
+    extra_jitter_ms: 0,
+    interference_db: 0,
+  });
 });
 
 Deno.test("timeline: entries after `since`, without serial lines or raw transmissions, capped at the newest", () => {

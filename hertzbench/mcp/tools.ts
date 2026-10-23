@@ -334,7 +334,7 @@ export function tools(session: Session): ToolDefinition[] {
     {
       name: "inject_fault",
       description:
-        'Force extra loss and/or latency on links now, while the run is in progress. `link` is from->to and either side may use * ("*->gw", "a->*"). It replaces any earlier override on those links; set both values to 0 to clear it.',
+        'Force chaos on links now, while the run is in progress: extra loss, extra latency, jitter (extra latency drawn from 0 to the value per frame) and interference (a noise rise at the receiver that lowers the link\'s SNR, so the channel model loses frames by itself). `link` is from->to and either side may use * ("*->gw", "a->*"). It replaces any earlier override on those links; set every value to 0 to clear it. Works on every PHY.',
       inputSchema: {
         type: "object",
         properties: {
@@ -346,6 +346,19 @@ export function tools(session: Session): ToolDefinition[] {
             maximum: 60000,
             description: "Default 0",
           },
+          extra_jitter_ms: {
+            type: "number",
+            minimum: 0,
+            maximum: 60000,
+            description: "Extra latency drawn uniformly from 0 to this, per frame. Default 0",
+          },
+          interference_db: {
+            type: "number",
+            minimum: 0,
+            maximum: 100,
+            description:
+              "Noise rise at the receiver in dB; the link's SNR falls by as much. Default 0",
+          },
           phase: PHASE_SCHEMA,
         },
         required: ["link"],
@@ -353,7 +366,14 @@ export function tools(session: Session): ToolDefinition[] {
       },
       call: (args) =>
         expected(() => {
-          known(args, ["link", "extra_loss_pct", "extra_latency_ms", "phase"]);
+          known(args, [
+            "link",
+            "extra_loss_pct",
+            "extra_latency_ms",
+            "extra_jitter_ms",
+            "interference_db",
+            "phase",
+          ]);
           const link = requiredText(args, "link");
           const sides = link.split("->");
           if (sides.length !== 2 || sides.some((s) => s.trim() === "")) {
@@ -364,6 +384,8 @@ export function tools(session: Session): ToolDefinition[] {
             to: sides[1]!.trim(),
             extra_loss_pct: args.extra_loss_pct,
             extra_latency_ms: args.extra_latency_ms,
+            extra_jitter_ms: args.extra_jitter_ms,
+            interference_db: args.interference_db,
           }, "inject_fault");
           return session.fault(rule, optionalText(args, "phase"));
         }),

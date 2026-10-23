@@ -88,7 +88,12 @@ export interface SceneLink {
   window_loss_pct: number | null;
   loss: Quality;
   /** The forced loss and latency now in force on this link, if any. */
-  override: { extra_loss_pct: number; extra_latency_ms: number } | null;
+  override: {
+    extra_loss_pct: number;
+    extra_latency_ms: number;
+    extra_jitter_ms: number;
+    interference_db: number;
+  } | null;
 }
 
 /** Every directed link as the map draws it now. `events` must be timed from time zero. */
@@ -103,12 +108,16 @@ export function sceneLinks(
   const overrides = new Map<string, SceneLink["override"]>();
   for (const event of events) {
     if (event.type !== "link-override") continue;
-    const cleared = event.extraLossPct === 0 && event.extraLatencyMs === 0;
+    const cleared = event.extraLossPct === 0 && event.extraLatencyMs === 0 &&
+      !event.extraJitterMs && !event.interferenceDb;
     overrides.set(
       `${event.from}>${event.to}`,
-      cleared
-        ? null
-        : { extra_loss_pct: event.extraLossPct, extra_latency_ms: event.extraLatencyMs },
+      cleared ? null : {
+        extra_loss_pct: event.extraLossPct,
+        extra_latency_ms: event.extraLatencyMs,
+        extra_jitter_ms: event.extraJitterMs ?? 0,
+        interference_db: event.interferenceDb ?? 0,
+      },
     );
   }
   return budgets.map(({ from, to, budget }) => {
@@ -170,6 +179,8 @@ export type TimelineEntry =
     to: string;
     extra_loss_pct: number;
     extra_latency_ms: number;
+    extra_jitter_ms: number;
+    interference_db: number;
   };
 
 /** At most this many entries per answer; a client that fell further behind gets the newest. */
@@ -233,6 +244,8 @@ function toEntry(event: EngineEvent): TimelineEntry | null {
         to: event.to,
         extra_loss_pct: event.extraLossPct,
         extra_latency_ms: event.extraLatencyMs,
+        extra_jitter_ms: event.extraJitterMs ?? 0,
+        interference_db: event.interferenceDb ?? 0,
       };
     case "tx":
     case "service":

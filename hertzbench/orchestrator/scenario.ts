@@ -85,6 +85,10 @@ export interface LinkRule {
   to: string;
   extraLossPct: number;
   extraLatencyMs: number;
+  /** Default 0. */
+  extraJitterMs?: number;
+  /** Noise rise at the receiver, dB. Default 0. */
+  interferenceDb?: number;
 }
 
 export type TimelineAction =
@@ -693,12 +697,18 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
 
 export function parseLinkRule(value: unknown, path: string): LinkRule {
   const obj = record(value, path);
-  known(obj, ["from", "to", "extra_loss_pct", "extra_latency_ms"], path);
+  known(
+    obj,
+    ["from", "to", "extra_loss_pct", "extra_latency_ms", "extra_jitter_ms", "interference_db"],
+    path,
+  );
   return {
     from: text(obj.from, `${path}.from`),
     to: text(obj.to, `${path}.to`),
     extraLossPct: num(obj.extra_loss_pct ?? 0, `${path}.extra_loss_pct`, 0, 100),
     extraLatencyMs: num(obj.extra_latency_ms ?? 0, `${path}.extra_latency_ms`, 0, 60_000),
+    extraJitterMs: num(obj.extra_jitter_ms ?? 0, `${path}.extra_jitter_ms`, 0, 60_000),
+    interferenceDb: num(obj.interference_db ?? 0, `${path}.interference_db`, 0, 100),
   };
 }
 

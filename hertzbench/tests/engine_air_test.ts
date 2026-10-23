@@ -217,6 +217,33 @@ Deno.test("air: a 100% loss override drops every frame on that link only", () =>
   assertEquals(r.outcomes(), ["a>gw extra_loss", "a>c deliver"]);
 });
 
+Deno.test("air: interference lowers the link's SNR in its budget and its frames; jitter delays them", () => {
+  const r = rig({ a: { x: 0, y: 0 }, gw: { x: 100, y: 0 } });
+  r.air.addNode({ id: "b", position: { x: 0, y: 100 }, antennaGainDbi: 0 }, new FakeRadio(r.clock));
+  r.air.transmit("a", frame());
+  r.clock.runAll();
+  const clean = r.air.budget("a", "gw");
+  // 59.8 dB of SNR at 100 m; 70 dB of noise rise puts it far under the -7.5 dB floor.
+  r.air.setLinkOverride("a", "gw", { extraLossPct: 0, extraLatencyMs: 0, interferenceDb: 70 });
+  assertEquals(r.air.budget("a", "gw").snrDb, clean.snrDb - 70);
+  assertEquals(r.air.budget("a", "b").snrDb, clean.snrDb, "only the overridden link");
+  r.air.transmit("a", frame());
+  r.clock.runAll();
+  assertEquals(r.outcomes().slice(2), ["a>gw noise", "a>b deliver"]);
+
+  r.air.setLinkOverride("a", "b", { extraLossPct: 0, extraLatencyMs: 0, extraJitterMs: 30 });
+  for (let i = 0; i < 10; i++) {
+    r.air.transmit("a", frame());
+    r.clock.advanceBy(60);
+  }
+  r.clock.runAll();
+  const toB = r.log.events.flatMap((e) => e.type === "deliver" && e.to === "b" ? [e.delayMs] : [])
+    .slice(2); // the two frames above reached b before the jitter
+  assertEquals(toB.length, 10);
+  assert(toB.every((d) => d >= 50 && d < 80.01), JSON.stringify(toB));
+  assert(Math.max(...toB) - Math.min(...toB) > 10, JSON.stringify(toB));
+});
+
 Deno.test("air: same seed, same outcomes at a marginal SNR; another seed differs", () => {
   const run = (seed: number) => {
     const r = rig({ a: { x: 0, y: 0 }, gw: { x: 100, y: 0 } }, seed);

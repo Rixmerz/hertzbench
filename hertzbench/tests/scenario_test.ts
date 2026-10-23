@@ -184,6 +184,30 @@ Deno.test("one radio per node, one PHY per scenario, in range", () => {
   );
 });
 
+Deno.test("link rules carry jitter and interference, 0 by default and in range", () => {
+  const scenario = parseScenario(
+    MINIMAL +
+      "links: [{ from: a, to: b, extra_jitter_ms: 4, interference_db: 12 }, { from: b, to: a }]",
+  );
+  assertEquals(scenario.links[0], {
+    from: "a",
+    to: "b",
+    extraLossPct: 0,
+    extraLatencyMs: 0,
+    extraJitterMs: 4,
+    interferenceDb: 12,
+  });
+  assertEquals([scenario.links[1]!.extraJitterMs, scenario.links[1]!.interferenceDb], [0, 0]);
+  expectError(
+    MINIMAL + "links: [{ from: a, to: b, interference_db: 101 }]",
+    "links[0].interference_db",
+  );
+  expectError(
+    MINIMAL + "links: [{ from: a, to: b, extra_jitter_ms: -1 }]",
+    "links[0].extra_jitter_ms",
+  );
+});
+
 Deno.test("references are checked: nodes, patterns, phases, times", () => {
   expectError(MINIMAL + "links: [{ from: ghost, to: b, extra_loss_pct: 5 }]", "matches no node");
   expectError(

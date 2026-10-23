@@ -189,6 +189,41 @@ Deno.test("link override: forced loss and extra latency apply to that direction 
   assert(drop && drop.type === "drop" && drop.reason === "extra_loss");
 });
 
+Deno.test("link override: interference lowers that link's SNR and costs it frames; jitter spreads its delay", () => {
+  const rig = makeRig({ positions: { a: { x: 0, y: 0 }, b: { x: 5, y: 0 } } });
+  const clean = rig.medium.budget("a", "b");
+  rig.medium.setLinkOverride("a", "b", { extraLossPct: 0, extraLatencyMs: 0, interferenceDb: 70 });
+  const noisy = rig.medium.budget("a", "b");
+  assertEquals(noisy.rssiDbm, clean.rssiDbm);
+  assertEquals(noisy.noiseFloorDbm, clean.noiseFloorDbm + 70);
+  assertEquals(noisy.snrDb, clean.snrDb - 70);
+  assertEquals(rig.medium.budget("b", "a").snrDb, clean.snrDb, "the other direction is untouched");
+  // 70 dB of noise rise leaves no rate that decodes: the MAC gives up by itself.
+  rig.medium.transmit("a", udpFrame(rig, "a", "b"));
+  rig.clock.runAll();
+  const drop = rig.log.events.find((e) => e.type === "drop");
+  assert(drop?.type === "drop" && drop.reason === "retry_exhausted", JSON.stringify(drop));
+
+  const delays = (jitterMs: number) => {
+    const r = makeRig({ positions: { a: { x: 0, y: 0 }, b: { x: 5, y: 0 } } });
+    r.medium.setLinkOverride("a", "b", {
+      extraLossPct: 0,
+      extraLatencyMs: 0,
+      extraJitterMs: jitterMs,
+    });
+    for (let i = 0; i < 30; i++) r.medium.transmit("a", udpFrame(r, "a", "b"));
+    r.clock.runAll();
+    return r.log.events.flatMap((e) => e.type === "deliver" ? [e.delayMs] : []);
+  };
+  const steady = delays(0);
+  const jittery = delays(40);
+  assertEquals(jittery.length, 30);
+  const spread = (xs: number[]) => Math.max(...xs) - Math.min(...xs);
+  assert(spread(steady) < 5, `without jitter: ${spread(steady)} ms`);
+  assert(spread(jittery) > 20, `with up to 40 ms of jitter: ${spread(jittery)} ms`);
+  assert(Math.max(...jittery) < Math.max(...steady) + 40);
+});
+
 Deno.test("gateway: DHCP and ARP are answered to the asker only, outside the loss model", () => {
   const gateway = new VirtualGateway({
     mac: GATEWAY_MAC,

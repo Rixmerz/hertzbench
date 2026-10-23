@@ -26,6 +26,7 @@ import {
   SIFS_US,
   simulateFrame,
   SPEED_OF_LIGHT_M_S,
+  withInterference,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
 import { ESPNOW_ACK_TIMEOUT_MS, type EspNowFrame, parseEspNow } from "./espnow.ts";
@@ -52,9 +53,14 @@ export interface FrameSink {
 /** Sees every frame put on the air, with the engine time it was sent. Feeds the pcap. */
 export type FrameTap = (tMs: number, node: string, frame: Uint8Array) => void;
 
+/** Chaos on one directed link. All zero clears it. */
 export interface LinkOverride {
   extraLossPct: number;
   extraLatencyMs: number;
+  /** Extra latency drawn uniformly from 0 to this, per frame. Default 0. */
+  extraJitterMs?: number;
+  /** Noise rise at the receiver from an interferer, in dB: the link's SNR falls by as much. Default 0. */
+  interferenceDb?: number;
 }
 
 /** What the runner and the timeline do to a medium, whichever PHY it carries. */
@@ -156,7 +162,10 @@ export class Medium {
   budget(from: string, to: string): LinkBudget {
     const tx = this.#requireNode(from);
     const rx = this.#requireNode(to);
-    return linkBudget(this.#opts.environment, tx, rx, this.#shadowingDb(from, to));
+    return withInterference(
+      linkBudget(this.#opts.environment, tx, rx, this.#shadowingDb(from, to)),
+      this.#overrides.get(`${from}>${to}`)?.interferenceDb ?? 0,
+    );
   }
 
   /**
@@ -315,6 +324,7 @@ export class Medium {
         retryLimit: this.#opts.retryLimit ?? 7,
         extraLossPct: override?.extraLossPct ?? 0,
         extraLatencyMs: override?.extraLatencyMs ?? 0,
+        extraJitterMs: override?.extraJitterMs ?? 0,
       },
       substream(seed, `frame:${linkKey}#${ordinal}`),
     );

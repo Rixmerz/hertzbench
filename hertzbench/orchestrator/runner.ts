@@ -495,6 +495,8 @@ function applyLinkRule(
     medium.setLinkOverride(from, to, {
       extraLossPct: rule.extraLossPct,
       extraLatencyMs: rule.extraLatencyMs,
+      extraJitterMs: rule.extraJitterMs ?? 0,
+      interferenceDb: rule.interferenceDb ?? 0,
     });
   }
   return pairs;

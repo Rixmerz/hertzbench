@@ -351,9 +351,7 @@ function linkSentence(link) {
   const loss = link.window_loss_pct === null
     ? "no frames in the window"
     : `${fixed(link.window_loss_pct)}% of ${link.window_frames} frames lost`;
-  const forced = link.override
-    ? `; forced ${link.override.extra_loss_pct}% loss, ${link.override.extra_latency_ms} ms latency`
-    : "";
+  const forced = link.override ? `; forced ${forcedText(link.override)}` : "";
   return `${link.from} → ${link.to}: ${fixed(link.distance_m)} m, ${fixed(link.rssi_dbm)} dBm, ` +
     `SNR ${fixed(link.snr_db)} dB, ${rate(link.rate_bps)}, ${loss}${forced}. ` +
     `Signal ${link.signal}, loss ${link.loss}.`;
@@ -517,13 +515,7 @@ function drawTable(links) {
     const row = html("tr");
     const name = html("td", `${link.from} → ${link.to}`);
     if (link.override) {
-      name.append(
-        html(
-          "span",
-          ` forced ${link.override.extra_loss_pct}% / ${link.override.extra_latency_ms} ms`,
-          "override",
-        ),
-      );
+      name.append(html("span", ` forced ${forcedText(link.override)}`, "override"));
     }
     const quality = linkQuality(link);
     const cell = html("td");
@@ -540,6 +532,14 @@ function drawTable(links) {
     return row;
   });
   ui.links.replaceChildren(...rows);
+}
+
+/** The chaos in force on a link, naming only what is set. */
+function forcedText(override) {
+  const parts = [`${override.extra_loss_pct}% loss`, `${override.extra_latency_ms} ms`];
+  if (override.extra_jitter_ms) parts.push(`up to ${override.extra_jitter_ms} ms jitter`);
+  if (override.interference_db) parts.push(`+${override.interference_db} dB noise`);
+  return parts.join(", ");
 }
 
 /** A bit rate as the PHY is usually quoted: LoRa in kbit/s, the others in Mbit/s. */

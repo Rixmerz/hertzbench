@@ -228,6 +228,19 @@ export function linkBudgetAt(
   };
 }
 
+/**
+ * The budget with an interferer near the receiver: its noise floor rises by
+ * `interferenceDb`, and the SNR falls by as much. The RSSI is unchanged.
+ */
+export function withInterference(budget: LinkBudget, interferenceDb: number): LinkBudget {
+  if (interferenceDb === 0) return budget;
+  return {
+    ...budget,
+    noiseFloorDbm: budget.noiseFloorDbm + interferenceDb,
+    snrDb: budget.snrDb - interferenceDb,
+  };
+}
+
 /** The 2.4 GHz Wi-Fi budget: 20 MHz channel, the environment's noise figure. */
 export function linkBudget(
   env: Environment,
@@ -358,6 +371,8 @@ export interface TxParams {
   /** Chaos override: extra loss applied after the MAC succeeded, 0-100. */
   extraLossPct: number;
   extraLatencyMs: number;
+  /** Chaos override: extra latency drawn uniformly from 0 to this, per frame. Default 0. */
+  extraJitterMs?: number;
 }
 
 export interface FrameOutcome {
@@ -399,9 +414,11 @@ export function simulateFrame(
 
   const propagationMs = (budget.distanceM / SPEED_OF_LIGHT_M_S) * 1000;
   const jitterMs = rng.next() * (env.jitterBaseMs + env.jitterPerMeterMs * budget.distanceM);
-  const delayMs = elapsedUs / 1000 + propagationMs + env.baseLatencyMs + params.extraLatencyMs +
-    jitterMs;
   const extraLoss = params.extraLossPct > 0 && rng.next() * 100 < params.extraLossPct;
+  // Drawn last, and only when set, so a run without it keeps every earlier draw.
+  const extraJitter = params.extraJitterMs ? rng.next() * params.extraJitterMs : 0;
+  const delayMs = elapsedUs / 1000 + propagationMs + env.baseLatencyMs + params.extraLatencyMs +
+    jitterMs + extraJitter;
 
   if (!received) {
     return { delivered: false, reason: "retry_exhausted", attempts, rateMbps: rate.mbps, delayMs };

@@ -360,6 +360,8 @@ export class Session {
       links: pairs.map(([from, to]) => `${from}->${to}`),
       extra_loss_pct: rule.extraLossPct,
       extra_latency_ms: rule.extraLatencyMs,
+      extra_jitter_ms: rule.extraJitterMs ?? 0,
+      interference_db: rule.interferenceDb ?? 0,
       at_ms: round(live.elapsedMs()),
       phase,
     };
