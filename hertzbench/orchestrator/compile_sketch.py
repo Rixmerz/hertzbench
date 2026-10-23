@@ -39,7 +39,13 @@ def read_sketch(sketch_dir: Path) -> list[dict[str, str]]:
 
 async def compile_files(files: list[dict[str, str]], fqbn: str) -> str:
     sys.path.insert(0, str(_BACKEND_DIR))
-    from app.services.espidf_compiler import espidf_compiler
+    try:
+        from app.services.espidf_compiler import espidf_compiler
+    except ImportError as exc:
+        raise SystemExit(
+            f"cannot import the Velxio compiler ({exc}); "
+            f"install {_BACKEND_DIR / 'requirements.txt'} first"
+        ) from exc
 
     result = await espidf_compiler.compile(files, fqbn)
     if not result.get("success"):
