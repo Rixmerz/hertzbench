@@ -1,4 +1,5 @@
-// Classic libpcap writer, Ethernet link type. One record per frame put on the
+// Classic libpcap writer, one link type per file: Ethernet for Wi-Fi/IP,
+// LoRaTap for LoRa, a private one for nRF24. One record per frame put on the
 // air, stamped with engine time. Losses are not in the capture (pcap has no way
 // to say "dropped"); they are in the event log and metrics.json.
 //
@@ -8,7 +9,11 @@
 
 const GLOBAL_HEADER_BYTES = 24;
 const RECORD_HEADER_BYTES = 16;
-const LINKTYPE_ETHERNET = 1;
+export const LINKTYPE_ETHERNET = 1;
+/** LoRaTap pseudo-header followed by the LoRa payload (tcpdump.org link-layer header types). */
+export const LINKTYPE_LORATAP = 270;
+/** Reserved for private use; hertzbench puts nRF24 frames here (docs/fidelity.md says how). */
+export const LINKTYPE_USER0 = 147;
 const SNAPLEN = 65535;
 
 export class PcapWriter {
@@ -17,7 +22,7 @@ export class PcapWriter {
   #packets = 0;
 
   /** `epochMs` is the Unix time of engine time 0, so the capture has real-looking timestamps. */
-  constructor(epochMs: number) {
+  constructor(epochMs: number, linkType = LINKTYPE_ETHERNET) {
     this.#epochMs = epochMs;
     const header = new DataView(new ArrayBuffer(GLOBAL_HEADER_BYTES));
     header.setUint32(0, 0xa1b2c3d4, true); // magic, microsecond timestamps
@@ -26,7 +31,7 @@ export class PcapWriter {
     header.setInt32(8, 0, true); // timezone offset
     header.setUint32(12, 0, true); // timestamp accuracy
     header.setUint32(16, SNAPLEN, true);
-    header.setUint32(20, LINKTYPE_ETHERNET, true);
+    header.setUint32(20, linkType, true);
     this.#chunks.push(new Uint8Array(header.buffer));
   }
 
