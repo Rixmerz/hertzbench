@@ -421,3 +421,20 @@ Deno.test({
     }
   },
 });
+
+Deno.test("ble controller: on a lossy link every packet still arrives once and in order, after retransmissions", async () => {
+  const r = rig({ gw: [0, 0], sensor: [4, 0] });
+  const { gw, sensor } = await connected(r, 30, 2000);
+  r.air.setLinkOverride("sensor", "gw", { extraLossPct: 30, extraLatencyMs: 0 });
+  r.air.setLinkOverride("gw", "sensor", { extraLossPct: 30, extraLatencyMs: 0 });
+  for (let i = 0; i < 20; i++) sensor.host.sendAtt(sensor.connections[0]!.handle, att(`r${i}`));
+  await r.run(3000);
+  assertEquals(gw.att.map((a) => a.text), Array.from({ length: 20 }, (_, i) => `r${i}`));
+  const acl = kinds(r.log.events, "ble-acl");
+  assertEquals(acl.length, 20);
+  const retried = acl.filter((e) => e.type === "deliver" && e.attempts > 1);
+  assert(retried.length > 0, "some packets needed more than one transmission");
+  const lostOnAir = kinds(r.log.events, "ble-data").filter((e) => e.type === "drop");
+  assert(lostOnAir.length > 10, `air drops: ${lostOnAir.length}`);
+  assertEquals(gw.disconnections.length, 0);
+});
