@@ -208,8 +208,8 @@ export function computeMetrics(events: readonly EngineEvent[], endMs: number): M
     if (!link.espnow || late === 0) continue;
     warnings.push(
       `link ${link.from}->${link.to}: ${late} of ${link.espnow.sends} unicast ESP-NOW sends ` +
-        `missed the fork's ${ESPNOW_ACK_TIMEOUT_MS} ms ACK wait (round trip p95 ` +
-        `${link.espnow.roundTripMs?.p95.toFixed(2)} ms), so the sender's firmware saw them fail`,
+        `missed the fork's ${ESPNOW_ACK_TIMEOUT_MS} ms ACK wait (slowest round trip ` +
+        `${link.espnow.roundTripMs?.max.toFixed(2)} ms), so the sender's firmware saw them fail`,
     );
   }
   return { total, phases, warnings };

@@ -1,0 +1,46 @@
+# The espnow-mesh-5-nodes experiment with scripted boards instead of ESP32
+# firmware. Scripted boards are a network-side stand-in with a model of the
+# QEMU fork's ESP-NOW MAC, not an emulator, so this runs without libqemu and
+# finishes in seconds. Same geometry, same wall, same seed, same log lines.
+name: espnow-mesh-scripted
+seed: 42
+duration: 6s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+  obstacles:
+    - { polygon: [[12, -10], [12, 10]], attenuation_db: 12 }
+nodes:
+  - id: gw
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 1, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: broadcast, via: espnow, every: 1s, count: 6, payload: beacon }
+  - id: sensor
+    count: 4
+    board: scripted
+    position: { grid: { origin: [6, 0], step: [4, 0] } }
+    radios: [{ phy: wifi, channel: 1, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: gw, via: espnow, every: 100ms, count: 55, payload: reading }
+links:
+  - { from: sensor-4, to: gw, extra_loss_pct: 10 }
+timeline:
+  - { at: 3s, label: far, move: { node: sensor-4, to: [44, 0] } }
+assertions:
+  - serial: { node: gw, contains: "espnow rx reading", within: 2s }
+  - serial: { node: gw, contains: "from sensor-4", within: 2s }
+  - serial: { node: sensor-1, contains: "espnow rx beacon", within: 2s }
+  - metric: {
+      link: "sensor-*->gw",
+      phase: start,
+      kind: espnow,
+      acked_pct: { gt: 75 },
+      ack_rtt_p95_ms: { lt: 10 },
+      latency_p95_ms: { lt: 5 },
+    }
+  - metric: { link: "sensor-4->gw", phase: far, kind: espnow, acked_pct: { lt: 50 } }
+  - metric: { link: "sensor-1->gw", phase: far, kind: espnow, acked_pct: { gt: 90 } }

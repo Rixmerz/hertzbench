@@ -6,12 +6,26 @@ import type { LinkStats } from "../engine/mod.ts";
 import { PRODUCT } from "../brand.ts";
 import type { RunResult } from "./runner.ts";
 
-const ADAPTER_FIDELITY = {
+const WIFI_FIDELITY = {
   component: "qemu-wifi-l2 adapter",
   protocol: "wi-fi/ip",
   level: "F2",
   meaning: "same firmware binary, frames captured at the netdev (layer 2 and up)",
 } as const;
+
+const ESPNOW_FIDELITY = {
+  component: "qemu-wifi-l2 adapter",
+  protocol: "esp-now",
+  level: "F1",
+  meaning:
+    "same firmware binary, 802.11 action frames bridged by the QEMU fork's MAC model as pseudo-Ethernet",
+} as const;
+
+/** The protocol rows that apply to this run: ESP-NOW only when ESP-NOW crossed the medium. */
+function protocolFidelity(result: RunResult) {
+  const espnow = result.events.some((e) => e.type === "tx" && e.kind === "espnow");
+  return espnow ? [WIFI_FIDELITY, ESPNOW_FIDELITY] : [WIFI_FIDELITY];
+}
 
 export function linkJson(link: LinkStats) {
   return {
@@ -26,6 +40,13 @@ export function linkJson(link: LinkStats) {
     snr_db: link.snrDb,
     mean_attempts: link.meanAttempts,
     bytes_delivered: link.bytesDelivered,
+    espnow: link.espnow && {
+      sends: link.espnow.sends,
+      acked: link.espnow.acked,
+      outcomes: link.espnow.outcomes,
+      acked_pct: link.espnow.ackedPct,
+      round_trip_ms: link.espnow.roundTripMs,
+    },
   };
 }
 
@@ -41,7 +62,7 @@ export function metricsDocument(result: RunResult) {
     // Latency is the delay the channel model assigned. It is not measured on a guest clock.
     latency: "modelled",
     fidelity: [
-      ADAPTER_FIDELITY,
+      ...protocolFidelity(result),
       ...[...new Set(result.nodes.map((n) => `${n.board}: ${n.fidelity}`))].map((line) => ({
         component: "board",
         description: line,
@@ -99,6 +120,36 @@ function linkRows(links: readonly LinkStats[]): string[][] {
   ]);
 }
 
+const ESPNOW_HEADER = [
+  "link",
+  "sends",
+  "acked",
+  "acked %",
+  "frame_lost",
+  "ack_timeout",
+  "no_ack",
+  "rtt p50 ms",
+  "rtt max ms",
+];
+
+function espnowRows(links: readonly LinkStats[]): string[][] {
+  return links.flatMap((l) => {
+    const e = l.espnow;
+    if (!e) return [];
+    return [[
+      `${l.from}->${l.to}`,
+      String(e.sends),
+      String(e.acked),
+      `${e.ackedPct.toFixed(1)}%`,
+      String(e.outcomes.frame_lost ?? 0),
+      String(e.outcomes.ack_timeout ?? 0),
+      String(e.outcomes.no_ack ?? 0),
+      e.roundTripMs ? ms(e.roundTripMs.p50) : "-",
+      e.roundTripMs ? ms(e.roundTripMs.max) : "-",
+    ]];
+  });
+}
+
 const LINK_HEADER = [
   "link",
   "sent",
@@ -120,9 +171,9 @@ export function renderReport(result: RunResult): string {
   );
   out.push("");
   out.push("Fidelity");
-  out.push(
-    `  ${ADAPTER_FIDELITY.protocol}: ${ADAPTER_FIDELITY.level}, ${ADAPTER_FIDELITY.meaning}`,
-  );
+  for (const row of protocolFidelity(result)) {
+    out.push(`  ${row.protocol}: ${row.level}, ${row.meaning}`);
+  }
   for (const line of new Set(result.nodes.map((n) => `${n.board}: ${n.fidelity}`))) {
     out.push(`  ${line}`);
   }
@@ -153,6 +204,14 @@ export function renderReport(result: RunResult): string {
       ? table(LINK_HEADER, linkRows(metrics.total))
       : ["no frames crossed the medium"]).map((l) => `  ${l}`),
   );
+  const espnowTotal = espnowRows(metrics.total);
+  if (espnowTotal.length) {
+    out.push("");
+    out.push(
+      "ESP-NOW unicast sends, as the sending firmware sees them (the fork waits 10 ms for each ACK)",
+    );
+    out.push(...table(ESPNOW_HEADER, espnowTotal).map((l) => `  ${l}`));
+  }
   if (metrics.phases.length > 1) {
     for (const phase of metrics.phases) {
       out.push("");
@@ -164,6 +223,10 @@ export function renderReport(result: RunResult): string {
           l,
         ) => `  ${l}`),
       );
+      const espnowPhase = espnowRows(phase.links);
+      if (espnowPhase.length) {
+        out.push(...["", ...table(ESPNOW_HEADER, espnowPhase)].map((l) => l && `  ${l}`));
+      }
     }
   }
   if (metrics.warnings.length || result.problems.length) {

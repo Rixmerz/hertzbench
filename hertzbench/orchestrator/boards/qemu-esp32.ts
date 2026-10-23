@@ -214,7 +214,8 @@ class Esp32Board implements RunningBoard {
 }
 
 export const ESP32_FIDELITY =
-  "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev)";
+  "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev); " +
+  "F1 for ESP-NOW (same binary, action frames from the QEMU fork's MAC model)";
 
 /**
  * One launcher per run. Its firmware cache lives as long as the run, so a

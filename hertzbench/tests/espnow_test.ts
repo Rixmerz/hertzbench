@@ -22,11 +22,12 @@ import { EventLog, Medium } from "../engine/mod.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "../orchestrator/boards/espnow-fork-model.ts";
 import {
   dot11CapturePath,
+  evaluateAssertions,
   loadScenario,
   type RunResult,
   runScenario,
 } from "../orchestrator/mod.ts";
-import { macFor } from "./helpers.ts";
+import { macFor, simulateEspNowTraffic } from "./helpers.ts";
 
 const A = macFor(1);
 const B = macFor(2);
@@ -469,3 +470,42 @@ Deno.test("runner: 15 ms more on the a->b leg fails every ESP-NOW send at the se
   assertEquals(serial(result, "b").filter((t) => t.startsWith("espnow rx hello")).length, 20);
   assert(result.metrics.warnings.some((w) => w.includes("a->b") && w.includes("10 ms ACK wait")));
 });
+
+// ── the example scenarios' geometry, judged by the engine alone ──────────────
+
+const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+
+for (
+  const [file, sensorEveryMs] of [
+    ["espnow-mesh-scripted.yaml", 100],
+    ["espnow-mesh-5-nodes.yaml", 500],
+  ] as const
+) {
+  Deno.test(`example ${file}: readings are acknowledged until sensor-4 walks away`, async () => {
+    const { scenario } = await loadScenario(`${EXAMPLES}${file}`);
+    // What the sketches and scripts send: each sensor to the gateway, the gateway's beacon.
+    const traffic = [1, 2, 3, 4].map((i) => ({
+      from: `sensor-${i}`,
+      to: "gw",
+      everyMs: sensorEveryMs,
+    }));
+    const log = simulateEspNowTraffic(scenario, [
+      ...traffic,
+      { from: "gw", to: "broadcast", everyMs: 1000 },
+    ]);
+    const metrics = computeMetrics(log.events, scenario.durationMs);
+    const metricAssertions = scenario.assertions.filter((a) => a.kind === "metric");
+    assert(metricAssertions.length >= 3, "the example should assert on the experiment");
+    const results = evaluateAssertions(metricAssertions, log.events, metrics.phases);
+    for (const r of results) assert(r.passed, `${r.description}: ${r.detail}`);
+
+    const far = metrics.phases.find((p) => p.label === "far")!.links.find((l) =>
+      l.from === "sensor-4" && l.to === "gw"
+    )!;
+    const near = metrics.phases.find((p) => p.label === "start")!.links.find((l) =>
+      l.from === "sensor-4" && l.to === "gw"
+    )!;
+    assert(far.rssiDbm < near.rssiDbm - 10, `rssi ${near.rssiDbm} -> ${far.rssiDbm}`);
+    assert(far.espnow!.ackedPct < near.espnow!.ackedPct - 40);
+  });
+}

@@ -84,6 +84,28 @@ Deno.test("run: the scripted example passes end to end and writes metrics.json a
   });
 });
 
+Deno.test("run: the scripted ESP-NOW mesh passes end to end and writes an 802.11 capture", async () => {
+  await inTempDir(async (dir) => {
+    const run = await hertzbench(["run", `${EXAMPLES}espnow-mesh-scripted.yaml`, "--out", dir]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "RESULT: PASS");
+    assertStringIncludes(run.stdout, "esp-now: F1");
+    assertStringIncludes(run.stdout, "ESP-NOW unicast sends");
+
+    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/metrics.json`));
+    assertEquals(metrics.passed, true);
+    assert(metrics.fidelity.some((f: { protocol?: string }) => f.protocol === "esp-now"));
+    const s1 = metrics.links.find((l: { from: string; to: string }) =>
+      l.from === "sensor-1" && l.to === "gw"
+    );
+    assertEquals(s1.espnow.sends, 55);
+
+    const dot11 = await Deno.readFile(`${dir}/air-80211.pcap`);
+    assertEquals(new DataView(dot11.buffer).getUint32(20, true), 127);
+    assertStringIncludes(await Deno.readTextFile(`${dir}/serial-gw.log`), "from sensor-4");
+  });
+});
+
 Deno.test("run: a failed assertion exits 1 and says which", async () => {
   await inTempDir(async (dir) => {
     await Deno.writeTextFile(
@@ -125,10 +147,18 @@ Deno.test("run: scenario outputs land where the scenario says, relative to the s
 });
 
 Deno.test("validate: accepts the examples and the firmware they name", async () => {
-  for (const file of ["udp-3-nodes.yaml", "udp-3-scripted.yaml", "live-3-scripted.yaml"]) {
+  for (
+    const [file, nodes] of [
+      ["udp-3-nodes.yaml", 3],
+      ["udp-3-scripted.yaml", 3],
+      ["live-3-scripted.yaml", 3],
+      ["espnow-mesh-5-nodes.yaml", 5],
+      ["espnow-mesh-scripted.yaml", 5],
+    ]
+  ) {
     const run = await hertzbench(["validate", `${EXAMPLES}${file}`]);
     assertEquals(run.code, 0, run.stdout + run.stderr);
-    assertStringIncludes(run.stdout, "ok (3 nodes");
+    assertStringIncludes(run.stdout, `ok (${nodes} nodes`);
   }
 });
 
