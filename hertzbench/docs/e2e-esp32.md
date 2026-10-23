@@ -46,6 +46,7 @@ Open `air.pcap` in Wireshark. It has Ethernet frames: DHCP, ARP and the UDP data
 
 ## First run: settle the unverified points in this order
 
+0. **A worker that dies at start-up stops the run at once.** `hertzbench` exits with status 2 within seconds, prints each board's problem (`worker exited early (code 1); see <out>/worker-a.stderr.log`) and does not wait out the 30 s connect timeout. Read that log first; QEMU's own complaint is in it.
 1. **The worker accepts the arguments.** Look in `worker-a.stderr.log` for these two lines:
 
    ```

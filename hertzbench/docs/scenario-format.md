@@ -89,6 +89,10 @@ Metric fields: `sent`, `delivered`, `loss_pct`, `latency_p50_ms`, `latency_p95_m
 
 Paths are relative to the scenario file. Defaults are `metrics.json`, `air.pcap` and `events.jsonl` in `<scenario dir>/out`. `--out DIR` on the command line overrides all of them. Per-board files (`serial-<node>.log`, `efuse-<node>.bin`, `worker-<node>.stderr.log`) go in the output directory.
 
+## `events.jsonl` and time zero
+
+One JSON event per line, in the order the engine logged them, with `t` in milliseconds. Time zero is the moment every board's netdev has connected, and `timeline`, `duration`, phases and `within` are all measured from it. A board that connects early can already have talked: those events carry **negative** `t`. They are in the log and in `air.pcap` (whose timestamps are real clock time and never step back) but outside every metric window, which starts at 0.
+
 ## `metrics.json`
 
 `schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`.

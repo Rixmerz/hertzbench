@@ -42,6 +42,10 @@ hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
 hertzbench validate <scenario.yaml>
 ```
 
+To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin directory, usually
+`~/.deno/bin`), run `deno task install-cli` once from this directory. Without it, use
+`deno task hertzbench ...` from here as above.
+
 `hzb` is the short alias. Exit status: 0 passed, 1 an assertion failed, 2 invalid scenario or a host
 that cannot run it, 130 interrupted (boards are stopped first).
 

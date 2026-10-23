@@ -399,3 +399,86 @@ Deno.test("runner: a board that fails to start does not leave its sibling runnin
   await assertRejects(() => runFrom(TWO_NODES, { scripted: mixed }), BoardError, "b failed");
   assertEquals(stopped, ["a"]);
 });
+
+Deno.test("runner: ten boards, the top of the 2 to 10 range, all get their lease and talk over 90 links", async () => {
+  const nodes = Array.from({ length: 10 }, (_, i) => {
+    const next = `n${(i + 1) % 10}`;
+    const prev = `n${(i + 9) % 10}`;
+    return `  - id: n${i}
+    board: scripted
+    position: [${i * 4}, 0]
+    firmware: { send: [{ to: ${next}, every: 100ms, count: 8 }, { to: ${prev}, every: 100ms, count: 8 }] }`;
+  });
+  const yaml = `name: ten\nseed: 5\nduration: 2s\nenvironment: { shadowing_sigma_db: 0 }\nnodes:\n${
+    nodes.join("\n")
+  }\n`;
+  const { result, dir } = await runFrom(yaml);
+  try {
+    assert(result.passed, JSON.stringify(result.problems));
+    assertEquals(
+      result.nodes.map((n) => n.ip),
+      Array.from({ length: 10 }, (_, i) => `192.168.4.${11 + i}`),
+    );
+    assertEquals(result.nodes[9]!.mac, "02:68:7a:62:01:0a");
+    for (const node of result.nodes) {
+      const bound = result.events.some((e) =>
+        e.type === "serial" && e.node === node.id && e.text === `dhcp bound ip=${node.ip}`
+      );
+      assert(bound, `${node.id} never got ${node.ip}`);
+    }
+    // Every board broadcast nothing but unicast here; each ring neighbour saw its pings.
+    const links = new Set(result.metrics.total.map((l) => `${l.from}>${l.to}`));
+    for (let i = 0; i < 10; i++) {
+      assert(links.has(`n${i}>n${(i + 1) % 10}`), `n${i} never reached its next neighbour`);
+      assert(links.has(`n${i}>n${(i + 9) % 10}`), `n${i} never reached its previous neighbour`);
+    }
+    const delivered = result.metrics.total.reduce((sum, l) => sum + l.delivered, 0);
+    assert(delivered >= 10 * 2 * 8, `only ${delivered} frames delivered`);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runner: traffic before time zero is kept, with negative times, and the log never steps back", async () => {
+  // Board c connects 200 ms after a and b, which have already run DHCP by then.
+  const slowC: BoardLauncher = {
+    fidelity: "test",
+    async start(ctx) {
+      if (ctx.node.id === "c") await new Promise((resolve) => setTimeout(resolve, 200));
+      return scriptedLauncher.start(ctx);
+    },
+  };
+  const yaml = `name: late
+seed: 2
+duration: 1s
+environment: { shadowing_sigma_db: 0 }
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    firmware: { send: [{ to: b, every: 50ms, count: 5 }] }
+  - { id: b, board: scripted, position: [5, 0], firmware: {} }
+  - { id: c, board: scripted, position: [9, 0], firmware: {} }
+assertions:
+  - serial: { node: a, contains: "dhcp bound", within: 1s }
+  - metric: { link: "a->b", loss_pct: { lt: 1 } }
+`;
+  const { result, dir } = await runFrom(yaml, { scripted: slowC });
+  try {
+    assert(result.passed, JSON.stringify(result.assertions));
+    const times = result.events.map((e) => e.t);
+    assert(times.some((t) => t < 0), "a and b should have talked before c connected");
+    times.forEach((t, i) => {
+      if (i > 0) assert(t >= times[i - 1]!, `event ${i} at ${t} follows ${times[i - 1]}`);
+    });
+    // Pre-zero frames are in the log but not in the measured window.
+    const early = result.events.filter((e) =>
+      e.t < 0 && (e.type === "deliver" || e.type === "drop")
+    );
+    const counted = result.metrics.total.reduce((sum, l) => sum + l.sent, 0);
+    const all = result.events.filter((e) => e.type === "deliver" || e.type === "drop").length;
+    assertEquals(counted, all - early.length);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

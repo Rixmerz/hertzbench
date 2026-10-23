@@ -239,3 +239,18 @@ Deno.test("scripted sends must name another node on the medium", () => {
   expectError(withSend("ghost"), "no node named");
   expectError(withSend("a"), "itself");
 });
+
+Deno.test("an explicit ip must be a usable host address inside the subnet", () => {
+  const withIp = (ip: string) =>
+    MINIMAL.replace("{ id: a, board: scripted,", `{ id: a, ip: ${ip}, board: scripted,`);
+  assertEquals(parseScenario(withIp("192.168.4.50")).nodes[0]!.ip, "192.168.4.50");
+  expectError(withIp("192.168.5.50"), "not inside 192.168.4.0/24");
+  expectError(withIp("192.168.4.0"), "cannot be used");
+  expectError(withIp("192.168.4.1"), "gateway");
+  expectError(withIp("192.168.4.255"), "broadcast");
+  expectError(withIp("not-an-ip"), "not inside");
+  expectError(
+    MINIMAL.replace("{ id: a, board: scripted,", "{ id: a, ip: 192.168.4.12, board: scripted,"),
+    "share the address 192.168.4.12",
+  );
+});

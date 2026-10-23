@@ -233,3 +233,111 @@ Deno.test("SIGINT: the CLI stops the run, exits 130 and writes no results", asyn
     assertEquals(wrote, false);
   });
 });
+
+Deno.test("exit 2: a worker that dies during start-up fails fast, lists why, and accepted the launcher's config", async () => {
+  await inTempDir(async (dir) => {
+    // An empty file is not a shared library: the real worker starts, accepts the
+    // config the launcher wrote, tries to load it and exits.
+    await Deno.writeFile(`${dir}/libqemu-xtensa.so`, new Uint8Array(0));
+    await Deno.writeFile(`${dir}/fw.bin`, new Uint8Array(16));
+    await Deno.writeTextFile(
+      `${dir}/esp.yaml`,
+      `name: dying\nduration: 60s\nnodes:\n` +
+        `  - { id: a, board: esp32, firmware: ./fw.bin, position: [0, 0] }\n` +
+        `  - { id: b, board: esp32, firmware: ./fw.bin, position: [5, 0] }\n`,
+    );
+    const started = performance.now();
+    const run = await hertzbench(["run", `${dir}/esp.yaml`, "--out", `${dir}/out`], {
+      QEMU_ESP32_LIB: `${dir}/libqemu-xtensa.so`,
+    });
+    assert(performance.now() - started < 25_000, "must not wait for the 30 s connect timeout");
+    assertEquals(run.code, 2, run.stdout + run.stderr);
+    assertStringIncludes(run.stderr, "worker exited early");
+    assertStringIncludes(run.stderr, "worker-");
+    assert(!run.stderr.includes("    at "), "a start-up failure is a message, not a stack trace");
+
+    // The cross-language contract: the real worker read wifi_l2_port and
+    // efuse_image from the launcher's config and got as far as loading libqemu.
+    // Renaming a field on one side only would stop it here.
+    const log = await Deno.readTextFile(`${dir}/out/worker-a.stderr.log`);
+    assertStringIncludes(log, "Loading library");
+    assert(!log.includes("wifi_l2_port must be"), log);
+    assert(!log.includes("efuse_image must be"), log);
+    assertEquals((await Deno.stat(`${dir}/out/efuse-a.bin`)).size, 512);
+  });
+});
+
+Deno.test("scripted run: logged times never step backwards in the events or the capture", async () => {
+  await inTempDir(async (dir) => {
+    const run = await hertzbench([
+      "run",
+      `${EXAMPLES}udp-3-scripted.yaml`,
+      "--out",
+      dir,
+      "--quiet",
+    ]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+
+    const events = (await Deno.readTextFile(`${dir}/events.jsonl`)).trim().split("\n").map((l) =>
+      JSON.parse(l) as { seq: number; t: number }
+    );
+    assert(events.length > 100);
+    events.forEach((e, i) => {
+      assertEquals(e.seq, i);
+      if (i > 0) {
+        assert(e.t >= events[i - 1]!.t, `event ${i} at ${e.t} follows ${events[i - 1]!.t}`);
+      }
+    });
+
+    const pcap = await Deno.readFile(`${dir}/air.pcap`);
+    const view = new DataView(pcap.buffer);
+    let offset = 24;
+    let last = 0;
+    let records = 0;
+    while (offset < pcap.length) {
+      const stamp = view.getUint32(offset, true) * 1_000_000 + view.getUint32(offset + 4, true);
+      assert(stamp >= last, `capture record ${records} steps back in time`);
+      last = stamp;
+      offset += 16 + view.getUint32(offset + 8, true);
+      records++;
+    }
+    assertEquals(offset, pcap.length);
+    assert(records > 100);
+  });
+});
+
+Deno.test("installed as real commands: hertzbench and hzb run from any directory", async () => {
+  await inTempDir(async (dir) => {
+    for (const name of ["hertzbench", "hzb"]) {
+      const install = await new Deno.Command(Deno.execPath(), {
+        args: [
+          "install",
+          "--global",
+          "--root",
+          dir,
+          "--name",
+          name,
+          "--allow-net=127.0.0.1",
+          "--allow-read",
+          "--allow-write",
+          "--allow-run",
+          "--allow-env",
+          "--config",
+          new URL("../deno.json", import.meta.url).pathname,
+          MAIN,
+        ],
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      assertEquals(install.code, 0, new TextDecoder().decode(install.stderr));
+      const out = await new Deno.Command(`${dir}/bin/${name}`, {
+        args: ["validate", `${EXAMPLES}udp-3-scripted.yaml`],
+        cwd: dir,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+      assertStringIncludes(new TextDecoder().decode(out.stdout), "ok (3 nodes");
+    }
+  });
+});

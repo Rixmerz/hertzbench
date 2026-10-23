@@ -2,7 +2,9 @@
 # wall: its link to a degrades (rate falls back, retries pile up, frames are
 # lost) while the closer link to b holds. Run it with:
 #
-#   hertzbench run hertzbench/scenarios/examples/udp-3-nodes.yaml
+#   cd hertzbench && deno task hertzbench run scenarios/examples/udp-3-nodes.yaml
+#
+# (or `hertzbench run ...` after `deno task install-cli`).
 #
 # Needs libqemu-xtensa and the ESP-IDF toolchain; see docs/e2e-esp32.md.
 # scenarios/examples/udp-3-scripted.yaml is the same experiment with scripted
