@@ -108,7 +108,10 @@ export function sceneLinks(
   });
 }
 
-/** One mark on the packet timeline. Serial lines and raw transmissions are left out. */
+/**
+ * One mark on the packet timeline. Serial lines, raw transmissions, ESP-NOW
+ * round trips, BLE link changes and warnings are left out.
+ */
 export type TimelineEntry =
   | {
     seq: number;
@@ -209,6 +212,9 @@ function toEntry(event: EngineEvent): TimelineEntry | null {
     case "tx":
     case "service":
     case "serial":
+    case "espnow-send":
+    case "ble-link":
+    case "warning":
       return null;
   }
 }

@@ -1,0 +1,60 @@
+# Five ESP32 boards talk ESP-NOW (fidelity F1, ADR 0001): four sensors send a
+# reading to the gateway every 500 ms, the gateway broadcasts a beacon every
+# second. A wall stands between the gateway and the two farther sensors. At
+# 30 s sensor-4 walks away: its frames need more retries, run past the fork's
+# 10 ms ACK wait or are lost, so the gateway hears it less and sensor-4's
+# firmware sees its sends fail. Run it with:
+#
+#   cd hertzbench && deno task hertzbench run scenarios/examples/espnow-mesh-5-nodes.yaml
+#
+# Needs libqemu-xtensa and the ESP-IDF toolchain; see docs/e2e-esp32.md.
+# scenarios/examples/espnow-mesh-scripted.yaml is the same experiment with
+# scripted boards, which runs anywhere.
+#
+# The classic ESP32 only: the C3 asserts in eFuse reload with a NIC attached
+# and the S3 machine models no radio. Each board's station MAC comes from its
+# place in this file (02:68:7a:62:01:01 is gw, :02 to :05 are sensor-1 to -4);
+# the sketches rely on that, so keep gw first.
+name: espnow-mesh-5-nodes
+seed: 42
+duration: 60s
+environment:
+  preset: indoor_office
+  # No random shadowing, so the distances below mean the same thing for every seed.
+  shadowing_sigma_db: 0
+  obstacles:
+    - { polygon: [[12, -10], [12, 10]], attenuation_db: 12 }
+nodes:
+  - id: gw
+    board: esp32
+    firmware: ./fw/espnow-gateway
+    position: [0, 0]
+    # The sketches set Wi-Fi channel 1; the scenario must say the same.
+    radios: [{ phy: wifi, channel: 1, tx_power_dbm: 15 }]
+  - id: sensor
+    count: 4
+    board: esp32
+    firmware: ./fw/espnow-sensor
+    position: { grid: { origin: [6, 0], step: [4, 0] } }
+    radios: [{ phy: wifi, channel: 1, tx_power_dbm: 15 }]
+links:
+  - { from: sensor-4, to: gw, extra_loss_pct: 10 }
+timeline:
+  - { at: 30s, label: far, move: { node: sensor-4, to: [44, 0] } }
+assertions:
+  # Each board booted with its own station MAC from its eFuse image (ADR 0001 gate).
+  - serial: { node: gw, contains: "espnow up mac=02:68:7a:62:01:01", within: 30s }
+  - serial: { node: sensor-4, contains: "espnow up mac=02:68:7a:62:01:05", within: 30s }
+  # Unicast from every side of the wall, and the gateway's broadcast back.
+  - serial: { node: gw, contains: "from sensor-4", within: 30s }
+  - serial: { node: sensor-1, contains: "espnow rx beacon", within: 30s }
+  - metric: {
+      link: "sensor-*->gw",
+      phase: start,
+      kind: espnow,
+      acked_pct: { gt: 75 },
+      ack_rtt_p95_ms: { lt: 10 },
+      latency_p95_ms: { lt: 5 },
+    }
+  - metric: { link: "sensor-4->gw", phase: far, kind: espnow, acked_pct: { lt: 50 } }
+  - metric: { link: "sensor-1->gw", phase: far, kind: espnow, acked_pct: { gt: 90 } }

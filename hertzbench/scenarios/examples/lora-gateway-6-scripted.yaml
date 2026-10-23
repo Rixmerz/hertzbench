@@ -1,0 +1,63 @@
+# One LoRa gateway and six sensor nodes 300 m apart in a line, out to 1.8 km,
+# with scripted boards instead of ESP32 firmware. A scripted board replays
+# arduino-LoRa's register sequences over spi-link against the SX127x model, so
+# this runs without libqemu and finishes in seconds. lora-gateway-6-nodes.yaml
+# is the same experiment with real firmware.
+#
+# Urban path loss (exponent 3.5), no shadowing, 14 dBm, SF7 BW125 CR4/5: the
+# SF7 floor is -124.5 dBm, so the link budget runs out between 900 m and 1.5 km.
+# Expected: node-1 to node-3 lose nothing, node-4 (1.2 km) sits on the edge,
+# node-5 and node-6 never reach the gateway. Sends are staggered by 100 ms so
+# no two of the 57 ms packets overlap.
+name: lora-gateway-6-scripted
+seed: 7
+duration: 5s
+environment:
+  preset: urban
+  shadowing_sigma_db: 0
+nodes:
+  - id: gw
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { listen: true }
+  - id: node-1
+    board: scripted
+    position: [300, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { send: [{ every: 700ms, count: 6, start: 0ms, payload: reading }] }
+  - id: node-2
+    board: scripted
+    position: [600, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { send: [{ every: 700ms, count: 6, start: 100ms, payload: reading }] }
+  - id: node-3
+    board: scripted
+    position: [900, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { send: [{ every: 700ms, count: 6, start: 200ms, payload: reading }] }
+  - id: node-4
+    board: scripted
+    position: [1200, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { send: [{ every: 700ms, count: 6, start: 300ms, payload: reading }] }
+  - id: node-5
+    board: scripted
+    position: [1500, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { send: [{ every: 700ms, count: 6, start: 400ms, payload: reading }] }
+  - id: node-6
+    board: scripted
+    position: [1800, 0]
+    radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
+    firmware: { send: [{ every: 700ms, count: 6, start: 500ms, payload: reading }] }
+assertions:
+  - serial: { node: gw, contains: 'rx "reading:0 from node-1"', within: 2s }
+  - metric: { link: "node-1->gw", kind: lora, loss_pct: { eq: 0 }, rssi_dbm: { gt: -105 } }
+  - metric: { link: "node-2->gw", kind: lora, loss_pct: { eq: 0 } }
+  - metric: { link: "node-3->gw", kind: lora, loss_pct: { eq: 0 } }
+  - metric: { link: "node-5->gw", kind: lora, loss_pct: { eq: 100 } }
+  - metric: { link: "node-6->gw", kind: lora, loss_pct: { eq: 100 }, rssi_dbm: { lt: -130 } }
+  # "reading:N from node-1" is 21 or 22 bytes: 12.25 preamble + 43 payload symbols of
+  # 1.024 ms at SF7 is 56.58 ms on air. Latency is time on air plus propagation.
+  - metric: { link: "node-1->gw", kind: lora, latency_p50_ms: { gt: 56.5, lt: 56.7 } }

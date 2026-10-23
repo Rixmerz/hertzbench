@@ -1,14 +1,21 @@
 // The real board: a Velxio ESP32 worker (backend/app/services/esp32_worker.py)
 // started headless with one JSON config line on stdin, as
-// test/backend/integration/test_esp32_examples_qemu.py does. Its Wi-Fi NIC is
-// attached to this run's adapter instead of SLIRP through two config fields
-// that the core patch in docs/upstream-sync.md adds.
+// test/backend/integration/test_esp32_examples_qemu.py does. On a Wi-Fi
+// scenario its NIC is attached to this run's adapter instead of SLIRP; on a
+// LoRa or nRF24 scenario its SPI bus reaches the chip model over spi-link.
+// Both go through config fields the core patches in docs/upstream-sync.md add.
+// On a BLE scenario the board relays its HCI UART to the node's ble-hci port
+// with commands the worker already has: `uart_tx` events (worker header,
+// line 32) carry the firmware's bytes out, `uart_send` (line 17) carries the
+// virtual controller's bytes in. No worker change.
 //
 // Not runnable on a host without libqemu-xtensa; docs/e2e-esp32.md says how.
 
 import { fileURLToPath } from "node:url";
 import { workerNetworkConfig } from "../../adapters/qemu-wifi-l2/mod.ts";
 import { buildEfuseImage } from "../../adapters/qemu-wifi-l2/mod.ts";
+import { workerRadioSpiConfig } from "../../adapters/spi-link/mod.ts";
+import { LOOPBACK } from "../../adapters/loopback-ports.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -113,11 +120,23 @@ class LineAssembler {
   }
 }
 
+/** The firmware's HCI UART and the node's ble-hci connection it is relayed to. */
+interface HciRelay {
+  uart: number;
+  conn: Deno.TcpConn;
+}
+
 class Esp32Board implements RunningBoard {
   readonly clockDescription = "wall clock (QEMU Xtensa runs without -icount when Wi-Fi is on)";
   readonly #child: Deno.ChildProcess;
   readonly #writer: WritableStreamDefaultWriter<Uint8Array>;
   readonly #pumps: Promise<void>[];
+  readonly #hci: HciRelay | null;
+  /** Writes to the worker's stdin, in order: relayed HCI bytes, then the stop command. */
+  #stdin: Promise<void> = Promise.resolve();
+  /** HCI bytes the worker reported one event at a time, sent to the engine together. */
+  #hciOut: number[] = [];
+  #hciWrites: Promise<void> = Promise.resolve();
   #stopping = false;
 
   constructor(
@@ -125,11 +144,14 @@ class Esp32Board implements RunningBoard {
     child: Deno.ChildProcess,
     stderrLog: Deno.FsFile,
     stderrLogPath: string,
+    hci: HciRelay | null,
   ) {
     this.#child = child;
     this.#writer = child.stdin.getWriter();
+    this.#hci = hci;
     const lines = new LineAssembler(ctx.onSerial);
     this.#pumps = [
+      ...(hci ? [this.#relayToWorker(hci, ctx)] : []),
       this.#pumpStdout(child.stdout, ctx, lines),
       child.stderr.pipeTo(stderrLog.writable).catch(() => {
         // The log file closed under us while the run was ending.
@@ -175,6 +197,10 @@ class Esp32Board implements RunningBoard {
     if (typeof event !== "object" || event === null) return;
     const e = event as Record<string, unknown>;
     if (
+      this.#hci && e.type === "uart_tx" && e.uart === this.#hci.uart && typeof e.byte === "number"
+    ) {
+      this.#relayToEngine(this.#hci, e.byte);
+    } else if (
       e.type === "uart_tx" && (e.uart === 0 || e.uart === undefined) && typeof e.byte === "number"
     ) {
       lines.push(Uint8Array.of(e.byte));
@@ -187,10 +213,56 @@ class Esp32Board implements RunningBoard {
     }
   }
 
+  #relayToEngine(hci: HciRelay, byte: number): void {
+    this.#hciOut.push(byte & 0xff);
+    if (this.#hciOut.length > 1) return;
+    // Bytes of one packet arrive as consecutive events: send what has gathered once they stop.
+    queueMicrotask(() => {
+      const bytes = Uint8Array.from(this.#hciOut);
+      this.#hciOut = [];
+      this.#hciWrites = this.#hciWrites.then(async () => {
+        let written = 0;
+        while (written < bytes.length) written += await hci.conn.write(bytes.subarray(written));
+      }).catch(() => {
+        // The engine closed the port at the end of the run; the bytes have nowhere to go.
+      });
+    });
+  }
+
+  async #relayToWorker(hci: HciRelay, ctx: BoardContext): Promise<void> {
+    const buffer = new Uint8Array(4096);
+    for (;;) {
+      let n: number | null;
+      try {
+        n = await hci.conn.read(buffer);
+      } catch {
+        return; // closed by stop() or by the engine at the end of the run
+      }
+      if (n === null) return;
+      const command = { cmd: "uart_send", uart: hci.uart, data: toBase64(buffer.subarray(0, n)) };
+      this.#toWorker(JSON.stringify(command) + "\n").catch((error) => {
+        if (!this.#stopping) {
+          ctx.onProblem(`${ctx.node.id}: relaying HCI to the worker failed: ${error}`);
+        }
+      });
+    }
+  }
+
+  #toWorker(line: string): Promise<void> {
+    const next = this.#stdin.then(() => this.#writer.write(new TextEncoder().encode(line)));
+    this.#stdin = next.catch(() => {});
+    return next;
+  }
+
   async stop(): Promise<void> {
     this.#stopping = true;
     try {
-      await this.#writer.write(new TextEncoder().encode('{"cmd":"stop"}\n'));
+      this.#hci?.conn.close();
+    } catch {
+      // The engine closed it first.
+    }
+    try {
+      await this.#toWorker('{"cmd":"stop"}\n');
       await this.#writer.close();
     } catch {
       // The worker already exited; there is nothing left to tell it.
@@ -209,12 +281,14 @@ class Esp32Board implements RunningBoard {
         // Exited between the timeout and the kill.
       }
     }
-    await Promise.allSettled(this.#pumps);
+    await Promise.allSettled([...this.#pumps, this.#hciWrites]);
   }
 }
 
 export const ESP32_FIDELITY =
-  "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev)";
+  "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev); " +
+  "F1 for ESP-NOW (same binary, action frames from the QEMU fork's MAC model); " +
+  "F3 for BLE (a simulation-only build: the host stack sends HCI over a UART to the engine's virtual controller)";
 
 /**
  * One launcher per run. Its firmware cache lives as long as the run, so a
@@ -242,7 +316,15 @@ async function startEsp32(ctx: BoardContext, firmwareCache: FirmwareCache): Prom
     machine: "esp32-picsimlab",
     wifi_enabled: true,
   };
-  if (ctx.netPort !== null) {
+  const radio = node.radio;
+  if (ctx.netPort !== null && radio.phy === "lora") {
+    const { cs, reset } = radio.pins;
+    Object.assign(config, workerRadioSpiConfig(ctx.netPort, cs, reset === null ? [] : [reset]));
+  } else if (ctx.netPort !== null && radio.phy === "nrf24") {
+    Object.assign(config, workerRadioSpiConfig(ctx.netPort, radio.pins.csn, [radio.pins.ce]));
+  } else if (radio.phy === "ble") {
+    // The relay needs no worker config: HCI rides the worker's own UART commands.
+  } else if (ctx.netPort !== null) {
     // Distinct station MAC per board, and the NIC on the engine instead of SLIRP.
     const efusePath = `${ctx.outDir}/efuse-${node.id}.bin`;
     await Deno.writeFile(efusePath, buildEfuseImage(node.mac));
@@ -264,5 +346,11 @@ async function startEsp32(ctx: BoardContext, firmwareCache: FirmwareCache): Prom
   const writer = child.stdin.getWriter();
   await writer.write(new TextEncoder().encode(JSON.stringify(config) + "\n"));
   writer.releaseLock();
-  return new Esp32Board(ctx, child, stderrLog, stderrLogPath);
+  let hci: HciRelay | null = null;
+  if (radio.phy === "ble" && ctx.netPort !== null) {
+    const conn = await Deno.connect({ hostname: LOOPBACK, port: ctx.netPort });
+    conn.setNoDelay(true);
+    hci = { uart: radio.hciUart, conn };
+  }
+  return new Esp32Board(ctx, child, stderrLog, stderrLogPath, hci);
 }

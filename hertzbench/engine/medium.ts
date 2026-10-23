@@ -5,17 +5,30 @@
 // uses the same AP MAC (hw/misc/esp32_wifi_ap.c:517), so source-MAC learning
 // would see one MAC on every port. The scenario assigns each board a station
 // MAC and the table is built from that.
-
+//
+// ESP-NOW (ADR 0001) crosses the switch as the fork's pseudo-Ethernet. Action
+// frames take the channel model like any frame, on the channel the guest wrote
+// into byte 12. The fork's ACK for a unicast one is not a frame of its own on
+// the channel model: the action frame's MAC outcome already includes it. It is
+// delayed by its fixed time on the air and dropped when it would reach its
+// sender after the fork's 10 ms wait. The fork does not check which frame an
+// ACK answers (hw/misc/esp32_wifi_ap.c:465-476), so a late ACK would complete
+// the sender's next frame, or re-arm a timer that already fired; no real
+// radio sends a late ACK.
 import {
+  ACK_AIRTIME_US,
   type Environment,
   type LinkBudget,
   linkBudget,
   type Position,
   type RadioConfig,
+  SIFS_US,
   simulateFrame,
+  SPEED_OF_LIGHT_M_S,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
-import type { DropReason, EventLog, FrameKind } from "./events.ts";
+import { ESPNOW_ACK_TIMEOUT_MS, type EspNowFrame, parseEspNow } from "./espnow.ts";
+import type { DropReason, EspNowOutcome, EventLog, FrameKind } from "./events.ts";
 import type { VirtualGateway } from "./gateway.ts";
 import { classifyFrame, isGroupMac, parseEthernet } from "./packet.ts";
 import { substream } from "./rng.ts";
@@ -43,6 +56,17 @@ export interface LinkOverride {
   extraLatencyMs: number;
 }
 
+/** What the runner and the timeline do to a medium, whichever PHY it carries. */
+export interface MediumControl {
+  moveNode(id: string, position: Position): void;
+  setLinkOverride(from: string, to: string, override: LinkOverride): void;
+  startPhase(label: string): void;
+  node(id: string): Readonly<{ position: Position }>;
+  /** The link budget between two nodes; only media with a fixed PHY answer it. */
+  budget?(from: string, to: string): LinkBudget;
+  close(): void;
+}
+
 export interface MediumOptions {
   seed: number;
   environment: Environment;
@@ -58,6 +82,13 @@ interface NodeState extends MediumNode {
   sink: FrameSink;
 }
 
+/** A unicast ESP-NOW frame whose sender waits for the ACK. */
+interface PendingEspNow {
+  txAtMs: number;
+  /** Set when the receiver has the frame; an ACK before then answers an older one. */
+  delivered: boolean;
+}
+
 export const GATEWAY_NODE_ID = "gateway";
 
 export class Medium {
@@ -68,6 +99,9 @@ export class Medium {
   readonly #ordinals = new Map<string, number>();
   readonly #shadowing = new Map<string, number>();
   readonly #cancels = new Set<() => void>();
+  /** Keyed `sender>receiver`. The fork has one ACK timer, so one frame waits per pair. */
+  readonly #espnowPending = new Map<string, PendingEspNow>();
+  readonly #channelWarned = new Set<string>();
 
   constructor(opts: MediumOptions) {
     this.#opts = opts;
@@ -121,10 +155,21 @@ export class Medium {
     return linkBudget(this.#opts.environment, tx, rx, this.#shadowingDb(from, to));
   }
 
-  /** Stop deliveries that have not happened yet. */
+  /**
+   * Stop deliveries that have not happened yet. A unicast ESP-NOW frame whose
+   * ACK window has passed with no ACK is recorded as `no_ack`; one still inside
+   * its window was cut off by the end of the run and is not counted.
+   */
   close(): void {
     for (const cancel of this.#cancels) cancel();
     this.#cancels.clear();
+    const now = this.#opts.clock.now();
+    for (const [key, pending] of this.#espnowPending) {
+      if (now - pending.txAtMs < ESPNOW_ACK_TIMEOUT_MS) continue;
+      const [from, to] = key.split(">") as [string, string];
+      this.#espnowOutcome(from, to, "no_ack", null);
+    }
+    this.#espnowPending.clear();
   }
 
   /** A board put `frame` on the air. */
@@ -144,6 +189,19 @@ export class Medium {
       src: eth.src,
     });
     this.#opts.tap?.(clock.now(), from, frame);
+
+    const espnow = parseEspNow(frame);
+    if (espnow?.type === "ack") return this.#forwardEspNowAck(sender, espnow, frame);
+    if (espnow && espnow.channel !== sender.radio.channel && !this.#channelWarned.has(from)) {
+      this.#channelWarned.add(from);
+      log.append({
+        type: "warning",
+        t: clock.now(),
+        text: `node ${from} sends ESP-NOW on channel ${espnow.channel} but the scenario puts ` +
+          `its radio on channel ${sender.radio.channel}; only nodes on channel ` +
+          `${espnow.channel} hear it`,
+      });
+    }
 
     const gateway = this.#opts.gateway;
     if (gateway) {
@@ -176,6 +234,7 @@ export class Medium {
         kind,
         unacked,
         targetId !== undefined,
+        espnow?.channel ?? sender.radio.channel,
       );
     }
   }
@@ -205,12 +264,14 @@ export class Medium {
     kind: FrameKind,
     unacked: boolean,
     addressed: boolean,
+    channel: number,
   ): void {
     const { clock, log, environment, seed } = this.#opts;
     const linkKey = `${sender.id}>${receiver.id}`;
     const budget = this.budget(sender.id, receiver.id);
     const base = { from: sender.id, to: receiver.id, bytes: frame.length, kind };
-    const drop = (reason: DropReason, attempts: number) =>
+    const awaitsAck = kind === "espnow" && addressed;
+    const drop = (reason: DropReason, attempts: number) => {
       log.append({
         type: "drop",
         t: clock.now(),
@@ -220,8 +281,14 @@ export class Medium {
         rssiDbm: budget.rssiDbm,
         snrDb: budget.snrDb,
       });
+      if (awaitsAck) this.#espnowOutcome(sender.id, receiver.id, "frame_lost", null);
+    };
+    // A frame still waiting for its ACK when the next one goes never got one.
+    if (awaitsAck && this.#espnowPending.has(linkKey)) {
+      this.#espnowOutcome(sender.id, receiver.id, "no_ack", null);
+    }
 
-    if (sender.radio.channel !== receiver.radio.channel) {
+    if (channel !== receiver.radio.channel) {
       // Out of earshot. A frame for a specific station is a loss worth
       // reporting; a broadcast simply is not heard by that station.
       if (addressed) drop("channel_mismatch", 0);
@@ -262,7 +329,75 @@ export class Medium {
       snrDb: budget.snrDb,
     });
     const copy = frame.slice();
-    this.#after(outcome.delayMs, () => receiver.sink.deliver(copy, sender.id));
+    if (!awaitsAck) {
+      this.#after(outcome.delayMs, () => receiver.sink.deliver(copy, sender.id));
+      return;
+    }
+    const pending: PendingEspNow = { txAtMs: clock.now(), delivered: false };
+    this.#espnowPending.set(linkKey, pending);
+    this.#after(outcome.delayMs, () => {
+      pending.delivered = true;
+      receiver.sink.deliver(copy, sender.id);
+    });
+  }
+
+  /** `acker` answered a unicast ESP-NOW frame; carry the ACK back if the sender still waits. */
+  #forwardEspNowAck(acker: NodeState, ack: EspNowFrame, frame: Uint8Array): void {
+    const { clock, log } = this.#opts;
+    const senderId = this.#idByMac.get(ack.dst);
+    if (senderId === undefined || senderId === acker.id) return; // answers nobody on the medium
+    const sender = this.#requireNode(senderId);
+    const budget = this.budget(acker.id, sender.id);
+    const base = {
+      from: acker.id,
+      to: sender.id,
+      bytes: frame.length,
+      kind: "espnow-ack" as const,
+      attempts: 1,
+      rssiDbm: budget.rssiDbm,
+      snrDb: budget.snrDb,
+    };
+    const drop = (reason: DropReason) =>
+      log.append({ type: "drop", t: clock.now(), ...base, reason });
+
+    if (ack.channel !== sender.radio.channel) return drop("channel_mismatch");
+    if (!sender.sink.ready()) return drop("no_peer");
+    const key = `${sender.id}>${acker.id}`;
+    const pending = this.#espnowPending.get(key);
+    if (!pending?.delivered) return drop("ack_unmatched");
+
+    // SIFS, the ACK on the air and propagation. No loss and no retries: the
+    // action frame's MAC outcome already counted this ACK.
+    const delayMs = (SIFS_US + ACK_AIRTIME_US) / 1000 +
+      (budget.distanceM / SPEED_OF_LIGHT_M_S) * 1000 +
+      (this.#overrides.get(`${acker.id}>${sender.id}`)?.extraLatencyMs ?? 0);
+    const roundTripMs = clock.now() + delayMs - pending.txAtMs;
+    if (roundTripMs > ESPNOW_ACK_TIMEOUT_MS) {
+      drop("ack_timeout");
+      this.#espnowOutcome(sender.id, acker.id, "ack_timeout", roundTripMs);
+      return;
+    }
+    log.append({ type: "deliver", t: clock.now(), ...base, delayMs, rateMbps: 6 });
+    this.#espnowOutcome(sender.id, acker.id, "acked", roundTripMs);
+    const copy = frame.slice();
+    this.#after(delayMs, () => sender.sink.deliver(copy, acker.id));
+  }
+
+  #espnowOutcome(
+    from: string,
+    to: string,
+    outcome: EspNowOutcome,
+    roundTripMs: number | null,
+  ): void {
+    this.#espnowPending.delete(`${from}>${to}`);
+    this.#opts.log.append({
+      type: "espnow-send",
+      t: this.#opts.clock.now(),
+      from,
+      to,
+      outcome,
+      roundTripMs,
+    });
   }
 
   #after(delayMs: number, fn: () => void): void {

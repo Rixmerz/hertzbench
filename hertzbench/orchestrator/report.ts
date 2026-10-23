@@ -4,14 +4,55 @@
 
 import type { LinkStats } from "../engine/mod.ts";
 import { PRODUCT } from "../brand.ts";
+import type { Phy } from "./radios.ts";
 import type { RunResult } from "./runner.ts";
 
-const ADAPTER_FIDELITY = {
+/** The protocol path of a run, per PHY (PLAN.md D10: say how faithful the result is). */
+const ADAPTER_FIDELITY: Record<
+  Phy,
+  { component: string; protocol: string; level: string; meaning: string }
+> = {
+  wifi: {
+    component: "qemu-wifi-l2 adapter",
+    protocol: "wi-fi/ip",
+    level: "F2",
+    meaning: "same firmware binary, frames captured at the netdev (layer 2 and up)",
+  },
+  lora: {
+    component: "lora-sx127x model over spi-link",
+    protocol: "lora",
+    level: "F1",
+    meaning: "same firmware binary, the SX127x modelled at its SPI register interface",
+  },
+  nrf24: {
+    component: "nrf24 model over spi-link",
+    protocol: "nrf24",
+    level: "F1",
+    meaning: "same firmware binary, the nRF24L01+ modelled at its SPI command interface",
+  },
+  ble: {
+    component: "ble-hci virtual controller over an HCI UART",
+    protocol: "ble",
+    level: "F3",
+    meaning:
+      "the firmware's own BLE host stack runs, in a simulation-only build that sends HCI over a UART to a link-layer controller the engine plays; the binary differs from production",
+  },
+};
+
+const ESPNOW_FIDELITY: (typeof ADAPTER_FIDELITY)[Phy] = {
   component: "qemu-wifi-l2 adapter",
-  protocol: "wi-fi/ip",
-  level: "F2",
-  meaning: "same firmware binary, frames captured at the netdev (layer 2 and up)",
-} as const;
+  protocol: "esp-now",
+  level: "F1",
+  meaning:
+    "same firmware binary, 802.11 action frames bridged by the QEMU fork's MAC model as pseudo-Ethernet",
+};
+
+/** The protocol rows that apply to this run: ESP-NOW only when ESP-NOW crossed the medium. */
+function protocolFidelity(result: RunResult) {
+  const espnow = result.events.some((e) => e.type === "tx" && e.kind === "espnow");
+  const phy = ADAPTER_FIDELITY[result.scenario.phy];
+  return espnow ? [phy, ESPNOW_FIDELITY] : [phy];
+}
 
 export function linkJson(link: LinkStats) {
   return {
@@ -26,22 +67,34 @@ export function linkJson(link: LinkStats) {
     snr_db: link.snrDb,
     mean_attempts: link.meanAttempts,
     bytes_delivered: link.bytesDelivered,
+    espnow: link.espnow && {
+      sends: link.espnow.sends,
+      acked: link.espnow.acked,
+      outcomes: link.espnow.outcomes,
+      acked_pct: link.espnow.ackedPct,
+      round_trip_ms: link.espnow.roundTripMs,
+    },
   };
 }
 
-/** The contents of metrics.json. `schema` changes if a field is renamed or removed. */
+/**
+ * The contents of metrics.json. `schema` changes if a field is renamed or
+ * removed or changes type. 2: `phy` and per-node `radio` added, node `channel`
+ * may be null (LoRa has no channel number).
+ */
 export function metricsDocument(result: RunResult) {
   const { scenario, metrics } = result;
   return {
-    schema: 1,
+    schema: 2,
     tool: PRODUCT.slug,
     scenario: scenario.name,
+    phy: scenario.phy,
     seed: scenario.seed,
     duration_ms: scenario.durationMs,
     // Latency is the delay the channel model assigned. It is not measured on a guest clock.
     latency: "modelled",
     fidelity: [
-      ADAPTER_FIDELITY,
+      ...protocolFidelity(result),
       ...[...new Set(result.nodes.map((n) => `${n.board}: ${n.fidelity}`))].map((line) => ({
         component: "board",
         description: line,
@@ -54,6 +107,7 @@ export function metricsDocument(result: RunResult) {
       mac: n.mac,
       position: n.position,
       channel: n.channel,
+      radio: n.radio,
       on_medium: n.onMedium,
       clock: n.clock,
     })),
@@ -99,6 +153,62 @@ function linkRows(links: readonly LinkStats[]): string[][] {
   ]);
 }
 
+const ESPNOW_HEADER = [
+  "link",
+  "sends",
+  "acked",
+  "acked %",
+  "frame_lost",
+  "ack_timeout",
+  "no_ack",
+  "rtt p50 ms",
+  "rtt max ms",
+];
+
+function espnowRows(links: readonly LinkStats[]): string[][] {
+  return links.flatMap((l) => {
+    const e = l.espnow;
+    if (!e) return [];
+    return [[
+      `${l.from}->${l.to}`,
+      String(e.sends),
+      String(e.acked),
+      `${e.ackedPct.toFixed(1)}%`,
+      String(e.outcomes.frame_lost ?? 0),
+      String(e.outcomes.ack_timeout ?? 0),
+      String(e.outcomes.no_ack ?? 0),
+      e.roundTripMs ? ms(e.roundTripMs.p50) : "-",
+      e.roundTripMs ? ms(e.roundTripMs.max) : "-",
+    ]];
+  });
+}
+
+/** HCI disconnection reasons a BLE run can end a connection with. */
+const BLE_REASONS: Record<number, string> = {
+  0x08: "supervision timeout",
+  0x13: "remote user terminated",
+  0x16: "terminated by local host",
+  0x28: "instant passed",
+  0x3e: "failed to be established",
+};
+
+function bleLinkRows(result: RunResult): string[][] {
+  return result.events.flatMap((e) => {
+    if (e.type !== "ble-link") return [];
+    const reason = e.reason === null
+      ? ""
+      : ` (0x${e.reason.toString(16).padStart(2, "0")} ${BLE_REASONS[e.reason] ?? "other"})`;
+    return [[
+      e.t.toFixed(1),
+      e.node,
+      e.peer,
+      e.role,
+      e.state === "up" ? "connected" : `disconnected${reason}`,
+      ms(e.intervalMs),
+    ]];
+  });
+}
+
 const LINK_HEADER = [
   "link",
   "sent",
@@ -120,23 +230,30 @@ export function renderReport(result: RunResult): string {
   );
   out.push("");
   out.push("Fidelity");
-  out.push(
-    `  ${ADAPTER_FIDELITY.protocol}: ${ADAPTER_FIDELITY.level}, ${ADAPTER_FIDELITY.meaning}`,
-  );
+  for (const row of protocolFidelity(result)) {
+    out.push(`  ${row.protocol}: ${row.level}, ${row.meaning}`);
+  }
   for (const line of new Set(result.nodes.map((n) => `${n.board}: ${n.fidelity}`))) {
     out.push(`  ${line}`);
   }
-  out.push("  latency below is MODELLED by the channel model, not measured on a guest clock");
+  out.push(
+    scenario.phy === "wifi"
+      ? "  latency below is MODELLED by the channel model, not measured on a guest clock"
+      : scenario.phy === "ble"
+      ? "  latency below is MODELLED: ble-adv and ble-data are time on air plus propagation; " +
+        "ble-acl is host to host, waiting for connection events and retransmissions included"
+      : "  latency below is MODELLED: time on air from the chip's registers plus propagation",
+  );
   out.push("");
   out.push("Nodes");
   out.push(
     ...table(
-      ["node", "board", "ip", "channel", "position", "clock"],
+      ["node", "board", "ip", "radio", "position", "clock"],
       result.nodes.map((n) => [
         n.id,
         n.board,
-        n.ip,
-        String(n.channel),
+        scenario.phy === "wifi" ? n.ip : "-",
+        n.radio,
         n.onMedium
           ? `(${n.position.x}, ${n.position.y}${
             n.position.z === undefined ? "" : `, ${n.position.z}`
@@ -153,6 +270,24 @@ export function renderReport(result: RunResult): string {
       ? table(LINK_HEADER, linkRows(metrics.total))
       : ["no frames crossed the medium"]).map((l) => `  ${l}`),
   );
+  const espnowTotal = espnowRows(metrics.total);
+  if (espnowTotal.length) {
+    out.push("");
+    out.push(
+      "ESP-NOW unicast sends, as the sending firmware sees them (the fork waits 10 ms for each ACK)",
+    );
+    out.push(...table(ESPNOW_HEADER, espnowTotal).map((l) => `  ${l}`));
+  }
+  const bleLinks = bleLinkRows(result);
+  if (bleLinks.length) {
+    out.push("");
+    out.push("BLE connections, as each side's controller saw them");
+    out.push(
+      ...table(["t ms", "node", "peer", "role", "event", "interval ms"], bleLinks).map((l) =>
+        `  ${l}`
+      ),
+    );
+  }
   if (metrics.phases.length > 1) {
     for (const phase of metrics.phases) {
       out.push("");
@@ -164,6 +299,10 @@ export function renderReport(result: RunResult): string {
           l,
         ) => `  ${l}`),
       );
+      const espnowPhase = espnowRows(phase.links);
+      if (espnowPhase.length) {
+        out.push(...["", ...table(ESPNOW_HEADER, espnowPhase)].map((l) => l && `  ${l}`));
+      }
     }
   }
   if (metrics.warnings.length || result.problems.length) {

@@ -1,0 +1,43 @@
+# Three ESP32 BLE sensors running real Bluedroid firmware, and a scripted
+# central. Each sensor's host stack talks HCI over UART1 to the virtual
+# controller the engine plays for it (ADR 0002, F3); the gateway is a scripted
+# host, because a Bluedroid GATT client is not part of this example.
+# ble-sensors-scripted.yaml is the same layout with scripted sensors.
+#
+# Build the sensor once with ESP-IDF v5.3 or later before running this:
+# hertzbench/docs/e2e-esp32.md, "The BLE example". NEVER RUN: the host this
+# was written on has no libqemu and no ESP-IDF.
+#
+# Indoor office, no shadowing, 0 dBm: the 1M PHY's -97 dBm sensitivity is
+# reached at about 78 m. At 30 s sensor-3 walks from 40 m to 150 m and its
+# connection ends on the 1 s supervision timeout.
+name: ble-sensors-3-nodes
+seed: 11
+duration: 60s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: gw
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      connect: { peers: [sensor-1, sensor-2, sensor-3], interval: 30ms, timeout: 1s }
+  - id: sensor
+    count: 3
+    board: esp32
+    firmware: ./fw/ble-sensor/build/ble-sensor-flash.bin
+    position: { grid: { origin: [5, 0], step: [17.5, 0] } }
+    radios: [{ phy: ble, tx_power_dbm: 0, hci_uart: 1 }]
+timeline:
+  - at: 30s
+    label: walked-away
+    move: { node: sensor-3, to: [150, 0] }
+assertions:
+  - serial: { node: sensor-1, contains: "ble up addr=02:68:7a:62:01:02", within: 20s }
+  - serial: { node: gw, contains: "ble connected to sensor-1 as central", within: 25s }
+  - serial: { node: gw, contains: 'ble rx "reading:3" from sensor-1', within: 30s }
+  - serial: { node: sensor-3, contains: "ble disconnected reason=0x08" }
+  - metric: { link: "sensor-*->gw", phase: start, kind: ble-acl, loss_pct: { eq: 0 } }
+  - metric: { link: "gw->sensor-3", phase: walked-away, kind: ble-data, loss_pct: { gt: 90 } }

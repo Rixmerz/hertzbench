@@ -2,7 +2,7 @@
 
 A scenario is one YAML file. `hertzbench validate` checks it; every error names the field (`nodes[1].position: expected [x, y] or [x, y, z]`). Unknown fields are errors, not ignored. Durations need a unit: `500ms`, `60s`, `1.5s`, `2m`. A bare number is refused.
 
-Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU).
+Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE.
 
 ```yaml
 name: udp-3-nodes            # required
@@ -35,13 +35,14 @@ outputs: { metrics: ./out/metrics.json, pcap: ./out/air.pcap, events: ./out/even
   firmware: ./fw/udp-node    # esp32: a sketch directory, or a .bin flash image. Relative to the scenario file
   position: [0, 0]           # metres: [x, y] or [x, y, z]. Walls ignore z
   # position: { grid: { origin: [10, 0], step: [8, 0] } }    # for count > 1
-  radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15, antenna_gain_dbi: 0 }]   # exactly one in Phase 1
+  radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15, antenna_gain_dbi: 0 }]   # exactly one: wifi, lora, nrf24 or ble
   ip: 192.168.4.20           # optional; default .11, .12, ... in node order
   internet_gateway: true     # optional; see below
 ```
 
 - Only the classic ESP32 does Wi-Fi networking in Phase 1. `esp32-c3` and `esp32-s3` are refused with the reason.
-- `channel` is the channel the node's radio uses in the model. Velxio's compile step forces channel 5 on the firmware, so use 5 for ESP32 sketches built through it.
+- `channel` is the channel the node's radio uses in the model. Velxio's compile step forces channel 5 on any `WiFi.begin()`, so use 5 for ESP32 sketches that join Wi-Fi through it. An ESP-NOW sketch picks its own channel (`esp_wifi_set_channel`); give the node the same one. ESP-NOW frames travel on the channel the firmware wrote into them, and a mismatch with the scenario is reported as a warning ([fidelity.md](fidelity.md#esp-now)).
+- ESP32 station MACs are `02:68:7a:62:01:NN`, NN being the node's place in the file counting from 01 (after `count` expansion). ESP-NOW sketches that address a peer by MAC depend on that order.
 - `internet_gateway: true` marks the one ESP32 that keeps SLIRP. It is **off the medium**: it cannot exchange frames with the other boards. At most one. See [fidelity.md](fidelity.md).
 - A `scripted` board takes `firmware: { send: [...] }`. It is a traffic generator for hosts without libqemu, not firmware:
 
@@ -51,6 +52,47 @@ outputs: { metrics: ./out/metrics.json, pcap: ./out/air.pcap, events: ./out/even
   ```
 
   It does DHCP at start-up, then sends `<payload>:<n>` over UDP to the named node, answers any datagram that starts with `ping` with `pong<same suffix>`, and logs `rx <text> from <node>` on its serial line.
+
+  With `via: espnow` the send is an ESP-NOW frame instead, through a model of the QEMU fork's ESP-NOW MAC; `to` may then be `broadcast`, and `port` is refused. The payload stays within 200 bytes.
+
+  ```yaml
+  send:
+    - { to: gw, via: espnow, every: 100ms, count: 50, payload: reading }
+    - { to: broadcast, via: espnow, every: 1s, count: 5, payload: beacon }
+  ```
+
+  Frames go one at a time, each waiting for its ACK or the fork's 10 ms timeout. The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.
+
+### BLE radios
+
+```yaml
+radios: [{ phy: ble, tx_power_dbm: 0, antenna_gain_dbi: 0, hci_uart: 1 }]
+```
+
+- Every node of a BLE scenario has a `ble` radio. Its controller is the engine's (F3, [fidelity.md](fidelity.md#ble)); the firmware brings its own host stack and configures everything else (advertising, scanning, connection parameters) over HCI.
+- `tx_power_dbm`: -20 to 20, default 0. The ESP32 transmits BLE at -12 to +9 dBm.
+- `hci_uart`: 1 (default) or 2, the UART the firmware's host stack writes HCI to. UART0 is refused: it is the serial console. Scripted boards ignore it.
+- A node's device address is its MAC, `02:68:7a:62:01:NN`.
+- `ip` and `internet_gateway` are refused.
+
+A `scripted` BLE board plays a host (not firmware). It is a peripheral or a central:
+
+```yaml
+firmware:
+  advertise: { name: sensor-1, interval: 50ms }   # or `advertise: true`: the node's id, 100 ms
+  send: [{ to: gw, every: 200ms, count: 35, payload: reading }]
+```
+
+```yaml
+firmware:
+  connect: { peers: [sensor-1, sensor-2], interval: 30ms, timeout: 1s }
+  scan: true                                       # optional: log every advertiser heard
+  send: [{ to: sensor-1, every: 1s, count: 5, payload: cmd }]
+```
+
+- A peripheral advertises connectable, and again after a disconnection. A central connects to its `peers` through the filter accept list and reconnects whenever a link drops. `interval` is 7.5 ms to 4 s in steps of 1.25 ms (default 30 ms), `timeout` 100 ms to 32 s in steps of 10 ms (default 1 s) and more than twice the interval.
+- A send goes over the connection to `to` (`via: gatt` is implied): an ATT notification from a peripheral, an ATT Write Command from a central, on handle 0x0010, carrying `<payload>:<n>`. The payload stays within 14 bytes. `to` must be a node the board connects to or that connects to it; `port` is refused. A send while not connected is skipped and logged.
+- Serial lines: `ble ready addr=<address>`, `ble advertising as <name>`, `ble connected to <node> as central|peripheral`, `ble disconnected from <node> reason=0x08`, `ble tx <text> to <node>`, `ble rx "<text>" from <node>`, and with `scan: true` `ble adv "<name>" from <node> rssi=<dBm>`.
 
 ## `links`
 
@@ -78,16 +120,16 @@ Needs at least a `move`, a `link` or a `label`. Events past `duration` are an er
 - metric:
     link: "c->a"                  # from->to, either side may use *
     phase: behind-wall            # optional; `start` or a timeline label. Default: whole run
-    kind: udp                     # optional frame kind: arp dhcp udp tcp icmp ipv4 espnow-pseudo-ethernet other
+    kind: udp                     # optional frame kind: arp dhcp udp tcp icmp ipv4 espnow espnow-ack lora nrf24 nrf24-ack ble-adv ble-data ble-acl other
     loss_pct: { gt: 20 }          # fields below, comparisons lt lte gt gte eq
     latency_p95_ms: { gt: 4 }
 ```
 
-Metric fields: `sent`, `delivered`, `loss_pct`, `latency_p50_ms`, `latency_p95_ms`, `latency_p99_ms`, `latency_mean_ms`, `rssi_dbm`, `snr_db`, `mean_attempts`. `sent` counts frames that reached an outcome (delivered or dropped). A link pattern must match at least one link that carried frames, and **every** matching link must satisfy every comparison. A latency check on a link that delivered nothing fails.
+Metric fields: `sent`, `delivered`, `loss_pct`, `latency_p50_ms`, `latency_p95_ms`, `latency_p99_ms`, `latency_mean_ms`, `rssi_dbm`, `snr_db`, `mean_attempts`, `acked_pct`, `ack_rtt_p95_ms`. `sent` counts frames that reached an outcome (delivered or dropped). `acked_pct` and `ack_rtt_p95_ms` are about unicast ESP-NOW sends on the link: the share whose ACK came back within the fork's 10 ms, and the 95th percentile of their round trip. Use them with `kind: espnow` or no `kind`; with any other kind they have no value and the check fails. A link pattern must match at least one link that carried frames, and **every** matching link must satisfy every comparison. A latency check on a link that delivered nothing fails.
 
 ## `outputs`
 
-Paths are relative to the scenario file. Defaults are `metrics.json`, `air.pcap` and `events.jsonl` in `<scenario dir>/out`. `--out DIR` on the command line overrides all of them. Per-board files (`serial-<node>.log`, `efuse-<node>.bin`, `worker-<node>.stderr.log`) go in the output directory.
+Paths are relative to the scenario file. Defaults are `metrics.json`, `air.pcap` and `events.jsonl` in `<scenario dir>/out`. A run that carried ESP-NOW also writes the same frames as 802.11 with a radiotap header next to the capture: `air.pcap` gives `air-80211.pcap`. A BLE run's `air.pcap` holds LE link-layer packets (link type 256), and each node's HCI goes to `hci-<node>.btsnoop` in the output directory. `--out DIR` on the command line overrides all of them. Per-board files (`serial-<node>.log`, `efuse-<node>.bin`, `worker-<node>.stderr.log`) go in the output directory.
 
 ## `events.jsonl` and time zero
 
@@ -95,7 +137,7 @@ One JSON event per line, in the order the engine logged them, with `t` in millis
 
 ## `metrics.json`
 
-`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`.
+`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). `events.jsonl` has one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
 
 ## Exit status
 

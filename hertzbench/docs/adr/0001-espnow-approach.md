@@ -1,6 +1,6 @@
 # ADR 0001: ESP-NOW approach (F1)
 
-- Status: Accepted for Phase 0. Phase 4 depends on the Phase 1 spike described below.
+- Status: Accepted for Phase 0. Implemented in Phase 4 (2026-10) **without the gate below having been run**: no host used so far has libqemu. See "Phase 4" at the end.
 - Date: 2026-10-22
 - Evidence: [discovery.md](../discovery.md), Q3 and Q8.
 
@@ -41,3 +41,15 @@ Use **F1**. The boards keep the production Wi-Fi driver and the fork's MAC model
 - **Platform limits.** The classic ESP32 always gets a radio (`esp32_worker.py:466-467`). The C3 gets one only for a sketch that uses Wi-Fi (`:462-465`), and it hits an eFuse assertion with a NIC present (worker comment `:449-460`). The S3 has no radio (`:468-471`). ESP-NOW examples therefore start with the classic ESP32.
 - **Upstream.** Velxio's shipped library may differ from the public fork. Until the Phase 1 spike runs against the shipped `.so`, this ADR rests on the public fork.
 - **Fidelity label.** The CLI reports this protocol as F1 (PLAN D10), with the caveats above.
+
+## Phase 4
+
+The owner asked for Phase 4 on a host without libqemu, so it was built against the fork's code and tested with a model of it instead of after the gate. What was built, and where this ADR's consequences went:
+
+- **No change to the fork or to Velxio** beyond Phase 1's patch: the netdev and the per-board eFuse image already give each board its own station MAC on the switch.
+- **ACK budget:** the engine measures each unicast frame's round trip and drops an ACK that would arrive after the 10 ms wait, because the fork does not check which frame an ACK answers. A latency sweep on both legs tests the boundary (`tests/espnow_test.ts`). This replaces the Phase 1 warning on one-way p95 over 5 ms.
+- **Channel:** the engine reads it from byte 12 of each frame.
+- **Pcap:** `air-80211.pcap` holds the 802.11 + radiotap view; `air.pcap` keeps the netdev bytes.
+- **Platform:** the examples use the classic ESP32.
+
+The gate is now the first step of the ESP-NOW run in [e2e-esp32.md](../e2e-esp32.md). If it fails, this ADR's fallback (the F3 shim) still applies, and so does the need for its own ADR. [fidelity.md](../fidelity.md#esp-now) lists what is read from the code rather than measured.
