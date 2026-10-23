@@ -5,20 +5,22 @@ over simulated wireless links with a distance, a path loss, a latency and a loss
 AGPLv3, based on [Velxio](https://github.com/davidmonterocrespo24/velxio) (which does the CPU
 emulation).
 
-The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**: N ESP32 boards over Wi-Fi/IP with
-a channel model, run headless from a scenario file.
+The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
+a channel model, run headless from a scenario file, and **Phase 2**, an MCP server so an AI agent
+can build, run and steer those scenarios.
 
 ## Status
 
-| Part                                                                                                  | State                                                                                                                                                       |
-| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| RF engine: medium, nodes, positions, path loss, rate and retries, jitter, loss, seeded RNG, event log | done, unit-tested on a manual clock                                                                                                                         |
-| `qemu-wifi-l2` adapter: each board's QEMU network device on the engine instead of SLIRP               | done, tested against a fake QEMU peer over real sockets                                                                                                     |
-| Orchestrator and CLI: `hertzbench run`, `validate`                                                    | done, tested through the real CLI                                                                                                                           |
-| `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                | done                                                                                                                                                        |
-| ESP32 boards under QEMU                                                                               | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first |
-| `docker-compose.hertzbench.yml`                                                                       | not started                                                                                                                                                 |
-| ESP-NOW, LoRa, BLE, nRF24, MCP server, mobile bridge, canvas                                          | later phases                                                                                                                                                |
+| Part                                                                                                   | State                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RF engine: medium, nodes, positions, path loss, rate and retries, jitter, loss, seeded RNG, event log  | done, unit-tested on a manual clock                                                                                                                         |
+| `qemu-wifi-l2` adapter: each board's QEMU network device on the engine instead of SLIRP                | done, tested against a fake QEMU peer over real sockets                                                                                                     |
+| Orchestrator and CLI: `hertzbench run`, `validate`                                                     | done, tested through the real CLI                                                                                                                           |
+| `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                        |
+| ESP32 boards under QEMU                                                                                | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first |
+| MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                |
+| `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                 |
+| ESP-NOW, LoRa, BLE, nRF24, mobile bridge, canvas                                                       | later phases                                                                                                                                                |
 
 ## Quick start (no QEMU needed)
 
@@ -40,6 +42,7 @@ libqemu, see [docs/e2e-esp32.md](docs/e2e-esp32.md).
 ```
 hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
 hertzbench validate <scenario.yaml>
+hertzbench mcp [--workspace DIR]
 ```
 
 To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin directory, usually
@@ -48,6 +51,20 @@ To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin d
 
 `hzb` is the short alias. Exit status: 0 passed, 1 an assertion failed, 2 invalid scenario or a host
 that cannot run it, 130 interrupted (boards are stopped first).
+
+## Use it from Claude Code (MCP)
+
+```bash
+claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project
+```
+
+The agent gets `list_boards`, `create_scenario`, `validate_scenario`, `run_scenario`, `get_status`,
+`get_serial`, `get_metrics`, `move_node`, `inject_fault` and `stop`. As resources it gets the
+example scenarios, the scenario format and the fidelity table. A run plays in the background, so the
+agent can move a node or break a link while it runs and read the effect in the metrics.
+`scenarios/examples/live-3-scripted.yaml` is a two-minute run made for that. Every file the server
+writes stays inside its workspace. Registration without installing, the tool reference and the ESP32
+setup are in [docs/mcp.md](docs/mcp.md).
 
 ## How it works
 
@@ -73,9 +90,10 @@ board N (QEMU) ──┘   (loopback TCP)     switch + channel model   └──
 engine/          RF engine: channel model, medium, switch, gateway, metrics, pcap
 adapters/        qemu-wifi-l2 (QEMU stream netdev <-> engine), eFuse image builder
 orchestrator/    scenario parser, runner, assertions, report, boards (esp32, scripted)
-cli/             hertzbench run | validate
+mcp/             MCP server: JSON-RPC over stdio, tools, resources, the live run
+cli/             hertzbench run | validate | mcp
 scenarios/       examples/
-tests/           deno tests (engine, adapter, scenario, orchestrator, CLI)
+tests/           deno tests (engine, adapter, scenario, orchestrator, CLI, MCP)
 docs/            PLAN, discovery, ADRs, fidelity, scenario format, e2e, upstream sync
 brand.ts         the product name, in one place
 ```
@@ -84,7 +102,7 @@ brand.ts         the product name, in one place
 
 ```bash
 cd hertzbench
-deno task test      # unit + adapter + CLI end to end; no QEMU needed
+deno task test      # unit + adapter + CLI and MCP end to end; no QEMU needed
 deno task check     # type check
 deno lint && deno fmt --check
 ```
@@ -97,6 +115,8 @@ the repository root. It touches one Velxio file; see [docs/upstream-sync.md](doc
 - [docs/scenario-format.md](docs/scenario-format.md): every scenario field and the `metrics.json`
   layout
 - [docs/fidelity.md](docs/fidelity.md): fidelity levels, the channel model, what is not modelled
+- [docs/mcp.md](docs/mcp.md): the MCP server, its tools and resources, registering it with Claude
+  Code
 - [docs/e2e-esp32.md](docs/e2e-esp32.md): running the ESP32 example, and what to verify on the first
   run
 - [docs/upstream-sync.md](docs/upstream-sync.md): the Velxio patches and the sync policy
