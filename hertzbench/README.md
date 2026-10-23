@@ -8,25 +8,26 @@ emulation).
 The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
 a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
 build, run and steer those scenarios, **Phase 3**, LoRa and nRF24 radio chips modelled at their SPI
-interface, **Phase 4**, ESP-NOW between the boards, **Phase 6**, BLE between the boards through a
+interface, **Phase 4**, ESP-NOW between the boards, **Phase 5**, a mobile bridge that lets a real
+phone reach a simulated board over Wi-Fi/IP or BLE, **Phase 6**, BLE between the boards through a
 virtual controller on an HCI UART, and **Phase 7**, an optional live view in the browser.
 
 ## Status
 
-| Part                                                                                                   | State                                                                                                                                                          |
-| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| RF engine: medium, nodes, positions, path loss, rate and retries, jitter, loss, seeded RNG, event log  | done, unit-tested on a manual clock                                                                                                                            |
-| `qemu-wifi-l2` adapter: each board's QEMU network device on the engine instead of SLIRP                | done, tested against a fake QEMU peer over real sockets                                                                                                        |
-| Orchestrator and CLI: `hertzbench run`, `validate`                                                     | done, tested through the real CLI                                                                                                                              |
-| `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                           |
-| ESP32 boards under QEMU                                                                                | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first    |
-| MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                   |
-| View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards; ESP32 not run, same reason as above                                                      |
-| `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                    |
-| ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and through the CLI with scripted boards; **not run against QEMU**, see [ESP-NOW](#esp-now)         |
-| LoRa (SX127x) and nRF24L01+ chip models over `spi-link` (Phase 3)                                      | see `adapters/lora-sx127x/`, `adapters/nrf24/` and `scenarios/examples/lora-gateway-6-*.yaml`                                                                  |
-| BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and through the CLI with scripted hosts; ESP32 relay tested with a fake worker; **Bluedroid firmware not run**, see [BLE](#ble) |
-| Mobile bridge                                                                                          | later phases                                                                                                                                                   |
+| Part                                                                                                   | State                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RF engine: medium, nodes, positions, path loss, rate and retries, jitter, loss, seeded RNG, event log  | done, unit-tested on a manual clock                                                                                                                                           |
+| `qemu-wifi-l2` adapter: each board's QEMU network device on the engine instead of SLIRP                | done, tested against a fake QEMU peer over real sockets                                                                                                                       |
+| Orchestrator and CLI: `hertzbench run`, `validate`                                                     | done, tested through the real CLI                                                                                                                                             |
+| `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                                          |
+| ESP32 boards under QEMU                                                                                | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first                   |
+| MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                                  |
+| View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards; ESP32 not run, same reason as above                                                                     |
+| `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                                   |
+| ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and through the CLI with scripted boards; **not run against QEMU**, see [ESP-NOW](#esp-now)                        |
+| LoRa (SX127x) and nRF24L01+ chip models over `spi-link` (Phase 3)                                      | see `adapters/lora-sx127x/`, `adapters/nrf24/` and `scenarios/examples/lora-gateway-6-*.yaml`                                                                                 |
+| BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and through the CLI with scripted hosts; ESP32 relay tested with a fake worker; **Bluedroid firmware not run**, see [BLE](#ble)                |
+| Mobile bridge (Phase 5): IP proxy with mDNS (5a), BlueZ GATT mirror (5b), the phone as a node          | done, tested end to end with scripted boards and stand-ins for the host's network and BlueZ; **no real phone, LAN mDNS or adapter used**, see [Mobile bridge](#mobile-bridge) |
 
 ## Quick start (no QEMU needed)
 
@@ -107,6 +108,27 @@ engine plays. The binary differs from production by that build option and the UA
 [docs/e2e-esp32.md](docs/e2e-esp32.md#the-ble-example). What the controller models and what it
 leaves out are in [docs/fidelity.md](docs/fidelity.md#ble).
 
+## Mobile bridge
+
+```bash
+cd hertzbench
+deno task hertzbench run scenarios/examples/bridge-web-scripted.yaml
+curl http://127.0.0.1:8080/status     # in another terminal, while it runs
+```
+
+A scripted web node serves HTTP (and WebSocket on the same port) and an MQTT broker; the bridge's
+station stands 3 m from it on the medium. Every connection to the host's port 8080 or 1883 becomes
+the bridge's own TCP connection to the node, so its segments pay the channel model from the bridge's
+position: at 40 s the bridge walks away and requests slow down. With `listen: 0.0.0.0` and
+`deno task lan run ...`, a phone on the same Wi-Fi reaches it, and mDNS advertises it as
+`web-80._http._tcp.local`.
+
+On BLE, `scenarios/examples/bridge-ble-scripted.yaml` mirrors a simulated peripheral's GATT server
+through BlueZ: a phone connects to the host, and each read, write and subscription is replayed from
+the bridge's node on the simulated air. That one needs Linux, `bluetoothd` and PyGObject. What each
+bridge models and leaves out (the phone-to-host leg is real, not modelled), how to run it and how it
+is tested are in [docs/mobile-bridge.md](docs/mobile-bridge.md). No Velxio file changed.
+
 ## Use it from Claude Code (MCP)
 
 ```bash
@@ -155,11 +177,12 @@ board N (QEMU) ──┘   (loopback TCP)     switch + channel model   └──
 
 ```
 engine/          RF engine: channel model, medium, switch, gateway, ESP-NOW framing, LoRa, nRF24
-                 and BLE PHYs, metrics, pcap
+                 and BLE PHYs, metrics, pcap, a small TCP for the stations it plays
 adapters/        qemu-wifi-l2 (QEMU stream netdev <-> engine), eFuse image builder, spi-link and the
                  LoRa and nRF24 chip models, ble-hci (virtual BLE controller, H4, btsnoop)
 orchestrator/    scenario parser, runner, assertions, report, boards (esp32, scripted, ESP-NOW fork
-                 model, scripted LoRa/nRF24/BLE hosts)
+                 model, scripted LoRa/nRF24/BLE hosts, scripted TCP servers, ATT/GATT)
+bridge/          mobile bridge: ip/ (host TCP proxy, mDNS), ble/ (GATT mirror, BlueZ helper)
 mcp/             MCP server: JSON-RPC over stdio, tools, resources, the live run
 view/            the live view: loopback HTTP server, scene model, static page (no build)
 cli/             hertzbench run | validate | view | mcp
@@ -180,8 +203,10 @@ deno lint && deno fmt --check
 
 The Velxio core patch has its own tests: `pytest test/backend/unit/test_esp32_wifi_l2_args.py` from
 the repository root. It touches one Velxio file; see [docs/upstream-sync.md](docs/upstream-sync.md).
-BLE touches no Velxio file. One CLI test decodes a node's HCI capture with BlueZ's `btmon` when it
-is installed, and skips that check when it is not.
+BLE and the mobile bridge touch no Velxio file. The BlueZ helper's test runs it on a private D-Bus
+(`dbus-run-session`) against a fake `bluetoothd`, and skips when `dbus-run-session` is missing. One
+CLI test decodes a node's HCI capture with BlueZ's `btmon` when it is installed, and skips that
+check when it is not.
 
 ## Docs
 
@@ -190,6 +215,8 @@ is installed, and skips that check when it is not.
 - [docs/fidelity.md](docs/fidelity.md): fidelity levels, the channel model, what is not modelled
 - [docs/mcp.md](docs/mcp.md): the MCP server, its tools and resources, registering it with Claude
   Code
+- [docs/mobile-bridge.md](docs/mobile-bridge.md): a real phone to a simulated board, over IP (with
+  mDNS) or BLE (through BlueZ)
 - [docs/view.md](docs/view.md): the live view, what its colors mean, what it reuses from Velxio
 - [docs/e2e-esp32.md](docs/e2e-esp32.md): running the ESP32 example, and what to verify on the first
   run

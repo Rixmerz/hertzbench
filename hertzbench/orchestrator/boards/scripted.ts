@@ -4,6 +4,8 @@
 // ESP-NOW goes through a model of the QEMU fork's MAC (espnow-fork-model.ts),
 // so the frames and ACKs on the wire are the fork's. The adapter, engine,
 // metrics, pcap and assertions can run end to end on a machine without libqemu.
+// Its `serve` entries are TCP servers (drivers/tcp-services.ts) on the engine's
+// small TCP, for the IP bridge to reach.
 // Fidelity: none. Use it to develop scenarios and to test the engine; use the
 // esp32 board for anything that claims to be about firmware.
 
@@ -12,12 +14,15 @@ import {
   buildDhcpClientMessage,
   buildEspNowBody,
   buildUdp,
+  createRng,
   DHCPDISCOVER,
   DHCPREQUEST,
   ipToString,
   parseEspNowBody,
+  parseEthernet,
   parseIpv4,
   parseUdp,
+  TcpHost,
 } from "../../engine/mod.ts";
 import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2/mod.ts";
 import { BROADCAST_TARGET } from "../scenario.ts";
@@ -25,6 +30,7 @@ import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } 
 import { EspNowForkModel, type EspNowTxStatus } from "./espnow-fork-model.ts";
 import { startScriptedBleBoard } from "./scripted-ble.ts";
 import { startScriptedRadioBoard } from "./scripted-radio.ts";
+import { MqttBroker, serveHttp } from "./drivers/tcp-services.ts";
 
 const DHCP_RETRY_MS = 1000;
 const DHCP_MAX_TRIES = 10;
@@ -60,6 +66,10 @@ class ScriptedBoard implements RunningBoard {
   /** ESP-NOW frames go one at a time, as the driver sends them: the fork has one ACK timer. */
   readonly #espnowQueue: { dst: string; label: string; body: Uint8Array }[] = [];
   #espnowInFlight: string | null = null;
+  /** Once bound: the TCP the `serve` entries listen on. */
+  #tcp: TcpHost | null = null;
+  /** Addresses learned from the frames that arrive, for TCP replies. */
+  readonly #neighbors = new Map<string, string>();
 
   constructor(ctx: BoardContext, conn: Deno.TcpConn, channel: number) {
     this.#ctx = ctx;
@@ -84,6 +94,7 @@ class ScriptedBoard implements RunningBoard {
   async stop(): Promise<void> {
     this.#stopped = true;
     this.#espnow.stop();
+    this.#tcp?.close();
     for (const cancel of this.#cancels) cancel();
     this.#cancels.clear();
     try {
@@ -169,6 +180,9 @@ class ScriptedBoard implements RunningBoard {
   #receive(frame: Uint8Array): void {
     if (this.#espnow.receive(frame)) return;
     const ip = parseIpv4(frame);
+    const eth = parseEthernet(frame);
+    if (ip && eth && ip.src !== "0.0.0.0") this.#neighbors.set(ip.src, eth.src);
+    if (this.#tcp?.receive(frame)) return;
     if (!ip) return;
     const udp = parseUdp(frame, ip);
     if (!udp) return;
@@ -203,8 +217,32 @@ class ScriptedBoard implements RunningBoard {
     } else if (type === DHCPACK && this.#ip === null) {
       this.#ip = offered;
       this.#ctx.onSerial(`dhcp bound ip=${offered}`);
+      this.#startServers(offered);
       this.#startScript();
     }
+  }
+
+  #startServers(ip: string): void {
+    const { node, clock } = this.#ctx;
+    if (node.firmware.kind !== "script" || node.firmware.serve.length === 0) return;
+    const tcp = new TcpHost({
+      mac: node.mac,
+      ip,
+      clock,
+      send: (frame) => this.#send(frame),
+      macFor: (peer) => this.#neighbors.get(peer) ?? null,
+      rng: createRng(`scripted-tcp:${node.id}`),
+    });
+    const ctx = { node: node.id, onSerial: (line: string) => this.#ctx.onSerial(line) };
+    for (const service of node.firmware.serve) {
+      if (service.protocol === "http") tcp.listen(service.port, (conn) => serveHttp(conn, ctx));
+      else {
+        const broker = new MqttBroker(ctx);
+        tcp.listen(service.port, (conn) => broker.serve(conn));
+      }
+      this.#ctx.onSerial(`tcp listening on ${service.port} (${service.protocol})`);
+    }
+    this.#tcp = tcp;
   }
 
   #startScript(): void {

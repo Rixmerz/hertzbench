@@ -26,6 +26,7 @@ import {
   type BtsnoopWriter,
   isBleFrame,
 } from "../adapters/ble-hci/mod.ts";
+import { BleBridge, BluezPeripheral, type BridgeHooks, type RunningBridge } from "../bridge/mod.ts";
 import type { Scenario } from "./scenario.ts";
 
 export interface NetworkSetup {
@@ -41,6 +42,8 @@ export interface NetworkSetup {
   warnings: string[];
   /** BLE only: each node's HCI traffic, written as hci-<node>.btsnoop. */
   hciCaptures?: Map<string, BtsnoopWriter>;
+  /** The mobile bridge's station on this medium, when the scenario has one. */
+  bridge?: RunningBridge;
 }
 
 export interface AirNetworkContext {
@@ -48,6 +51,7 @@ export interface AirNetworkContext {
   log: EventLog;
   epochMs: number;
   onProblem(nodeId: string, message: string): void;
+  hooks?: BridgeHooks;
 }
 
 /**
@@ -128,9 +132,44 @@ function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSe
       attachment.controller,
     );
   }
+  const spec = scenario.bridge;
+  let bridge: BleBridge | undefined;
+  if (spec?.kind === "ble") {
+    const radio = spec.radio;
+    const mirror = scenario.nodes.find((n) => n.id === spec.mirror);
+    if (!mirror || radio.phy !== "ble") {
+      throw new Error("the BLE bridge needs a mirrored node and a ble radio");
+    }
+    bridge = new BleBridge({
+      spec,
+      mirrorAddress: mirror.mac,
+      clock,
+      peripheral: ctx.hooks?.peripheral?.(spec) ?? new BluezPeripheral({ adapter: spec.adapter }),
+      makeController: (toHost) =>
+        new BleController({
+          nodeId: spec.id,
+          address: spec.mac,
+          txPowerDbm: radio.txPowerDbm,
+          clock,
+          log,
+          rng: substream(scenario.seed, `ble:${spec.id}`),
+          transmit: (frame) => air.transmit(spec.id, frame),
+          toHost,
+          warn: (message) => warnings.push(`${spec.id}: ${message}`),
+        }),
+      log: (text) => log.append({ type: "serial", t: clock.now(), node: spec.id, text }),
+      onProblem: (message) => ctx.onProblem(spec.id, message),
+    });
+    controllers.push(bridge.controller);
+    air.addNode(
+      { id: spec.id, position: spec.position, antennaGainDbi: radio.antennaGainDbi },
+      bridge.controller,
+    );
+  }
   return {
     medium: air,
     ports,
+    ...(bridge ? { bridge } : {}),
     waitConnected: (id, timeoutMs) => adapter.waitConnected(id, timeoutMs),
     close: async () => {
       for (const controller of controllers) controller.close();

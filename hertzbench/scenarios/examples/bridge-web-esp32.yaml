@@ -1,0 +1,48 @@
+# Phase 5a with real firmware: an ESP32 running the core's WebServer, reached
+# from a phone on this host's LAN through the IP bridge. The bridge's station
+# stands 4 m from the board; at 60 s it walks behind a 12 dB wall at 30 m,
+# and the phone's requests slow down with the link (rate fallback, retries).
+#
+#   cd hertzbench && deno task lan run scenarios/examples/bridge-web-esp32.yaml
+#
+# then on the phone, on the same Wi-Fi as this host, browse to
+# http://hzb-web.local:8080/status (or http://<host address>:8080/status where
+# mDNS does not resolve .local names). `deno task lan` grants the network
+# permissions listening on 0.0.0.0 and mDNS need; `deno task hertzbench` keeps
+# the network closed to 127.0.0.1 and then the bridge refuses to start.
+#
+# Needs libqemu-xtensa and the ESP-IDF toolchain; see docs/e2e-esp32.md,
+# "The mobile bridge". NEVER RUN: the host this was written on has no libqemu.
+# bridge-web-scripted.yaml is the same layout with a scripted web node.
+name: bridge-web-esp32
+seed: 7
+duration: 120s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+  obstacles:
+    - { polygon: [[20, -20], [20, 20]], attenuation_db: 12 }
+nodes:
+  - id: web
+    board: esp32
+    firmware: ./fw/web-node
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+  - id: sensor
+    board: scripted
+    position: [6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      send: [{ to: web, every: 1s, count: 120, payload: ping }]
+bridge:
+  id: phone
+  position: [4, 0]
+  listen: 0.0.0.0
+  expose:
+    - { node: web, port: 80, service: http, listen_port: 8080 }
+timeline:
+  - at: 60s
+    label: behind-wall
+    move: { node: phone, to: [30, 0] }
+assertions:
+  - serial: { node: web, contains: "http listening on 80", within: 30s }

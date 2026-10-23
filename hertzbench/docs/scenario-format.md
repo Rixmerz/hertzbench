@@ -2,7 +2,7 @@
 
 A scenario is one YAML file. `hertzbench validate` checks it; every error names the field (`nodes[1].position: expected [x, y] or [x, y, z]`). Unknown fields are errors, not ignored. Durations need a unit: `500ms`, `60s`, `1.5s`, `2m`. A bare number is refused.
 
-Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE.
+Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE; [`bridge-web-scripted.yaml`](../scenarios/examples/bridge-web-scripted.yaml), [`bridge-web-esp32.yaml`](../scenarios/examples/bridge-web-esp32.yaml), [`bridge-ble-scripted.yaml`](../scenarios/examples/bridge-ble-scripted.yaml) and [`bridge-ble-esp32.yaml`](../scenarios/examples/bridge-ble-esp32.yaml) for the mobile bridge.
 
 ```yaml
 name: udp-3-nodes            # required
@@ -24,6 +24,7 @@ links: [...]                 # per-link overrides
 timeline: [...]
 assertions: [...]
 outputs: { metrics: ./out/metrics.json, pcap: ./out/air.pcap, events: ./out/events.jsonl }
+bridge: {...}                # optional: a real phone reaches the boards (see below)
 ```
 
 ## `nodes`
@@ -61,6 +62,16 @@ outputs: { metrics: ./out/metrics.json, pcap: ./out/air.pcap, events: ./out/even
     - { to: broadcast, via: espnow, every: 1s, count: 5, payload: beacon }
   ```
 
+  With `serve`, the board runs TCP servers once it has its lease, for the [mobile bridge](#bridge) to reach:
+
+  ```yaml
+  serve:
+    - { port: 80, protocol: http }      # one plain-text line per request, "<node>: GET /path"; a WebSocket upgrade echoes messages
+    - { port: 1883, protocol: mqtt }    # an MQTT 3.1.1 broker at QoS 0: subscribe (+ and #), publish, ping
+  ```
+
+  Ports are distinct, 1 to 65535. Serial lines: `tcp listening on <port> (<protocol>)`, `http <METHOD> <path> from <ip>`, `ws open <path> from <ip>`, `ws rx "<text>" from <ip>`, `ws closed from <ip>`, `mqtt connect <client id> from <ip>`, `mqtt subscribe <filter> from <client id>`, `mqtt publish <topic> "<payload>" from <client id>`.
+
   Frames go one at a time, each waiting for its ACK or the fork's 10 ms timeout. The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.
 
 ### BLE radios
@@ -93,6 +104,45 @@ firmware:
 - A peripheral advertises connectable, and again after a disconnection. A central connects to its `peers` through the filter accept list and reconnects whenever a link drops. `interval` is 7.5 ms to 4 s in steps of 1.25 ms (default 30 ms), `timeout` 100 ms to 32 s in steps of 10 ms (default 1 s) and more than twice the interval.
 - A send goes over the connection to `to` (`via: gatt` is implied): an ATT notification from a peripheral, an ATT Write Command from a central, on handle 0x0010, carrying `<payload>:<n>`. The payload stays within 14 bytes. `to` must be a node the board connects to or that connects to it; `port` is refused. A send while not connected is skipped and logged.
 - Serial lines: `ble ready addr=<address>`, `ble advertising as <name>`, `ble connected to <node> as central|peripheral`, `ble disconnected from <node> reason=0x08`, `ble tx <text> to <node>`, `ble rx "<text>" from <node>`, and with `scan: true` `ble adv "<name>" from <node> rssi=<dBm>`.
+
+## `bridge`
+
+At most one, on a Wi-Fi or BLE scenario. The bridge is a station on the medium: `links`, `timeline.move`, metric assertions (`phone->web`) and `serial` assertions (its log) can name it. It does not count toward the 2 to 10 boards. How it works and how to run it: [mobile-bridge.md](mobile-bridge.md).
+
+Common fields: `id` (default `phone`; not a node's id, not `gateway` or `broadcast`), `position` (required), `radios` (optional, one radio of the scenario's PHY; Wi-Fi defaults to the exposed nodes' channel at 15 dBm, BLE to 0 dBm). Its MAC and BLE address is `02:68:7a:62:02:01`.
+
+On Wi-Fi (Phase 5a, the IP bridge):
+
+```yaml
+bridge:
+  position: [3, 0]
+  ip: 192.168.4.250          # default .250; inside the subnet, no node's address
+  listen: 127.0.0.1          # the host address the proxy binds; 0.0.0.0 for a phone on the LAN
+  mdns: true                 # default: on when `listen` is not a loopback address
+  advertise_ip: 192.168.1.20 # optional: the A record mDNS gives; default `listen` if specific, else the host's first LAN address
+  expose:                    # at least one
+    - { node: web, port: 80, service: http, listen_port: 8080 }   # service: http | websocket | mqtt
+```
+
+- `listen_port` 0 (the default) lets the OS pick; the report and the progress lines print the port. Two entries cannot share a non-zero `listen_port`.
+- Only the listed `node:port` pairs are reachable through the bridge. An exposed node must be on the medium and on the bridge's channel.
+- `service` only chooses the mDNS service type (`_http._tcp`, `_ws._tcp`, `_mqtt._tcp`); the relay carries any TCP.
+- The bridge's log lines: `bridge listening on <host>:<port> for <node>:<port> (<service>)`, `bridge <client> -> <node>:<port> connected`, `... closed: <n> B to the node, <n> B from it`, `... failed: <reason>`.
+
+On BLE (Phase 5b, the GATT mirror):
+
+```yaml
+bridge:
+  position: [3, 0]
+  mirror: sensor-1           # required: the peripheral whose GATT server the host mirrors
+  name: hzb sensor-1         # what BlueZ advertises; default the node's id; at most 26 bytes
+  adapter: hci0              # BlueZ adapter, default hci0
+  interval: 30ms             # the bridge's connection to the node, as for a scripted central
+  timeout: 1s
+```
+
+- A scripted `mirror` must advertise. Its sends may go `to:` the bridge's id: they are notifications to the bridge, which passes them to a subscribed phone.
+- The bridge's log lines: `bridge ready addr=<address>`, `bridge connected to <node>`, `bridge discovered service <uuid> with <n> characteristic(s)`, `bridge advertising "<name>" to the phone (<host side>)`, `bridge phone read|wrote <uuid>: "<value>"`, `bridge phone subscribed to <uuid>`, `bridge notify <uuid> "<value>" to the phone`, `bridge phone <operation> failed: <reason>`, `bridge disconnected from <node> reason=0x08`.
 
 ## `links`
 
@@ -137,7 +187,7 @@ One JSON event per line, in the order the engine logged them, with `t` in millis
 
 ## `metrics.json`
 
-`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). `events.jsonl` has one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
+`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). With a bridge, `metrics.json` also has `bridge`: `kind` (`ip` or `ble`), `id`, and either `endpoints` (each `node`, `port`, `service`, `listenPort`, `host`, `hostPort`) and `mdns` (one line: what was advertised, or why nothing was), or `mirror`, `adapter`, `name`, `services` (the discovered table) and `peripheral`. The bridge's station is the last entry of `nodes`, with `board: "bridge"`. `events.jsonl` has one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
 
 ## Exit status
 

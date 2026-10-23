@@ -1,0 +1,36 @@
+# Phase 5b with real firmware: BlueZ on this host mirrors the GATT server of
+# an ESP32 running Bluedroid (the ble-sensor firmware of
+# ble-sensors-3-nodes.yaml: service 0xFF00, characteristic 0xFF01, read and
+# notify). A phone subscribes to 0xFF01 and gets the sensor's readings; a
+# write is refused with org.bluez.Error.NotPermitted, because the firmware's
+# characteristic is read-only, and a read returns the table's stored value,
+# which that firmware never updates.
+#
+# Build the sensor first (docs/e2e-esp32.md, "The BLE example"), then:
+#   cd hertzbench && deno task hertzbench run scenarios/examples/bridge-ble-esp32.yaml
+# NEVER RUN: the host this was written on has no libqemu and no ESP-IDF.
+name: bridge-ble-esp32
+seed: 11
+duration: 120s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: sensor
+    board: esp32
+    firmware: ./fw/ble-sensor/build/ble-sensor-flash.bin
+    position: [0, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0, hci_uart: 1 }]
+  - id: listener
+    board: scripted
+    position: [10, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware: { scan: true }
+bridge:
+  id: phone
+  position: [2, 0]
+  mirror: sensor
+  name: hzb sensor
+assertions:
+  - serial: { node: sensor, contains: "ble up addr=02:68:7a:62:01:01", within: 20s }
+  - serial: { node: phone, contains: "bridge connected to sensor", within: 30s }
