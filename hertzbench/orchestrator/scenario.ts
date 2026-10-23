@@ -13,8 +13,8 @@ import {
   type Position,
 } from "../engine/channel.ts";
 import type { FrameKind } from "../engine/events.ts";
-import { macToBytes } from "../engine/packet.ts";
-import { type NodeRadio, parseNodeRadio, type Phy } from "./radios.ts";
+import { ipToBytes, macToBytes } from "../engine/packet.ts";
+import { DEFAULT_WIFI, type NodeRadio, parseNodeRadio, type Phy } from "./radios.ts";
 
 export class ScenarioError extends Error {
   override name = "ScenarioError";
@@ -37,6 +37,13 @@ export interface ScriptedSend {
   payload: string;
 }
 
+/** A TCP server a scripted Wi-Fi board runs, for the IP bridge (Phase 5a) to reach. */
+export interface ScriptedService {
+  port: number;
+  /** http also answers a WebSocket upgrade, as an ESP32 web server does; mqtt is a QoS 0 broker. */
+  protocol: "http" | "mqtt";
+}
+
 /** What a scripted BLE board does besides its sends. */
 export interface BleScript {
   /** Peripheral: advertise, connectable, until a central connects, and again after it leaves. */
@@ -53,6 +60,8 @@ export type FirmwareSpec =
   | {
     kind: "script";
     send: ScriptedSend[];
+    /** Wi-Fi only: TCP servers. */
+    serve: ScriptedService[];
     /** Chip radios: keep the receiver on between sends. Defaults to true for a node that sends nothing. */
     listen: boolean;
     /** BLE only. */
@@ -125,6 +134,54 @@ export type Assertion =
     checks: MetricCheck[];
   };
 
+/** What the IP bridge relays: TCP connections to one port of one node. */
+export type BridgeServiceKind = "http" | "websocket" | "mqtt";
+
+export interface ExposedService {
+  node: string;
+  /** The TCP port on the node. */
+  port: number;
+  service: BridgeServiceKind;
+  /** The host port a phone connects to; 0 lets the OS pick. */
+  listenPort: number;
+}
+
+interface BridgeCommon {
+  /** The bridge's node on the medium: where the phone is, as far as the channel model knows. */
+  id: string;
+  position: Position;
+  radio: NodeRadio;
+  /** Station MAC on Wi-Fi, device address on BLE. */
+  mac: string;
+}
+
+/** Phase 5a: a phone on the host's LAN reaches nodes over TCP through a host proxy. */
+export interface IpBridgeSpec extends BridgeCommon {
+  kind: "ip";
+  ip: string;
+  /** The host address the proxy binds. */
+  listen: string;
+  mdns: boolean;
+  /** The host address mDNS advertises; null: the host's first non-loopback IPv4 address. */
+  advertiseIp: string | null;
+  expose: ExposedService[];
+}
+
+/** Phase 5b: a phone reaches a simulated peripheral's GATT server through BlueZ on the host. */
+export interface BleBridgeSpec extends BridgeCommon {
+  kind: "ble";
+  /** The peripheral node whose GATT server the host mirrors. */
+  mirror: string;
+  /** BlueZ adapter the host advertises on. */
+  adapter: string;
+  /** The name the host advertises to the phone. */
+  name: string;
+  intervalMs: number;
+  timeoutMs: number;
+}
+
+export type BridgeSpec = IpBridgeSpec | BleBridgeSpec;
+
 export interface Outputs {
   metrics: string | null;
   pcap: string | null;
@@ -146,6 +203,8 @@ export interface Scenario {
   timeline: TimelineEvent[];
   assertions: Assertion[];
   outputs: Outputs;
+  /** The mobile bridge, at most one per scenario. */
+  bridge: BridgeSpec | null;
 }
 
 // ── field readers ───────────────────────────────────────────────────────────
@@ -416,7 +475,25 @@ function parseBleScript(obj: Obj, path: string, nodeName: string): BleScript {
 
 function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): FirmwareSpec {
   const obj = record(value, path);
-  known(obj, ["send", "listen", ...BLE_SCRIPT_FIELDS], path);
+  known(obj, ["send", "listen", "serve", ...BLE_SCRIPT_FIELDS], path);
+  if (phy !== "wifi" && obj.serve !== undefined) {
+    fail(`${path}.serve`, "is a Wi-Fi notion: TCP servers need an IP network");
+  }
+  const serve = list(obj.serve ?? [], `${path}.serve`).map((raw, i): ScriptedService => {
+    const p = `${path}.serve[${i}]`;
+    const entry = record(raw, p);
+    known(entry, ["port", "protocol"], p);
+    const protocol = text(entry.protocol, `${p}.protocol`);
+    if (protocol !== "http" && protocol !== "mqtt") {
+      fail(`${p}.protocol`, 'expected "http" or "mqtt"');
+    }
+    return { port: int(entry.port, `${p}.port`, 1, 65535), protocol };
+  });
+  const servedPorts = new Set<number>();
+  for (const [i, service] of serve.entries()) {
+    if (servedPorts.has(service.port)) fail(`${path}.serve[${i}].port`, "is already served");
+    servedPorts.add(service.port);
+  }
   for (const field of BLE_SCRIPT_FIELDS) {
     if (phy !== "ble" && obj[field] !== undefined) {
       fail(`${path}.${field}`, "is a BLE notion; this node's radio is not ble");
@@ -474,6 +551,7 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
   return {
     kind: "script",
     send,
+    serve,
     listen,
     ble: phy === "ble" ? parseBleScript(obj, path, nodeName) : null,
   };
@@ -737,6 +815,197 @@ function parseOutputs(value: unknown): Outputs {
   };
 }
 
+// ── bridge ──────────────────────────────────────────────────────────────────
+
+/** The bridge's station MAC and BLE address: outside the boards' 02:68:7a:62:01:NN and the gateway's. */
+export const BRIDGE_MAC = "02:68:7a:62:02:01";
+/** The bridge's address on the /24 when the scenario gives none. */
+export const BRIDGE_HOST = 250;
+
+export const BRIDGE_SERVICES: readonly BridgeServiceKind[] = ["http", "websocket", "mqtt"];
+
+const BRIDGE_COMMON_FIELDS = ["id", "position", "radios"] as const;
+const IP_BRIDGE_FIELDS = [
+  ...BRIDGE_COMMON_FIELDS,
+  "ip",
+  "listen",
+  "mdns",
+  "advertise_ip",
+  "expose",
+] as const;
+const BLE_BRIDGE_FIELDS = [
+  ...BRIDGE_COMMON_FIELDS,
+  "mirror",
+  "adapter",
+  "name",
+  "interval",
+  "timeout",
+] as const;
+
+function ipv4(value: unknown, path: string): string {
+  const ip = text(value, path);
+  try {
+    ipToBytes(ip);
+  } catch {
+    fail(path, `not an IPv4 address: ${JSON.stringify(ip)}`);
+  }
+  return ip;
+}
+
+function parseBridge(value: unknown, phy: Phy, subnetPrefix: string): BridgeSpec | null {
+  if (value === undefined) return null;
+  const path = "bridge";
+  const obj = record(value, path);
+  if (phy !== "wifi" && phy !== "ble") {
+    fail(path, `bridges a phone over Wi-Fi/IP or BLE; this scenario's radios are ${phy}`);
+  }
+  known(obj, phy === "wifi" ? IP_BRIDGE_FIELDS : BLE_BRIDGE_FIELDS, path);
+  const id = obj.id === undefined ? "phone" : text(obj.id, `${path}.id`);
+  const radio = obj.radios === undefined
+    ? (phy === "wifi" ? null : parseNodeRadio(READERS, [{ phy: "ble" }], `${path}.radios`))
+    : parseNodeRadio(READERS, obj.radios, `${path}.radios`);
+  if (radio && radio.phy !== phy) {
+    fail(`${path}.radios`, `the bridge's radio must be ${phy}, like every node's`);
+  }
+  const common = {
+    id,
+    position: parsePosition(obj.position, `${path}.position`),
+    mac: BRIDGE_MAC,
+  };
+  if (phy === "ble") {
+    const intervalMs = linkLayerDuration(obj.interval, 30, `${path}.interval`, 7.5, 4000, 1.25);
+    const timeoutMs = linkLayerDuration(obj.timeout, 1000, `${path}.timeout`, 100, 32000, 10);
+    if (timeoutMs <= 2 * intervalMs) {
+      fail(`${path}.timeout`, "must be more than twice the connection interval");
+    }
+    const mirror = text(obj.mirror, `${path}.mirror`);
+    const adapter = obj.adapter === undefined ? "hci0" : text(obj.adapter, `${path}.adapter`);
+    if (!/^hci\d{1,3}$/.test(adapter)) {
+      fail(`${path}.adapter`, 'expected a BlueZ adapter like "hci0"');
+    }
+    const name = obj.name === undefined ? mirror : text(obj.name, `${path}.name`);
+    if (new TextEncoder().encode(name).length > 26) {
+      fail(`${path}.name`, "must fit in 26 bytes of advertising data");
+    }
+    return {
+      kind: "ble",
+      ...common,
+      radio: radio as NodeRadio,
+      mirror,
+      adapter,
+      name,
+      intervalMs,
+      timeoutMs,
+    };
+  }
+  const ip = obj.ip === undefined ? `${subnetPrefix}.${BRIDGE_HOST}` : ipv4(obj.ip, `${path}.ip`);
+  checkHostAddress(ip, subnetPrefix, `${path}.ip`);
+  const listen = obj.listen === undefined ? "127.0.0.1" : ipv4(obj.listen, `${path}.listen`);
+  if (obj.mdns !== undefined && typeof obj.mdns !== "boolean") {
+    fail(`${path}.mdns`, "expected true or false");
+  }
+  const expose = list(obj.expose, `${path}.expose`).map((raw, i): ExposedService => {
+    const p = `${path}.expose[${i}]`;
+    const entry = record(raw, p);
+    known(entry, ["node", "port", "service", "listen_port"], p);
+    const service = text(entry.service, `${p}.service`);
+    if (!(BRIDGE_SERVICES as readonly string[]).includes(service)) {
+      fail(`${p}.service`, `expected one of ${BRIDGE_SERVICES.join(", ")}`);
+    }
+    return {
+      node: text(entry.node, `${p}.node`),
+      port: int(entry.port, `${p}.port`, 1, 65535),
+      service: service as BridgeServiceKind,
+      listenPort: int(entry.listen_port ?? 0, `${p}.listen_port`, 0, 65535),
+    };
+  });
+  if (expose.length === 0) fail(`${path}.expose`, "names no node port to relay");
+  const listenPorts = new Set<number>();
+  expose.forEach((e, i) => {
+    if (e.listenPort === 0) return;
+    if (listenPorts.has(e.listenPort)) {
+      fail(`${path}.expose[${i}].listen_port`, `${e.listenPort} is already used by the bridge`);
+    }
+    listenPorts.add(e.listenPort);
+  });
+  return {
+    kind: "ip",
+    ...common,
+    // Filled in from the exposed nodes' channel when the scenario names no radio.
+    radio: radio ?? DEFAULT_WIFI,
+    ip,
+    listen,
+    // A proxy bound to loopback is unreachable from a phone, so there is nothing to advertise.
+    mdns: typeof obj.mdns === "boolean" ? obj.mdns : !listen.startsWith("127."),
+    advertiseIp: obj.advertise_ip === undefined
+      ? null
+      : ipv4(obj.advertise_ip, `${path}.advertise_ip`),
+    expose,
+  };
+}
+
+/** The bridge against the nodes: names, addresses, the nodes it reaches. */
+function checkBridge(scenario: Scenario, radioGiven: boolean): void {
+  const bridge = scenario.bridge;
+  if (!bridge) return;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(bridge.id)) {
+    fail(
+      "bridge.id",
+      `${JSON.stringify(bridge.id)} may only use letters, digits, "_", "." and "-"`,
+    );
+  }
+  if (scenario.nodes.some((n) => n.id === bridge.id)) {
+    fail("bridge.id", `${JSON.stringify(bridge.id)} is already a node's id`);
+  }
+  if (bridge.id === "gateway" || bridge.id === BROADCAST_TARGET) {
+    fail("bridge.id", `${JSON.stringify(bridge.id)} is reserved`);
+  }
+  const onMedium = (id: string, path: string) => {
+    const node = scenario.nodes.find((n) => n.id === id);
+    if (!node) fail(path, `no node named ${JSON.stringify(id)}`);
+    if (node.internetGateway) {
+      fail(path, `${id} is the internet gateway, which is not on the medium`);
+    }
+    return node;
+  };
+  if (bridge.kind === "ble") {
+    const node = onMedium(bridge.mirror, "bridge.mirror");
+    if (node.firmware.kind === "script" && !node.firmware.ble?.advertise) {
+      fail(
+        "bridge.mirror",
+        `${node.id} is a scripted central; the bridge mirrors a peripheral that advertises`,
+      );
+    }
+    return;
+  }
+  const clash = scenario.nodes.find((n) => n.ip === bridge.ip);
+  if (clash) fail("bridge.ip", `${bridge.ip} is already ${clash.id}'s address`);
+  const channels = new Set<number>();
+  bridge.expose.forEach((e, i) => {
+    const node = onMedium(e.node, `bridge.expose[${i}].node`);
+    if (node.radio.phy === "wifi") channels.add(node.radio.channel);
+  });
+  if (!radioGiven) {
+    if (channels.size > 1) {
+      fail("bridge.radios", "the exposed nodes use different channels: give the bridge its radio");
+    }
+    const [channel] = channels;
+    if (channel !== undefined && bridge.radio.phy === "wifi") {
+      bridge.radio = { ...bridge.radio, channel };
+    }
+  }
+  const channel = bridge.radio.phy === "wifi" ? bridge.radio.channel : 0;
+  bridge.expose.forEach((e, i) => {
+    const node = scenario.nodes.find((n) => n.id === e.node);
+    if (node?.radio.phy === "wifi" && node.radio.channel !== channel) {
+      fail(
+        `bridge.expose[${i}].node`,
+        `${e.node} is on channel ${node.radio.channel} and the bridge on ${channel}: it would never hear the bridge`,
+      );
+    }
+  });
+}
+
 // ── cross-references ────────────────────────────────────────────────────────
 
 /** `*` matches any run of characters; everything else is literal. */
@@ -746,8 +1015,11 @@ export function matchesPattern(pattern: string, name: string): boolean {
 }
 
 function checkReferences(scenario: Scenario): void {
-  const medium = scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
-  const ids = scenario.nodes.map((n) => n.id);
+  const boards = scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
+  // The bridge is a station on the medium too: links, moves and metrics can name it.
+  const bridgeIds = scenario.bridge ? [scenario.bridge.id] : [];
+  const medium = [...boards, ...bridgeIds];
+  const ids = [...scenario.nodes.map((n) => n.id), ...bridgeIds];
   const needNode = (id: string, path: string) => {
     if (!ids.includes(id)) fail(path, `no node named ${JSON.stringify(id)}`);
   };
@@ -787,12 +1059,12 @@ function checkReferences(scenario: Scenario): void {
     if (node.firmware.kind !== "script") return;
     node.firmware.ble?.connect?.peers.forEach((peer, j) => {
       const p = `nodes[${i}].firmware.connect.peers[${j}]`;
-      if (!medium.includes(peer)) fail(p, `no node named ${JSON.stringify(peer)} on the medium`);
+      if (!boards.includes(peer)) fail(p, `no node named ${JSON.stringify(peer)} on the medium`);
       if (peer === node.id) fail(p, "a node cannot connect to itself");
     });
     node.firmware.send.forEach((send, j) => {
       if (send.to === null || send.to === BROADCAST_TARGET) return;
-      if (!medium.includes(send.to)) {
+      if (!boards.includes(send.to)) {
         fail(
           `nodes[${i}].firmware.send[${j}].to`,
           `no node named ${JSON.stringify(send.to)} on the medium`,
@@ -842,6 +1114,7 @@ const TOP_LEVEL = [
   "timeline",
   "assertions",
   "outputs",
+  "bridge",
 ] as const;
 
 export function parseScenario(yamlText: string): Scenario {
@@ -885,8 +1158,10 @@ export function parseScenario(yamlText: string): Scenario {
       parseAssertion(a, `assertions[${i}]`)
     ),
     outputs: parseOutputs(root.outputs),
+    bridge: parseBridge(root.bridge, phy, subnetPrefix),
   };
   if (scenario.durationMs <= 0) fail("duration", "must be positive");
+  checkBridge(scenario, record(root.bridge ?? {}, "bridge").radios !== undefined);
   checkReferences(scenario);
   return scenario;
 }
