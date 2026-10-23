@@ -1,7 +1,7 @@
 // The chip-level air on a manual clock: timing, collisions, capture,
 // half-duplex through the receiver's answer, and seeded determinism.
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import {
   type AirFrame,
   AirMedium,
@@ -100,6 +100,36 @@ Deno.test("air: a frame reaches a listening node when its airtime ends, with the
   assert(tx?.type === "tx" && tx.airtimeMs === 50 && tx.radio?.sf === 7);
 });
 
+Deno.test("air: a link's budget reads the declared signal, then the sender's last frame", () => {
+  const r = rig({ gw: { x: 100, y: 0 } });
+  const declared = {
+    frequencyHz: 868.1e6,
+    bandwidthHz: 125e3,
+    noiseFigureDb: 6,
+    txPowerDbm: 20,
+    requiredSnrDb: -7.5,
+    referenceBytes: 20,
+    rateBps: 5468.75,
+  };
+  r.air.addNode(
+    { id: "a", position: { x: 0, y: 0 }, antennaGainDbi: 0, signal: declared },
+    new FakeRadio(r.clock),
+  );
+  const before = r.air.budget("a", "gw");
+  assertEquals(before.signal, declared);
+  assert(Math.abs(before.rssiDbm - (20 - 71.21)) < 0.02);
+  // Firmware is the truth: once it transmits at 14 dBm, the budget follows the frame.
+  r.air.transmit("a", frame({ txPowerDbm: 14 }));
+  const after = r.air.budget("a", "gw");
+  assertEquals(after.signal.txPowerDbm, 14);
+  assert(Math.abs(after.rssiDbm - (14 - 71.21)) < 0.02);
+  r.clock.runAll();
+  const delivered = r.log.events.find((e) => e.type === "deliver");
+  assert(delivered?.type === "deliver" && delivered.rssiDbm === after.rssiDbm);
+  // A node that has neither sent nor declared a signal has no budget yet.
+  assertThrows(() => r.air.budget("gw", "a"), Error, "no budget yet");
+});
+
 Deno.test("air: deaf radios log nothing, mismatched ones log phy_mismatch", () => {
   const r = rig({ a: { x: 0, y: 0 }, deaf: { x: 5, y: 0 }, other: { x: 6, y: 0 } });
   r.radio("deaf").hearing = "deaf";
@@ -185,6 +215,45 @@ Deno.test("air: a 100% loss override drops every frame on that link only", () =>
   r.air.transmit("a", frame());
   r.clock.runAll();
   assertEquals(r.outcomes(), ["a>gw extra_loss", "a>c deliver"]);
+});
+
+Deno.test("air: interference lowers the link's SNR in its budget and its frames; jitter delays them", () => {
+  const r = rig({ a: { x: 0, y: 0 }, gw: { x: 100, y: 0 } });
+  r.air.addNode({ id: "b", position: { x: 0, y: 100 }, antennaGainDbi: 0 }, new FakeRadio(r.clock));
+  r.air.transmit("a", frame());
+  r.clock.runAll();
+  const clean = r.air.budget("a", "gw");
+  // 59.8 dB of SNR at 100 m; 70 dB of noise rise puts it far under the -7.5 dB floor.
+  r.air.setLinkOverride("a", "gw", { extraLossPct: 0, extraLatencyMs: 0, interferenceDb: 70 });
+  assertEquals(r.air.budget("a", "gw").snrDb, clean.snrDb - 70);
+  assertEquals(r.air.budget("a", "b").snrDb, clean.snrDb, "only the overridden link");
+  r.air.transmit("a", frame());
+  r.clock.runAll();
+  assertEquals(r.outcomes().slice(2), ["a>gw noise", "a>b deliver"]);
+
+  r.air.setLinkOverride("a", "b", { extraLossPct: 0, extraLatencyMs: 0, extraJitterMs: 30 });
+  for (let i = 0; i < 10; i++) {
+    r.air.transmit("a", frame());
+    r.clock.advanceBy(60);
+  }
+  r.clock.runAll();
+  const toB = r.log.events.flatMap((e) => e.type === "deliver" && e.to === "b" ? [e.delayMs] : [])
+    .slice(2); // the two frames above reached b before the jitter
+  assertEquals(toB.length, 10);
+  assert(toB.every((d) => d >= 50 && d < 80.01), JSON.stringify(toB));
+  assert(Math.max(...toB) - Math.min(...toB) > 10, JSON.stringify(toB));
+});
+
+Deno.test("air: live antenna gain moves the budget; channel and power stay the chip's", () => {
+  const r = rig({ a: { x: 0, y: 0 }, gw: { x: 100, y: 0 } });
+  r.air.transmit("a", frame());
+  r.clock.runAll();
+  const before = r.air.budget("a", "gw").rssiDbm;
+  r.air.setRadio("gw", { antennaGainDbi: 6 });
+  assertAlmostEquals(r.air.budget("a", "gw").rssiDbm, before + 6, 1e-9);
+  assertThrows(() => r.air.setRadio("a", { txPowerDbm: 20 }), Error, "only antennaGainDbi");
+  r.air.setEnvironment({ pathLossExponent: 3 });
+  assert(r.air.budget("a", "gw").rssiDbm < before);
 });
 
 Deno.test("air: same seed, same outcomes at a marginal SNR; another seed differs", () => {

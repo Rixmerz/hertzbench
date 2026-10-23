@@ -12,7 +12,7 @@ import {
   type Point2,
   type Position,
 } from "../engine/channel.ts";
-import type { FrameKind } from "../engine/events.ts";
+import type { ChannelChanges, FrameKind } from "../engine/events.ts";
 import { ipToBytes, macToBytes } from "../engine/packet.ts";
 import { DEFAULT_WIFI, type NodeRadio, parseNodeRadio, type Phy } from "./radios.ts";
 
@@ -85,6 +85,10 @@ export interface LinkRule {
   to: string;
   extraLossPct: number;
   extraLatencyMs: number;
+  /** Default 0. */
+  extraJitterMs?: number;
+  /** Noise rise at the receiver, dB. Default 0. */
+  interferenceDb?: number;
 }
 
 export type TimelineAction =
@@ -307,6 +311,27 @@ function parseEnvironment(
       `unknown preset ${JSON.stringify(presetName)} (free_space, indoor_office, urban, rural)`,
     );
   }
+  const environment = environmentFromPreset(presetName, parseChannelChanges(obj, path));
+  const retryLimit = obj.retry_limit === undefined
+    ? 7
+    : int(obj.retry_limit, `${path}.retry_limit`, 1, 32);
+  return { environment, retryLimit };
+}
+
+/** The channel-model parameters an `environment` block may set, the preset aside. */
+export const CHANNEL_FIELDS = [
+  "obstacles",
+  "path_loss_exponent",
+  "shadowing_sigma_db",
+  "noise_figure_db",
+  "base_latency_ms",
+] as const;
+
+/**
+ * The channel-model parameters `obj` sets, in the scenario's units and ranges,
+ * and only those it sets: a preset fills in the rest, or a run keeps its own.
+ */
+export function parseChannelChanges(obj: Record<string, unknown>, path: string): ChannelChanges {
   const obstacles: Obstacle[] = [];
   list(obj.obstacles ?? [], `${path}.obstacles`).forEach((raw, i) => {
     const p = `${path}.obstacles[${i}]`;
@@ -327,8 +352,8 @@ function parseEnvironment(
       });
     }
   });
-  const environment = environmentFromPreset(presetName, {
-    obstacles,
+  return {
+    ...(obj.obstacles !== undefined ? { obstacles } : {}),
     ...(obj.path_loss_exponent !== undefined
       ? { pathLossExponent: num(obj.path_loss_exponent, `${path}.path_loss_exponent`, 1, 8) }
       : {}),
@@ -341,11 +366,7 @@ function parseEnvironment(
     ...(obj.base_latency_ms !== undefined
       ? { baseLatencyMs: num(obj.base_latency_ms, `${path}.base_latency_ms`, 0, 10_000) }
       : {}),
-  });
-  const retryLimit = obj.retry_limit === undefined
-    ? 7
-    : int(obj.retry_limit, `${path}.retry_limit`, 1, 32);
-  return { environment, retryLimit };
+  };
 }
 
 function parseSubnet(value: unknown, path: string): string {
@@ -693,12 +714,18 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
 
 export function parseLinkRule(value: unknown, path: string): LinkRule {
   const obj = record(value, path);
-  known(obj, ["from", "to", "extra_loss_pct", "extra_latency_ms"], path);
+  known(
+    obj,
+    ["from", "to", "extra_loss_pct", "extra_latency_ms", "extra_jitter_ms", "interference_db"],
+    path,
+  );
   return {
     from: text(obj.from, `${path}.from`),
     to: text(obj.to, `${path}.to`),
     extraLossPct: num(obj.extra_loss_pct ?? 0, `${path}.extra_loss_pct`, 0, 100),
     extraLatencyMs: num(obj.extra_latency_ms ?? 0, `${path}.extra_latency_ms`, 0, 60_000),
+    extraJitterMs: num(obj.extra_jitter_ms ?? 0, `${path}.extra_jitter_ms`, 0, 60_000),
+    interferenceDb: num(obj.interference_db ?? 0, `${path}.interference_db`, 0, 100),
   };
 }
 

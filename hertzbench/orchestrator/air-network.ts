@@ -6,14 +6,30 @@
 import {
   type AirFrame,
   AirMedium,
+  BLE_BANDWIDTH_HZ,
+  BLE_NOISE_FIGURE_DB,
+  BLE_RATE_BPS,
+  BLE_REFERENCE_BYTES,
+  bleChannelFrequencyHz,
   bleLlRecord,
+  bleRequiredSnrDb,
+  type ChipSignal,
   type Clock,
   type EngineEvent,
   type EventLog,
   LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR,
   LINKTYPE_LORATAP,
   LINKTYPE_USER0,
+  LORA_NOISE_FIGURE_DB,
+  LORA_REFERENCE_BYTES,
+  loraBitRate,
+  loraRequiredSnrDb,
   type MediumControl,
+  NRF24_NOISE_FIGURE_DB,
+  NRF24_REFERENCE_BYTES,
+  nrf24BandwidthHz,
+  nrf24ChannelFrequencyHz,
+  nrf24RequiredSnrDb,
   PcapWriter,
   substream,
 } from "../engine/mod.ts";
@@ -27,6 +43,7 @@ import {
   isBleFrame,
 } from "../adapters/ble-hci/mod.ts";
 import { BleBridge, BluezPeripheral, type BridgeHooks, type RunningBridge } from "../bridge/mod.ts";
+import type { NodeRadio } from "./radios.ts";
 import type { Scenario } from "./scenario.ts";
 
 export interface NetworkSetup {
@@ -94,6 +111,49 @@ export function bleRecord(frame: AirFrame): Uint8Array {
   return bleLlRecord(h.channel, h.accessAddress, frame.payload, h.crcInit, frame.txPowerDbm);
 }
 
+/**
+ * The signal a chip radio is declared with, for link budgets read before it
+ * has transmitted. A BLE radio is read on advertising channel 37 until its
+ * first frame; after that, on the channel of its last frame.
+ */
+export function declaredSignal(radio: NodeRadio): ChipSignal {
+  switch (radio.phy) {
+    case "lora":
+      return {
+        frequencyHz: radio.frequencyHz,
+        bandwidthHz: radio.bandwidthHz,
+        noiseFigureDb: LORA_NOISE_FIGURE_DB,
+        txPowerDbm: radio.txPowerDbm,
+        requiredSnrDb: loraRequiredSnrDb(radio.sf),
+        referenceBytes: LORA_REFERENCE_BYTES,
+        // The scenario writes the coding rate as its denominator, the modem as 1-4.
+        rateBps: loraBitRate({ ...radio, codingRate: radio.codingRate - 4 }),
+      };
+    case "nrf24":
+      return {
+        frequencyHz: nrf24ChannelFrequencyHz(radio.channel),
+        bandwidthHz: nrf24BandwidthHz(radio.dataRate),
+        noiseFigureDb: NRF24_NOISE_FIGURE_DB,
+        txPowerDbm: radio.txPowerDbm,
+        requiredSnrDb: nrf24RequiredSnrDb(radio.dataRate),
+        referenceBytes: NRF24_REFERENCE_BYTES,
+        rateBps: radio.dataRate,
+      };
+    case "ble":
+      return {
+        frequencyHz: bleChannelFrequencyHz(37),
+        bandwidthHz: BLE_BANDWIDTH_HZ,
+        noiseFigureDb: BLE_NOISE_FIGURE_DB,
+        txPowerDbm: radio.txPowerDbm,
+        requiredSnrDb: bleRequiredSnrDb(),
+        referenceBytes: BLE_REFERENCE_BYTES,
+        rateBps: BLE_RATE_BPS,
+      };
+    case "wifi":
+      throw new Error("a Wi-Fi radio is not on the chip-level air");
+  }
+}
+
 function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSetup {
   const { clock, log } = ctx;
   const pcap = new PcapWriter(ctx.epochMs, LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR);
@@ -128,7 +188,12 @@ function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSe
     ports.set(node.id, attachment.port);
     hciCaptures.set(node.id, attachment.snoop);
     air.addNode(
-      { id: node.id, position: node.position, antennaGainDbi: radio.antennaGainDbi },
+      {
+        id: node.id,
+        position: node.position,
+        antennaGainDbi: radio.antennaGainDbi,
+        signal: declaredSignal(radio),
+      },
       attachment.controller,
     );
   }
@@ -162,7 +227,12 @@ function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSe
     });
     controllers.push(bridge.controller);
     air.addNode(
-      { id: spec.id, position: spec.position, antennaGainDbi: radio.antennaGainDbi },
+      {
+        id: spec.id,
+        position: spec.position,
+        antennaGainDbi: radio.antennaGainDbi,
+        signal: declaredSignal(radio),
+      },
       bridge.controller,
     );
   }
@@ -222,7 +292,12 @@ export function createAirNetwork(scenario: Scenario, ctx: AirNetworkContext): Ne
     }
     ports.set(node.id, attachment.port);
     air.addNode(
-      { id: node.id, position: node.position, antennaGainDbi: radio.antennaGainDbi },
+      {
+        id: node.id,
+        position: node.position,
+        antennaGainDbi: radio.antennaGainDbi,
+        signal: declaredSignal(radio),
+      },
       attachment.device,
     );
   });

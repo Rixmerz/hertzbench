@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import {
   buildArp,
   computeMetrics,
@@ -187,6 +187,64 @@ Deno.test("link override: forced loss and extra latency apply to that direction 
   assertEquals(rig.sinks.get("a")!.frames.length, 1);
   const drop = rig.log.events.find((e) => e.type === "drop");
   assert(drop && drop.type === "drop" && drop.reason === "extra_loss");
+});
+
+Deno.test("link override: interference lowers that link's SNR and costs it frames; jitter spreads its delay", () => {
+  const rig = makeRig({ positions: { a: { x: 0, y: 0 }, b: { x: 5, y: 0 } } });
+  const clean = rig.medium.budget("a", "b");
+  rig.medium.setLinkOverride("a", "b", { extraLossPct: 0, extraLatencyMs: 0, interferenceDb: 70 });
+  const noisy = rig.medium.budget("a", "b");
+  assertEquals(noisy.rssiDbm, clean.rssiDbm);
+  assertEquals(noisy.noiseFloorDbm, clean.noiseFloorDbm + 70);
+  assertEquals(noisy.snrDb, clean.snrDb - 70);
+  assertEquals(rig.medium.budget("b", "a").snrDb, clean.snrDb, "the other direction is untouched");
+  // 70 dB of noise rise leaves no rate that decodes: the MAC gives up by itself.
+  rig.medium.transmit("a", udpFrame(rig, "a", "b"));
+  rig.clock.runAll();
+  const drop = rig.log.events.find((e) => e.type === "drop");
+  assert(drop?.type === "drop" && drop.reason === "retry_exhausted", JSON.stringify(drop));
+
+  const delays = (jitterMs: number) => {
+    const r = makeRig({ positions: { a: { x: 0, y: 0 }, b: { x: 5, y: 0 } } });
+    r.medium.setLinkOverride("a", "b", {
+      extraLossPct: 0,
+      extraLatencyMs: 0,
+      extraJitterMs: jitterMs,
+    });
+    for (let i = 0; i < 30; i++) r.medium.transmit("a", udpFrame(r, "a", "b"));
+    r.clock.runAll();
+    return r.log.events.flatMap((e) => e.type === "deliver" ? [e.delayMs] : []);
+  };
+  const steady = delays(0);
+  const jittery = delays(40);
+  assertEquals(jittery.length, 30);
+  const spread = (xs: number[]) => Math.max(...xs) - Math.min(...xs);
+  assert(spread(steady) < 5, `without jitter: ${spread(steady)} ms`);
+  assert(spread(jittery) > 20, `with up to 40 ms of jitter: ${spread(jittery)} ms`);
+  assert(Math.max(...jittery) < Math.max(...steady) + 40);
+});
+
+Deno.test("live channel and radio: sigma rescales each pair's draw, power moves RSSI, a channel change deafens", () => {
+  const rig = makeRig({ positions: { a: { x: 0, y: 0 }, b: { x: 20, y: 0 } } });
+  const before = rig.medium.budget("a", "b");
+  assert(before.shadowingDb !== 0, "indoor_office draws shadowing");
+  rig.medium.setEnvironment({ shadowingSigmaDb: 8, pathLossExponent: 3.5 });
+  const after = rig.medium.budget("a", "b");
+  // indoor_office's sigma is 4 dB: the same draw, twice as large.
+  assertAlmostEquals(after.shadowingDb, before.shadowingDb * 2, 1e-9);
+  assert(after.pathLossDb > before.pathLossDb);
+
+  rig.medium.setRadio("a", { txPowerDbm: 5 });
+  assertAlmostEquals(rig.medium.budget("a", "b").rssiDbm, after.rssiDbm - 10, 1e-9);
+  rig.medium.setRadio("b", { channel: 11 });
+  rig.medium.transmit("a", udpFrame(rig, "a", "b"));
+  rig.clock.runAll();
+  const drop = rig.log.events.find((e) => e.type === "drop");
+  assert(drop?.type === "drop" && drop.reason === "channel_mismatch");
+  assertEquals(
+    rig.log.events.filter((e) => e.type === "channel" || e.type === "radio").map((e) => e.type),
+    ["channel", "radio", "radio"],
+  );
 });
 
 Deno.test("gateway: DHCP and ARP are answered to the asker only, outside the loss model", () => {

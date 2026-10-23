@@ -9,8 +9,14 @@ import { BoardError } from "../orchestrator/boards/board.ts";
 import { ESP32_FIDELITY, resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { scriptedLauncher } from "../orchestrator/boards/scripted.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
+import { renderReport } from "../orchestrator/report.ts";
+import { CAPTURE_KINDS, type CaptureKind } from "../orchestrator/runner.ts";
+import { viewState } from "../view/scene.ts";
+import { EVENT_TYPES } from "../engine/mod.ts";
 import {
   BOARD_NAMES,
+  CHANNEL_FIELDS,
+  parseChannelChanges,
   parseLinkRule,
   parsePosition,
   parseScenario,
@@ -18,6 +24,7 @@ import {
   ScenarioError,
 } from "../orchestrator/scenario.ts";
 import { type ResourceDefinition, type ToolDefinition, ToolError } from "./protocol.ts";
+import { editScenarioText, type ScenarioEdit } from "./scenario-edit.ts";
 import type { Session } from "./session.ts";
 
 type Args = Record<string, unknown>;
@@ -49,6 +56,63 @@ function optionalInt(args: Args, key: string, min: number, max: number): number 
     throw new ToolError(`${key} must be an integer from ${min} to ${max}`);
   }
   return value;
+}
+
+function optionalNumber(args: Args, key: string, min: number, max: number): number | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new ToolError(`${key} must be a number from ${min} to ${max}`);
+  }
+  return value;
+}
+
+function optionalBoolean(args: Args, key: string): boolean | null {
+  const value = args[key];
+  if (value === undefined) return null;
+  if (typeof value !== "boolean") throw new ToolError(`${key} must be true or false`);
+  return value;
+}
+
+function oneOf<T extends string>(args: Args, key: string, allowed: readonly T[]): T {
+  const value = args[key];
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw new ToolError(`${key} must be one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+/** Most bytes one send_serial call carries: a few console lines, not a firmware image. */
+const MAX_SERIAL_BYTES = 4096;
+
+/** The bytes of send_serial: `text` (with a newline unless told not to) or `data_base64`. */
+function serialBytes(args: Args): Uint8Array {
+  const text = args.text;
+  const data = args.data_base64;
+  if ((text === undefined) === (data === undefined)) {
+    throw new ToolError("give exactly one of text or data_base64");
+  }
+  let bytes: Uint8Array;
+  if (text !== undefined) {
+    if (typeof text !== "string") throw new ToolError("text must be a string");
+    const newline = optionalBoolean(args, "newline") ?? true;
+    bytes = new TextEncoder().encode(newline ? `${text}\n` : text);
+  } else {
+    if (args.newline !== undefined) throw new ToolError("newline applies to text only");
+    if (typeof data !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+      throw new ToolError("data_base64 must be base64");
+    }
+    try {
+      bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    } catch {
+      throw new ToolError("data_base64 must be base64");
+    }
+  }
+  if (bytes.length === 0) throw new ToolError("nothing to send");
+  if (bytes.length > MAX_SERIAL_BYTES) {
+    throw new ToolError(`at most ${MAX_SERIAL_BYTES} bytes per call, got ${bytes.length}`);
+  }
+  return bytes;
 }
 
 /** Scenario and board errors are the caller's to fix: report them, do not crash. */
@@ -111,7 +175,40 @@ const PHASE_SCHEMA = {
     "Start a metrics phase with this label at the same instant, so get_metrics can compare before and after",
 };
 
-export function tools(session: Session): ToolDefinition[] {
+function optionalObject(args: Args, key: string): Record<string, unknown> | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ToolError(`${key} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+const EDIT_NOTE = "the file was rewritten from its data: comments and the original layout are gone";
+
+/** Starts the view of the session on a loopback port, or returns the one already serving it. */
+export type ViewOpener = (port: number) => { url: string; already_open: boolean };
+
+export function tools(session: Session, openView?: ViewOpener): ToolDefinition[] {
+  /** Apply `edit` to the scenario file at `path`, inside the workspace, after checking the result. */
+  const editFile = async (path: string, edit: ScenarioEdit) => {
+    if (!/\.ya?ml$/.test(path)) throw new ToolError("path must end in .yaml or .yml");
+    const file = await session.writablePath(path, "path", "file");
+    let text: string;
+    try {
+      text = await Deno.readTextFile(file);
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        throw new ToolError(`${file} does not exist; create_scenario writes a new one`);
+      }
+      throw error;
+    }
+    const edited = editScenarioText(text, file, edit);
+    await session.replaceFile(file, edited.text);
+    const missing = await checkFirmwareFiles(withFirmwareFrom(edited.scenario, dirname(file)));
+    return { file, scenario: summary(edited.scenario), missing_firmware: missing, note: EDIT_NOTE };
+  };
+
   return [
     {
       name: "list_boards",
@@ -229,6 +326,113 @@ export function tools(session: Session): ToolDefinition[] {
         }),
     },
     {
+      name: "read_scenario",
+      description:
+        "The text of a scenario file and what it parses to: its nodes with their addresses, positions, radios and firmware, or the first error with its field path. Use it before edit_scenario.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file, relative to the workspace" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      call: async (args) => {
+        known(args, ["path"]);
+        const file = session.resolvePath(requiredText(args, "path"));
+        let yaml: string;
+        try {
+          yaml = await Deno.readTextFile(file);
+        } catch (error) {
+          if (error instanceof Deno.errors.NotFound) throw new ToolError(`${file} does not exist`);
+          throw error;
+        }
+        try {
+          return { file, yaml, valid: true, scenario: summary(parseScenario(yaml)) };
+        } catch (error) {
+          if (!(error instanceof ScenarioError)) throw error;
+          return { file, yaml, valid: false, error: error.message };
+        }
+      },
+    },
+    {
+      name: "edit_scenario",
+      description:
+        "Change a scenario file inside the workspace in one step, checked before it is written: an invalid result is refused and the file stays as it was. `set` is a JSON merge patch on the top level (name, seed, duration, environment and its channel parameters, network, links with their loss, latency, jitter and interference, timeline, assertions, outputs, bridge): objects merge, null removes a key, arrays are replaced whole. `nodes` patches node entries by id the same way (position, board, firmware, radios, ...); null removes the node. `add` appends new node entries. A node made by `count:` is edited through its group's id. The file is rewritten from its data, so comments are lost. Takes effect on the next run_scenario; for the run in progress use move_node, inject_fault, set_channel and set_radio.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file inside the workspace" },
+          set: { type: "object", description: "Merge patch on the top level, nodes excepted" },
+          nodes: {
+            type: "object",
+            description: "Node id -> merge patch on that node entry, or null to remove it",
+          },
+          add: { type: "array", items: { type: "object" }, description: "Node entries to append" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["path", "set", "nodes", "add"]);
+          const path = requiredText(args, "path");
+          const add = args.add;
+          if (add !== undefined && !Array.isArray(add)) throw new ToolError("add must be an array");
+          const edit: ScenarioEdit = {
+            set: optionalObject(args, "set"),
+            nodes: optionalObject(args, "nodes"),
+            add: add as Record<string, unknown>[] | undefined,
+          };
+          if (edit.set === undefined && edit.nodes === undefined && edit.add === undefined) {
+            throw new ToolError("nothing to change: give set, nodes or add");
+          }
+          return editFile(path, edit);
+        }),
+    },
+    {
+      name: "add_node",
+      description:
+        "Add a node entry to a scenario file inside the workspace, checked before it is written: { id, board, position, radios, firmware, count?, ip?, internet_gateway? } as in the scenario format. Takes effect on the next run: a run in progress cannot gain a board.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file inside the workspace" },
+          node: { type: "object", description: "The node entry" },
+        },
+        required: ["path", "node"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["path", "node"]);
+          const node = optionalObject(args, "node");
+          if (!node) throw new ToolError("node must be an object");
+          return editFile(requiredText(args, "path"), { add: [node] });
+        }),
+    },
+    {
+      name: "remove_node",
+      description:
+        "Remove a node entry from a scenario file inside the workspace, by its id. Refused, with the field that still names it, while a link rule, timeline entry, assertion or scripted send refers to the node; remove those in the same edit_scenario call. Takes effect on the next run.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file inside the workspace" },
+          id: { type: "string" },
+        },
+        required: ["path", "id"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["path", "id"]);
+          return editFile(requiredText(args, "path"), {
+            nodes: { [requiredText(args, "id")]: null },
+          });
+        }),
+    },
+    {
       name: "run_scenario",
       description:
         "Start a scenario in the background and return at once. Poll get_status until state is running (live tools work then), finished, failed or stopped. One run at a time. Every output (metrics.json, air.pcap, events.jsonl, serial logs) goes to out_dir inside the workspace. Errors known before boot (invalid scenario, missing firmware, no libqemu for esp32) come back here.",
@@ -334,7 +538,7 @@ export function tools(session: Session): ToolDefinition[] {
     {
       name: "inject_fault",
       description:
-        'Force extra loss and/or latency on links now, while the run is in progress. `link` is from->to and either side may use * ("*->gw", "a->*"). It replaces any earlier override on those links; set both values to 0 to clear it.',
+        'Force chaos on links now, while the run is in progress: extra loss, extra latency, jitter (extra latency drawn from 0 to the value per frame) and interference (a noise rise at the receiver that lowers the link\'s SNR, so the channel model loses frames by itself). `link` is from->to and either side may use * ("*->gw", "a->*"). It replaces any earlier override on those links; set every value to 0 to clear it. Works on every PHY.',
       inputSchema: {
         type: "object",
         properties: {
@@ -346,6 +550,19 @@ export function tools(session: Session): ToolDefinition[] {
             maximum: 60000,
             description: "Default 0",
           },
+          extra_jitter_ms: {
+            type: "number",
+            minimum: 0,
+            maximum: 60000,
+            description: "Extra latency drawn uniformly from 0 to this, per frame. Default 0",
+          },
+          interference_db: {
+            type: "number",
+            minimum: 0,
+            maximum: 100,
+            description:
+              "Noise rise at the receiver in dB; the link's SNR falls by as much. Default 0",
+          },
           phase: PHASE_SCHEMA,
         },
         required: ["link"],
@@ -353,7 +570,14 @@ export function tools(session: Session): ToolDefinition[] {
       },
       call: (args) =>
         expected(() => {
-          known(args, ["link", "extra_loss_pct", "extra_latency_ms", "phase"]);
+          known(args, [
+            "link",
+            "extra_loss_pct",
+            "extra_latency_ms",
+            "extra_jitter_ms",
+            "interference_db",
+            "phase",
+          ]);
           const link = requiredText(args, "link");
           const sides = link.split("->");
           if (sides.length !== 2 || sides.some((s) => s.trim() === "")) {
@@ -364,9 +588,272 @@ export function tools(session: Session): ToolDefinition[] {
             to: sides[1]!.trim(),
             extra_loss_pct: args.extra_loss_pct,
             extra_latency_ms: args.extra_latency_ms,
+            extra_jitter_ms: args.extra_jitter_ms,
+            interference_db: args.interference_db,
           }, "inject_fault");
           return session.fault(rule, optionalText(args, "phase"));
         }),
+    },
+    {
+      name: "set_channel",
+      description:
+        "Change the channel model of the run in progress, now, for every later frame and link budget: path_loss_exponent, shadowing_sigma_db (scales each pair's seeded draw), noise_figure_db (Wi-Fi receivers; chip PHYs use their own), base_latency_ms, and obstacles (replaces every wall; scenario format: [{ polygon: [[x, y], ...], attenuation_db }]). Same units and ranges as the scenario's environment block. Logged as a channel event.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path_loss_exponent: { type: "number", minimum: 1, maximum: 8 },
+          shadowing_sigma_db: { type: "number", minimum: 0, maximum: 30 },
+          noise_figure_db: { type: "number", minimum: 0, maximum: 30 },
+          base_latency_ms: { type: "number", minimum: 0, maximum: 10000 },
+          obstacles: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                polygon: { type: "array", items: { type: "array", items: { type: "number" } } },
+                attenuation_db: { type: "number", minimum: 0 },
+              },
+              required: ["polygon", "attenuation_db"],
+            },
+          },
+          phase: PHASE_SCHEMA,
+        },
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, [...CHANNEL_FIELDS, "phase"]);
+          const { phase: _phase, ...fields } = args;
+          if (Object.keys(fields).length === 0) {
+            throw new ToolError(`nothing to change: give any of ${CHANNEL_FIELDS.join(", ")}`);
+          }
+          const changes = parseChannelChanges(fields, "set_channel");
+          return session.setChannel(changes, optionalText(args, "phase"));
+        }),
+    },
+    {
+      name: "set_radio",
+      description:
+        "Change a station's radio as the medium models it, in the run in progress, now. Wi-Fi: channel (the one the medium hears it on), tx_power_dbm, antenna_gain_dbi. LoRa, nRF24 and BLE: antenna_gain_dbi only, since the chip's channel and power are in its registers, where the firmware put them. The firmware is not told. Returns the new RSSI and SNR from that station to each other one.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node: { type: "string" },
+          channel: { type: "integer", minimum: 1, maximum: 14 },
+          tx_power_dbm: { type: "number", minimum: -20, maximum: 30 },
+          antenna_gain_dbi: { type: "number", minimum: -20, maximum: 30 },
+          phase: PHASE_SCHEMA,
+        },
+        required: ["node"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["node", "channel", "tx_power_dbm", "antenna_gain_dbi", "phase"]);
+          const node = requiredText(args, "node");
+          const channel = optionalInt(args, "channel", 1, 14);
+          const txPowerDbm = optionalNumber(args, "tx_power_dbm", -20, 30);
+          const antennaGainDbi = optionalNumber(args, "antenna_gain_dbi", -20, 30);
+          const changes = {
+            ...(channel !== null ? { channel } : {}),
+            ...(txPowerDbm !== undefined ? { txPowerDbm } : {}),
+            ...(antennaGainDbi !== undefined ? { antennaGainDbi } : {}),
+          };
+          if (Object.keys(changes).length === 0) {
+            throw new ToolError(
+              "nothing to change: give channel, tx_power_dbm or antenna_gain_dbi",
+            );
+          }
+          return session.setRadio(node, changes, optionalText(args, "phase"));
+        }),
+    },
+    {
+      name: "start_phase",
+      description:
+        "Start a metrics phase with this label now, without changing anything, so get_metrics can compare before and after something that happens on its own (firmware behaviour, a serial command).",
+      inputSchema: {
+        type: "object",
+        properties: { label: { type: "string" } },
+        required: ["label"],
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["label"]);
+        return Promise.resolve(session.startPhase(requiredText(args, "label")));
+      },
+    },
+    {
+      name: "send_serial",
+      description:
+        "Type into a board's serial console (UART0) while the run plays, as a person at a terminal would. ESP32 boards receive the bytes through QEMU's UART, with its RX interrupt; their answer shows in get_serial. Scripted boards have no console and refuse. Give `text` (a newline is added unless newline is false) or `data_base64` for raw bytes; at most 4096 bytes per call.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node: { type: "string" },
+          text: { type: "string" },
+          newline: { type: "boolean", description: "Append \\n to text. Default true" },
+          data_base64: { type: "string", description: "Raw bytes, base64" },
+        },
+        required: ["node"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["node", "text", "newline", "data_base64"]);
+          const node = requiredText(args, "node");
+          return session.sendSerial(node, serialBytes(args));
+        }),
+    },
+    {
+      name: "get_events",
+      description:
+        "The engine's event stream of the current or last run, oldest first: every transmission (tx), delivery and drop with its reason, RSSI and SNR, moves, link overrides, phases, serial lines, BLE link changes and warnings, timed in ms since time zero. The same records as events.jsonl. Pass the returned next_since_seq back as since_seq to follow the stream.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          since_seq: {
+            type: "integer",
+            minimum: -1,
+            description: "Only events with a larger sequence number. Default -1: from the start",
+          },
+          types: {
+            type: "array",
+            items: { type: "string", enum: EVENT_TYPES },
+            description: "Only these event types",
+          },
+          node: {
+            type: "string",
+            description: "Only events about this node: sent, received, moved or printed",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 5000,
+            description: "Most events to return. Default 500",
+          },
+        },
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["since_seq", "types", "node", "limit"]);
+        const since = optionalInt(args, "since_seq", -1, Number.MAX_SAFE_INTEGER) ?? -1;
+        let types: string[] | null = null;
+        if (args.types !== undefined) {
+          if (!Array.isArray(args.types) || args.types.length === 0) {
+            throw new ToolError("types must be a non-empty array of event types");
+          }
+          types = args.types.map((type) => {
+            if (typeof type !== "string" || !(EVENT_TYPES as string[]).includes(type)) {
+              throw new ToolError(
+                `unknown event type ${JSON.stringify(type)} (types: ${EVENT_TYPES.join(", ")})`,
+              );
+            }
+            return type;
+          });
+        }
+        const limit = optionalInt(args, "limit", 1, 5000) ?? 500;
+        return Promise.resolve(
+          session.eventsSince(since, { types, node: optionalText(args, "node") }, limit),
+        );
+      },
+    },
+    {
+      name: "export_capture",
+      description:
+        "Write a packet capture of the current or last run as it stands now, also mid-run and after stop (which writes no files of its own): `pcap` the whole air (Wi-Fi Ethernet frames, LoRaTap, the nRF24 record, or BLE link-layer packets, by the run's PHY), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi runs), `btsnoop` one BLE node's HCI traffic. Opens in Wireshark. Written inside the workspace, by default into the run's out_dir.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: CAPTURE_KINDS },
+          node: { type: "string", description: "btsnoop only: the BLE node" },
+          path: {
+            type: "string",
+            description:
+              "Where to write it, inside the workspace. Default <out_dir>/air-live.pcap, air-live-80211.pcap or hci-<node>-live.btsnoop",
+          },
+        },
+        required: ["kind"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["kind", "node", "path"]);
+          const kind: CaptureKind = oneOf(args, "kind", CAPTURE_KINDS);
+          return session.exportCapture(
+            kind,
+            optionalText(args, "node"),
+            optionalText(args, "path"),
+          );
+        }),
+    },
+    {
+      name: "get_report",
+      description:
+        "The text report `hertzbench run` prints for a finished run: every node with its board, radio, clock and fidelity, the per-link table, the assertions with their verdicts, warnings and the files written.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      call: (args) => {
+        known(args, []);
+        const run = session.run;
+        if (!run) throw new ToolError("no run yet: call run_scenario first");
+        if (!run.result) {
+          throw new ToolError(
+            `the report is made when a run finishes; this one is ${run.state}. ` +
+              "get_metrics has the numbers so far",
+          );
+        }
+        return Promise.resolve({ state: run.state, report: renderReport(run.result) });
+      },
+    },
+    {
+      name: "open_view",
+      description:
+        "Serve the visual layer of this server's runs on a loopback port and return its URL for a person to open: a map of the nodes, links colored by signal or loss, the link table and a packet timeline; dragging a node there calls move_node. Nothing is launched: the URL is only returned. One view per server; a second call returns the same URL.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          port: {
+            type: "integer",
+            minimum: 0,
+            maximum: 65535,
+            description: "Loopback port. Default 0: a free one",
+          },
+        },
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["port"]);
+        if (!openView) throw new ToolError("this server has no view to open");
+        const port = optionalInt(args, "port", 0, 65535) ?? 0;
+        try {
+          return Promise.resolve(openView(port));
+        } catch (error) {
+          if (error instanceof Deno.errors.AddrInUse) {
+            throw new ToolError(`port ${port} is in use; pass another, or 0 for a free one`);
+          }
+          throw error;
+        }
+      },
+    },
+    {
+      name: "get_view_state",
+      description:
+        "What the view draws now, as data: the status, every directed link with its distance, RSSI, SNR, rate, signal quality (Wi-Fi by the rate the SNR allows; LoRa, nRF24 and BLE by the share of frames their PHY loses at that SNR), loss over the last 2 s and any forced chaos, the walls, and the packet timeline after `since` (pass back next_since).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          since: {
+            type: "integer",
+            minimum: -1,
+            description: "Timeline entries after this sequence number. Default -1: all",
+          },
+        },
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["since"]);
+        const since = optionalInt(args, "since", -1, Number.MAX_SAFE_INTEGER) ?? -1;
+        return Promise.resolve(viewState(session, since));
+      },
     },
     {
       name: "stop",

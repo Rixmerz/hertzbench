@@ -3,12 +3,21 @@
 // plays. The last run stays readable after it ends, until the next one starts.
 
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { computeMetrics, type EngineEvent, type LinkBudget, type Position } from "../engine/mod.ts";
+import {
+  type ChannelChanges,
+  type ChipSignal,
+  computeMetrics,
+  type EngineEvent,
+  type LinkBudget,
+  type Position,
+  type RadioConfig,
+} from "../engine/mod.ts";
 import { BoardError, type BoardLauncher } from "../orchestrator/boards/board.ts";
 import { resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { checkFirmwareFiles, type LoadedScenario, loadScenario } from "../orchestrator/load.ts";
 import { linkJson, metricsDocument } from "../orchestrator/report.ts";
 import {
+  type CaptureKind,
   type LiveRun,
   RunInterrupted,
   type RunResult,
@@ -88,6 +97,24 @@ export class Session {
       if (existing?.isSymlink) throw escapes();
     }
     return target;
+  }
+
+  /**
+   * Replace a file inside the workspace in one step: the text goes to a
+   * temporary file next to it, which then takes its name, so a reader never
+   * sees half of it.
+   */
+  async replaceFile(target: string, text: string): Promise<void> {
+    const temp = `${target}.${crypto.randomUUID()}.tmp`;
+    await Deno.writeTextFile(temp, text, { createNew: true });
+    try {
+      await Deno.rename(temp, target);
+    } catch (error) {
+      await Deno.remove(temp).catch(
+        () => {/* already gone; the rename's error is the one to report */},
+      );
+      throw error;
+    }
   }
 
   /** Load, check and start a run in the background. Fails at once on anything known before boot. */
@@ -208,13 +235,15 @@ export class Session {
   }
 
   /**
-   * The budget of every directed link between nodes on the medium now; empty
-   * before time zero and on the chip-level air, which reports no budget.
+   * The budget of every directed link between stations on the medium now,
+   * whatever the PHY; empty before time zero.
    */
-  linkBudgets(run: Run): { from: string; to: string; budget: LinkBudget }[] {
+  linkBudgets(
+    run: Run,
+  ): { from: string; to: string; budget: LinkBudget & { signal?: ChipSignal } }[] {
     const live = run.live;
-    if (!live || run.loaded.scenario.phy !== "wifi") return [];
-    const ids = run.loaded.scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
+    if (!live) return [];
+    const ids = mediumIds(run.loaded.scenario);
     return ids.flatMap((from) =>
       ids.filter((to) => to !== from).map((to) => ({ from, to, budget: live.budget(from, to) }))
     );
@@ -320,13 +349,7 @@ export class Session {
     const from = live.position(node);
     if (phase !== null) live.startPhase(phase);
     live.moveNode(node, to);
-    // Only the Wi-Fi medium reports a budget; on the chip-level air the move stands without one.
-    const peers = run.loaded.scenario.phy === "wifi"
-      ? [
-        ...run.loaded.scenario.nodes.filter((n) => !n.internetGateway),
-        ...(bridge ? [{ id: bridge.id }] : []),
-      ].filter((n) => n.id !== node)
-      : [];
+    const peers = mediumIds(run.loaded.scenario).filter((id) => id !== node);
     return {
       node,
       from,
@@ -335,15 +358,75 @@ export class Session {
       phase,
       // What the channel model now gives each link from this node, before any frame.
       links: peers.map((peer) => {
-        const budget = live.budget(node, peer.id);
+        const budget = live.budget(node, peer);
         return {
-          link: `${node}->${peer.id}`,
+          link: `${node}->${peer}`,
           distance_m: round(budget.distanceM),
           rssi_dbm: round(budget.rssiDbm),
           snr_db: round(budget.snrDb),
         };
       }),
     };
+  }
+
+  /** Change channel-model parameters of the run in progress, for every later frame. */
+  setChannel(changes: ChannelChanges, phase: string | null) {
+    const run = this.#underway("set_channel");
+    if (run.loaded.scenario.phy !== "wifi" && changes.noiseFigureDb !== undefined) {
+      throw new ToolError(
+        `noise_figure_db is the Wi-Fi receiver's; on this ${run.loaded.scenario.phy} run each ` +
+          "chip's own receiver noise figure applies",
+      );
+    }
+    const live = run.live!;
+    if (phase !== null) live.startPhase(phase);
+    live.setEnvironment(changes);
+    return { changes, at_ms: round(live.elapsedMs()), phase };
+  }
+
+  /**
+   * Change a station's radio, as the medium models it, in the run in
+   * progress. Returns the budgets from that station afterwards.
+   */
+  setRadio(node: string, changes: Partial<RadioConfig>, phase: string | null) {
+    const run = this.#underway("set_radio");
+    const { scenario } = run.loaded;
+    if (scenario.bridge?.id !== node && this.#node(scenario, node).internetGateway) {
+      throw new ToolError(`${node} is the internet gateway: it is not on the medium`);
+    }
+    if (scenario.phy !== "wifi") {
+      const chipSet = Object.keys(changes).filter((key) => key !== "antennaGainDbi");
+      if (chipSet.length > 0) {
+        throw new ToolError(
+          `on a ${scenario.phy} run only antenna_gain_dbi can change: the chip's channel and ` +
+            "transmit power are in its registers, where the firmware put them",
+        );
+      }
+    }
+    const live = run.live!;
+    if (phase !== null) live.startPhase(phase);
+    live.setRadio(node, changes);
+    return {
+      node,
+      changes,
+      at_ms: round(live.elapsedMs()),
+      phase,
+      links: mediumIds(scenario).filter((id) => id !== node).map((peer) => {
+        const budget = live.budget(node, peer);
+        return {
+          link: `${node}->${peer}`,
+          rssi_dbm: round(budget.rssiDbm),
+          snr_db: round(budget.snrDb),
+        };
+      }),
+    };
+  }
+
+  /** Start a metrics phase now, without changing anything. */
+  startPhase(label: string) {
+    const run = this.#underway("start_phase");
+    run.live!.startPhase(label);
+    return { phase: label, at_ms: round(run.live!.elapsedMs()) };
   }
 
   fault(rule: LinkRule, phase: string | null) {
@@ -358,8 +441,105 @@ export class Session {
       links: pairs.map(([from, to]) => `${from}->${to}`),
       extra_loss_pct: rule.extraLossPct,
       extra_latency_ms: rule.extraLatencyMs,
+      extra_jitter_ms: rule.extraJitterMs ?? 0,
+      interference_db: rule.interferenceDb ?? 0,
       at_ms: round(live.elapsedMs()),
       phase,
+    };
+  }
+
+  /** Bytes into a board's serial console while the run plays. */
+  async sendSerial(node: string, bytes: Uint8Array) {
+    const run = this.#underway("send_serial");
+    if (run.loaded.scenario.bridge?.id === node) {
+      throw new ToolError(`${node} is the mobile bridge: it has no serial console`);
+    }
+    this.#node(run.loaded.scenario, node);
+    const at = run.live!.elapsedMs();
+    try {
+      await run.live!.writeSerial(node, bytes);
+    } catch (error) {
+      if (error instanceof BoardError) throw new ToolError(error.message);
+      throw error;
+    }
+    return { node, bytes: bytes.length, at_ms: round(at) };
+  }
+
+  /**
+   * The run's events after sequence number `sinceSeq`, oldest first, at most
+   * `limit` of them; pass `next_since_seq` back to read on from there.
+   */
+  eventsSince(
+    sinceSeq: number,
+    filter: { types: readonly string[] | null; node: string | null },
+    limit: number,
+  ) {
+    const run = this.#any();
+    const all = this.events(run);
+    const matching = all.filter((e) =>
+      e.seq > sinceSeq &&
+      (filter.types === null || filter.types.includes(e.type)) &&
+      (filter.node === null || namesNode(e, filter.node))
+    );
+    const shown = matching.slice(0, limit);
+    const last = all[all.length - 1];
+    return {
+      state: run.state,
+      events: shown,
+      truncated: matching.length > shown.length,
+      // Past every event read so far, or only past the ones returned when cut short.
+      next_since_seq: matching.length > shown.length
+        ? shown[shown.length - 1]!.seq
+        : Math.max(sinceSeq, last?.seq ?? -1),
+    };
+  }
+
+  /**
+   * Write a capture of the current or last run, as it stands now, to a file
+   * inside the workspace: by default next to the run's other outputs.
+   */
+  async exportCapture(kind: CaptureKind, node: string | null, path: string | null) {
+    const run = this.#any();
+    if (!run.live) {
+      throw new ToolError(
+        run.state === "starting"
+          ? 'the boards are still starting; poll get_status until state is "running"'
+          : "the run never reached time zero: nothing was captured",
+      );
+    }
+    if (kind === "btsnoop") {
+      if (node === null) throw new ToolError("btsnoop needs the node whose HCI to export");
+      if (run.loaded.scenario.bridge?.id !== node) this.#node(run.loaded.scenario, node);
+    } else if (node !== null) {
+      throw new ToolError(`${kind} is the whole air; node applies to btsnoop only`);
+    }
+    const capture = run.live.capture(kind, node ?? undefined);
+    if (!capture) {
+      throw new ToolError(
+        kind === "btsnoop"
+          ? `this run has no HCI capture of ${node}: btsnoop is for BLE nodes`
+          : `this run has no ${kind} capture: pcap-80211 is for Wi-Fi runs`,
+      );
+    }
+    const defaultName = kind === "pcap"
+      ? "air-live.pcap"
+      : kind === "pcap-80211"
+      ? "air-live-80211.pcap"
+      : `hci-${node}-live.btsnoop`;
+    const file = await this.writablePath(
+      path ?? `${run.loaded.outDir}/${defaultName}`,
+      "path",
+      "file",
+    );
+    await Deno.writeFile(file, capture.bytes);
+    return {
+      file,
+      kind,
+      node,
+      packets: capture.packets,
+      bytes: capture.bytes.length,
+      state: run.state,
+      elapsed_ms: this.elapsedMs(run),
     };
   }
 
@@ -404,6 +584,20 @@ export class Session {
     }
     return node;
   }
+}
+
+/** Whether an event is about this node: it sent, received, moved or printed. */
+function namesNode(event: EngineEvent, node: string): boolean {
+  if ("node" in event && event.node === node) return true;
+  return "from" in event && (event.from === node || event.to === node);
+}
+
+/** Every station on the medium: the boards but the internet gateway, and the bridge. */
+function mediumIds(scenario: Scenario): string[] {
+  return [
+    ...scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id),
+    ...(scenario.bridge ? [scenario.bridge.id] : []),
+  ];
 }
 
 async function nearestExisting(path: string): Promise<string> {

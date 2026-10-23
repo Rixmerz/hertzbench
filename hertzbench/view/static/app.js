@@ -17,11 +17,19 @@ const KEY_STEP_M = 1;
 const KEY_STEP_SHIFT_M = 5;
 
 const MEANING = {
+  // Wi-Fi: the rate the channel model picks at the link's SNR.
   signal: {
     good: "54 Mbit/s",
     fair: "24 to 48 Mbit/s",
     poor: "6 to 18 Mbit/s",
     bad: "under the 6 Mbit/s threshold: losses climb",
+  },
+  // LoRa, nRF24, BLE: the share of frames the SNR alone would lose.
+  chipSignal: {
+    good: "under 1% lost to noise",
+    fair: "1 to 10%: above the demodulation floor",
+    poor: "10 to 50%: at or below the floor",
+    bad: "50% or more lost to noise",
   },
   loss: {
     good: "under 1% lost",
@@ -64,6 +72,8 @@ const view = {
   /** Grows to hold every position seen in this run, so the map does not jump. */
   bounds: null,
   mode: "signal",
+  /** The run's PHY: "wifi", "lora", "nrf24" or "ble". */
+  phy: "wifi",
   /** The node being dragged: { id, pointerId, position }. */
   drag: null,
   /** Moves posted and not yet seen in a view: id -> position. */
@@ -267,7 +277,8 @@ function render() {
   ui.window.textContent = data.scene ? fixed(data.scene.window_ms / 1000, 0) : "2";
 
   const nodes = status.nodes ?? [];
-  const scene = data.scene ?? { obstacles: [], links: [] };
+  const scene = data.scene ?? { phy: "wifi", obstacles: [], links: [] };
+  view.phy = scene.phy;
   growBounds(nodes, scene.obstacles);
   const proj = projection();
   ui.map.setAttribute("viewBox", `0 0 ${proj.width} ${proj.height}`);
@@ -276,7 +287,7 @@ function render() {
   drawLinks(proj, nodes, scene.links);
   drawNodes(proj, nodes, data.board_images ?? {});
   drawLegend();
-  drawTable(scene.links, scene.links_note ?? null);
+  drawTable(scene.links);
   drawProblems(status);
   drawTimeline(scene.links, status.elapsed_ms);
   const scripted = nodes.some((node) => node.board === "scripted");
@@ -340,11 +351,9 @@ function linkSentence(link) {
   const loss = link.window_loss_pct === null
     ? "no frames in the window"
     : `${fixed(link.window_loss_pct)}% of ${link.window_frames} frames lost`;
-  const forced = link.override
-    ? `; forced ${link.override.extra_loss_pct}% loss, ${link.override.extra_latency_ms} ms latency`
-    : "";
+  const forced = link.override ? `; forced ${forcedText(link.override)}` : "";
   return `${link.from} → ${link.to}: ${fixed(link.distance_m)} m, ${fixed(link.rssi_dbm)} dBm, ` +
-    `SNR ${fixed(link.snr_db)} dB, ${link.rate_mbps} Mbit/s, ${loss}${forced}. ` +
+    `SNR ${fixed(link.snr_db)} dB, ${rate(link.rate_bps)}, ${loss}${forced}. ` +
     `Signal ${link.signal}, loss ${link.loss}.`;
 }
 
@@ -486,7 +495,12 @@ function createNode(node, image) {
 }
 
 function drawLegend() {
-  const items = Object.entries(MEANING[view.mode]).map(([quality, meaning]) => {
+  const meanings = view.mode === "loss"
+    ? MEANING.loss
+    : view.phy === "wifi"
+    ? MEANING.signal
+    : MEANING.chipSignal;
+  const items = Object.entries(meanings).map(([quality, meaning]) => {
     const item = html("li");
     item.append(html("span", "", `swatch q-${quality}`), html("span", `${quality}: ${meaning}`));
     return item;
@@ -494,20 +508,14 @@ function drawLegend() {
   ui.legend.replaceChildren(...items);
 }
 
-function drawTable(links, note) {
-  ui.linksEmpty.textContent = note ?? "No links yet: the boards are still starting.";
+function drawTable(links) {
+  ui.linksEmpty.textContent = "No links yet: the boards are still starting.";
   ui.linksEmpty.hidden = links.length > 0;
   const rows = links.map((link) => {
     const row = html("tr");
     const name = html("td", `${link.from} → ${link.to}`);
     if (link.override) {
-      name.append(
-        html(
-          "span",
-          ` forced ${link.override.extra_loss_pct}% / ${link.override.extra_latency_ms} ms`,
-          "override",
-        ),
-      );
+      name.append(html("span", ` forced ${forcedText(link.override)}`, "override"));
     }
     const quality = linkQuality(link);
     const cell = html("td");
@@ -516,7 +524,7 @@ function drawTable(links, note) {
       name,
       html("td", `${fixed(link.rssi_dbm)} dBm`, "num"),
       html("td", `${fixed(link.snr_db)} dB`, "num"),
-      html("td", `${link.rate_mbps} Mb/s`, "num"),
+      html("td", rate(link.rate_bps), "num"),
       html("td", link.window_loss_pct === null ? "–" : `${fixed(link.window_loss_pct)}%`, "num"),
       cell,
     );
@@ -524,6 +532,21 @@ function drawTable(links, note) {
     return row;
   });
   ui.links.replaceChildren(...rows);
+}
+
+/** The chaos in force on a link, naming only what is set. */
+function forcedText(override) {
+  const parts = [`${override.extra_loss_pct}% loss`, `${override.extra_latency_ms} ms`];
+  if (override.extra_jitter_ms) parts.push(`up to ${override.extra_jitter_ms} ms jitter`);
+  if (override.interference_db) parts.push(`+${override.interference_db} dB noise`);
+  return parts.join(", ");
+}
+
+/** A bit rate as the PHY is usually quoted: LoRa in kbit/s, the others in Mbit/s. */
+function rate(bps) {
+  if (bps >= 1e6) return `${fixed(bps / 1e6, bps % 1e6 === 0 ? 0 : 1)} Mb/s`;
+  if (bps >= 1e3) return `${fixed(bps / 1e3, 1)} kb/s`;
+  return `${fixed(bps, 0)} b/s`;
 }
 
 function drawProblems(status) {
@@ -540,7 +563,7 @@ function drawTimeline(links, nowMs) {
   const rowHeight = 16;
   const axisHeight = 18;
   const labelWidth = 64;
-  // Rows for every link, plus any pair the packets name that has no budget (LoRa, nRF24, BLE).
+  // Rows for every link, plus any pair the packets name that has no budget yet.
   const rows = [
     ...new Set([
       ...links.map((link) => `${link.from}>${link.to}`),

@@ -17,6 +17,7 @@
 // radio sends a late ACK.
 import {
   ACK_AIRTIME_US,
+  type ChipSignal,
   type Environment,
   type LinkBudget,
   linkBudget,
@@ -25,10 +26,11 @@ import {
   SIFS_US,
   simulateFrame,
   SPEED_OF_LIGHT_M_S,
+  withInterference,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
 import { ESPNOW_ACK_TIMEOUT_MS, type EspNowFrame, parseEspNow } from "./espnow.ts";
-import type { DropReason, EspNowOutcome, EventLog, FrameKind } from "./events.ts";
+import type { ChannelChanges, DropReason, EspNowOutcome, EventLog, FrameKind } from "./events.ts";
 import type { VirtualGateway } from "./gateway.ts";
 import { classifyFrame, isGroupMac, parseEthernet } from "./packet.ts";
 import { substream } from "./rng.ts";
@@ -51,9 +53,14 @@ export interface FrameSink {
 /** Sees every frame put on the air, with the engine time it was sent. Feeds the pcap. */
 export type FrameTap = (tMs: number, node: string, frame: Uint8Array) => void;
 
+/** Chaos on one directed link. All zero clears it. */
 export interface LinkOverride {
   extraLossPct: number;
   extraLatencyMs: number;
+  /** Extra latency drawn uniformly from 0 to this, per frame. Default 0. */
+  extraJitterMs?: number;
+  /** Noise rise at the receiver from an interferer, in dB: the link's SNR falls by as much. Default 0. */
+  interferenceDb?: number;
 }
 
 /** What the runner and the timeline do to a medium, whichever PHY it carries. */
@@ -62,8 +69,14 @@ export interface MediumControl {
   setLinkOverride(from: string, to: string, override: LinkOverride): void;
   startPhase(label: string): void;
   node(id: string): Readonly<{ position: Position }>;
-  /** The link budget between two nodes; only media with a fixed PHY answer it. */
-  budget?(from: string, to: string): LinkBudget;
+  /**
+   * The budget of a directed link now. On the chip-level air it carries the
+   * signal it was read against: the sender's last frame, or its declared radio.
+   */
+  budget(from: string, to: string): LinkBudget & { signal?: ChipSignal };
+  setEnvironment(changes: ChannelChanges): void;
+  /** Change a station's radio as the medium models it; each medium names what it accepts. */
+  setRadio(id: string, changes: Partial<RadioConfig>): void;
   close(): void;
 }
 
@@ -99,12 +112,14 @@ export class Medium {
   readonly #ordinals = new Map<string, number>();
   readonly #shadowing = new Map<string, number>();
   readonly #cancels = new Set<() => void>();
+  #environment: Environment;
   /** Keyed `sender>receiver`. The fork has one ACK timer, so one frame waits per pair. */
   readonly #espnowPending = new Map<string, PendingEspNow>();
   readonly #channelWarned = new Set<string>();
 
   constructor(opts: MediumOptions) {
     this.#opts = opts;
+    this.#environment = opts.environment;
   }
 
   addNode(node: MediumNode, sink: FrameSink): void {
@@ -143,6 +158,22 @@ export class Medium {
     });
   }
 
+  /** Change channel-model parameters now; every later frame and budget uses them. */
+  setEnvironment(changes: ChannelChanges): void {
+    this.#environment = { ...this.#environment, ...changes };
+    this.#opts.log.append({ type: "channel", t: this.#opts.clock.now(), changes });
+  }
+
+  /**
+   * Change a station's radio as the medium models it: the channel it hears
+   * on, its transmit power and antenna gain. The firmware is not told.
+   */
+  setRadio(id: string, changes: Partial<RadioConfig>): void {
+    const node = this.#requireNode(id);
+    node.radio = { ...node.radio, ...changes };
+    this.#opts.log.append({ type: "radio", t: this.#opts.clock.now(), node: id, changes });
+  }
+
   /** Start a new metrics window. Metrics are reported per window as well as in total. */
   startPhase(label: string): void {
     this.#opts.log.append({ type: "phase", t: this.#opts.clock.now(), label });
@@ -152,7 +183,10 @@ export class Medium {
   budget(from: string, to: string): LinkBudget {
     const tx = this.#requireNode(from);
     const rx = this.#requireNode(to);
-    return linkBudget(this.#opts.environment, tx, rx, this.#shadowingDb(from, to));
+    return withInterference(
+      linkBudget(this.#environment, tx, rx, this.#shadowingDb(from, to)),
+      this.#overrides.get(`${from}>${to}`)?.interferenceDb ?? 0,
+    );
   }
 
   /**
@@ -266,7 +300,8 @@ export class Medium {
     addressed: boolean,
     channel: number,
   ): void {
-    const { clock, log, environment, seed } = this.#opts;
+    const { clock, log, seed } = this.#opts;
+    const environment = this.#environment;
     const linkKey = `${sender.id}>${receiver.id}`;
     const budget = this.budget(sender.id, receiver.id);
     const base = { from: sender.id, to: receiver.id, bytes: frame.length, kind };
@@ -311,6 +346,7 @@ export class Medium {
         retryLimit: this.#opts.retryLimit ?? 7,
         extraLossPct: override?.extraLossPct ?? 0,
         extraLatencyMs: override?.extraLatencyMs ?? 0,
+        extraJitterMs: override?.extraJitterMs ?? 0,
       },
       substream(seed, `frame:${linkKey}#${ordinal}`),
     );
@@ -413,11 +449,11 @@ export class Medium {
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     let value = this.#shadowing.get(key);
     if (value === undefined) {
-      value = this.#opts.environment.shadowingSigmaDb *
-        substream(this.#opts.seed, `shadow:${key}`).gaussian();
+      value = substream(this.#opts.seed, `shadow:${key}`).gaussian();
       this.#shadowing.set(key, value);
     }
-    return value;
+    // The draw is kept unscaled, so a sigma changed mid-run applies to every pair at once.
+    return this.#environment.shadowingSigmaDb * value;
   }
 
   #requireNode(id: string): NodeState {

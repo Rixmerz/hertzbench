@@ -9,10 +9,18 @@
 // at least the PHY's capture threshold stronger. Half-duplex is the models'
 // job: a radio that is transmitting is not in a receive state.
 
-import { type Environment, linkBudgetAt, type Position } from "./channel.ts";
-import { chipPacketErrorRate } from "./channel.ts";
+import {
+  chipPacketErrorRate,
+  type ChipSignal,
+  type Environment,
+  type LinkBudget,
+  linkBudgetAt,
+  type Position,
+  type RadioConfig,
+  withInterference,
+} from "./channel.ts";
 import type { Clock } from "./clock.ts";
-import type { DropReason, EventLog, FrameKind } from "./events.ts";
+import type { ChannelChanges, DropReason, EventLog, FrameKind } from "./events.ts";
 import type { LinkOverride, MediumControl } from "./medium.ts";
 import { substream } from "./rng.ts";
 import { SPEED_OF_LIGHT_M_S } from "./channel.ts";
@@ -69,6 +77,11 @@ export interface AirNode {
   id: string;
   position: Position;
   antennaGainDbi: number;
+  /**
+   * The signal the node's radio is declared with, for a budget read before it
+   * has transmitted. Its first frame replaces it: firmware is the truth.
+   */
+  signal?: ChipSignal;
 }
 
 export type AirTap = (tMs: number, node: string, frame: AirFrame) => void;
@@ -97,6 +110,18 @@ interface NodeState extends AirNode {
   arriving: Signal[];
 }
 
+function signalOf(frame: AirFrame): ChipSignal {
+  return {
+    frequencyHz: frame.frequencyHz,
+    bandwidthHz: frame.bandwidthHz,
+    noiseFigureDb: frame.noiseFigureDb,
+    txPowerDbm: frame.txPowerDbm,
+    requiredSnrDb: frame.requiredSnrDb,
+    referenceBytes: frame.referenceBytes,
+    rateBps: frame.rateBps,
+  };
+}
+
 export class AirMedium implements MediumControl {
   readonly #opts: AirMediumOptions;
   readonly #nodes = new Map<string, NodeState>();
@@ -104,9 +129,11 @@ export class AirMedium implements MediumControl {
   readonly #ordinals = new Map<string, number>();
   readonly #shadowing = new Map<string, number>();
   readonly #cancels = new Set<() => void>();
+  #environment: Environment;
 
   constructor(opts: AirMediumOptions) {
     this.#opts = opts;
+    this.#environment = opts.environment;
   }
 
   addNode(node: AirNode, receiver: AirReceiver): void {
@@ -140,6 +167,26 @@ export class AirMedium implements MediumControl {
     });
   }
 
+  /** Change channel-model parameters now; every later frame and budget uses them. */
+  setEnvironment(changes: ChannelChanges): void {
+    this.#environment = { ...this.#environment, ...changes };
+    this.#opts.log.append({ type: "channel", t: this.#opts.clock.now(), changes });
+  }
+
+  /**
+   * Only the antenna gain belongs to the air: a chip's channel and transmit
+   * power are in its registers, where the firmware put them.
+   */
+  setRadio(id: string, changes: Partial<RadioConfig>): void {
+    const node = this.#requireNode(id);
+    const refused = Object.keys(changes).filter((key) => key !== "antennaGainDbi");
+    if (refused.length > 0) {
+      throw new Error(`the chip-level air sets only antennaGainDbi, not ${refused.join(", ")}`);
+    }
+    if (changes.antennaGainDbi !== undefined) node.antennaGainDbi = changes.antennaGainDbi;
+    this.#opts.log.append({ type: "radio", t: this.#opts.clock.now(), node: id, changes });
+  }
+
   startPhase(label: string): void {
     this.#opts.log.append({ type: "phase", t: this.#opts.clock.now(), label });
   }
@@ -149,10 +196,43 @@ export class AirMedium implements MediumControl {
     this.#cancels.clear();
   }
 
+  /**
+   * The budget of a directed link now, read against the sender's last frame
+   * or, before its first, its declared signal: the same numbers its next frame
+   * of that kind would get.
+   */
+  budget(from: string, to: string): LinkBudget & { signal: ChipSignal } {
+    const sender = this.#requireNode(from);
+    const signal = sender.signal;
+    if (!signal) {
+      throw new Error(`${from} has not transmitted and declares no signal: no budget yet`);
+    }
+    return { ...this.#budget(sender, this.#requireNode(to), signal), signal };
+  }
+
+  #budget(sender: NodeState, receiver: NodeState, signal: ChipSignal): LinkBudget {
+    const interferenceDb = this.#overrides.get(`${sender.id}>${receiver.id}`)?.interferenceDb ?? 0;
+    return withInterference(
+      linkBudgetAt(
+        this.#environment,
+        {
+          position: sender.position,
+          txPowerDbm: signal.txPowerDbm,
+          antennaGainDbi: sender.antennaGainDbi,
+        },
+        receiver,
+        signal,
+        this.#shadowingDb(sender.id, receiver.id),
+      ),
+      interferenceDb,
+    );
+  }
+
   /** A radio model started sending `frame`. Its own TxDone is the model's business. */
   transmit(from: string, frame: AirFrame): void {
     const sender = this.#requireNode(from);
-    const { clock, log, environment } = this.#opts;
+    const { clock, log } = this.#opts;
+    const environment = this.#environment;
     const now = clock.now();
     log.append({
       type: "tx",
@@ -166,20 +246,11 @@ export class AirMedium implements MediumControl {
       radio: frame.params,
     });
     this.#opts.tap?.(now, from, frame);
+    sender.signal = signalOf(frame);
 
     for (const receiver of this.#nodes.values()) {
       if (receiver.id === from) continue;
-      const budget = linkBudgetAt(
-        environment,
-        {
-          position: sender.position,
-          txPowerDbm: frame.txPowerDbm,
-          antennaGainDbi: sender.antennaGainDbi,
-        },
-        receiver,
-        frame,
-        this.#shadowingDb(from, receiver.id),
-      );
+      const budget = this.#budget(sender, receiver, sender.signal);
       receiver.arriving = receiver.arriving.filter((s) => s.endMs > now);
       const hearing = receiver.receiver.hear(frame, from);
       const signal: Signal = {
@@ -231,8 +302,10 @@ export class AirMedium implements MediumControl {
       const lostToNoise = rng.next() < per;
       const extraLoss = (override?.extraLossPct ?? 0) > 0 &&
         rng.next() * 100 < (override?.extraLossPct ?? 0);
+      // Drawn last, and only when set, so a run without it keeps every earlier draw.
+      const extraJitter = override?.extraJitterMs ? rng.next() * override.extraJitterMs : 0;
       const delayMs = frame.airtimeMs + (budget.distanceM / SPEED_OF_LIGHT_M_S) * 1000 +
-        environment.baseLatencyMs + (override?.extraLatencyMs ?? 0);
+        environment.baseLatencyMs + (override?.extraLatencyMs ?? 0) + extraJitter;
       const payload = frame.payload.slice();
 
       this.#after(delayMs, () => {
@@ -270,11 +343,11 @@ export class AirMedium implements MediumControl {
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     let value = this.#shadowing.get(key);
     if (value === undefined) {
-      value = this.#opts.environment.shadowingSigmaDb *
-        substream(this.#opts.seed, `shadow:${key}`).gaussian();
+      value = substream(this.#opts.seed, `shadow:${key}`).gaussian();
       this.#shadowing.set(key, value);
     }
-    return value;
+    // The draw is kept unscaled, so a sigma changed mid-run applies to every pair at once.
+    return this.#environment.shadowingSigmaDb * value;
   }
 
   #requireNode(id: string): NodeState {
