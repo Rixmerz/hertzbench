@@ -20,6 +20,7 @@ import {
   ScenarioError,
 } from "../orchestrator/scenario.ts";
 import { type ResourceDefinition, type ToolDefinition, ToolError } from "./protocol.ts";
+import { editScenarioText, type ScenarioEdit } from "./scenario-edit.ts";
 import type { Session } from "./session.ts";
 
 type Args = Record<string, unknown>;
@@ -161,7 +162,37 @@ const PHASE_SCHEMA = {
     "Start a metrics phase with this label at the same instant, so get_metrics can compare before and after",
 };
 
+function optionalObject(args: Args, key: string): Record<string, unknown> | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ToolError(`${key} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+const EDIT_NOTE = "the file was rewritten from its data: comments and the original layout are gone";
+
 export function tools(session: Session): ToolDefinition[] {
+  /** Apply `edit` to the scenario file at `path`, inside the workspace, after checking the result. */
+  const editFile = async (path: string, edit: ScenarioEdit) => {
+    if (!/\.ya?ml$/.test(path)) throw new ToolError("path must end in .yaml or .yml");
+    const file = await session.writablePath(path, "path", "file");
+    let text: string;
+    try {
+      text = await Deno.readTextFile(file);
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) {
+        throw new ToolError(`${file} does not exist; create_scenario writes a new one`);
+      }
+      throw error;
+    }
+    const edited = editScenarioText(text, file, edit);
+    await session.replaceFile(file, edited.text);
+    const missing = await checkFirmwareFiles(withFirmwareFrom(edited.scenario, dirname(file)));
+    return { file, scenario: summary(edited.scenario), missing_firmware: missing, note: EDIT_NOTE };
+  };
+
   return [
     {
       name: "list_boards",
@@ -276,6 +307,113 @@ export function tools(session: Session): ToolDefinition[] {
           }
           const missing = await checkFirmwareFiles(withFirmwareFrom(parsed, dirname(file)));
           return { file, scenario: summary(parsed), missing_firmware: missing };
+        }),
+    },
+    {
+      name: "read_scenario",
+      description:
+        "The text of a scenario file and what it parses to: its nodes with their addresses, positions, radios and firmware, or the first error with its field path. Use it before edit_scenario.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file, relative to the workspace" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      call: async (args) => {
+        known(args, ["path"]);
+        const file = session.resolvePath(requiredText(args, "path"));
+        let yaml: string;
+        try {
+          yaml = await Deno.readTextFile(file);
+        } catch (error) {
+          if (error instanceof Deno.errors.NotFound) throw new ToolError(`${file} does not exist`);
+          throw error;
+        }
+        try {
+          return { file, yaml, valid: true, scenario: summary(parseScenario(yaml)) };
+        } catch (error) {
+          if (!(error instanceof ScenarioError)) throw error;
+          return { file, yaml, valid: false, error: error.message };
+        }
+      },
+    },
+    {
+      name: "edit_scenario",
+      description:
+        "Change a scenario file inside the workspace in one step, checked before it is written: an invalid result is refused and the file stays as it was. `set` is a JSON merge patch on the top level (name, seed, duration, environment and its channel parameters, network, links with their loss, latency, jitter and interference, timeline, assertions, outputs, bridge): objects merge, null removes a key, arrays are replaced whole. `nodes` patches node entries by id the same way (position, board, firmware, radios, ...); null removes the node. `add` appends new node entries. A node made by `count:` is edited through its group's id. The file is rewritten from its data, so comments are lost. Takes effect on the next run_scenario; for the run in progress use move_node, inject_fault, set_channel and set_radio.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file inside the workspace" },
+          set: { type: "object", description: "Merge patch on the top level, nodes excepted" },
+          nodes: {
+            type: "object",
+            description: "Node id -> merge patch on that node entry, or null to remove it",
+          },
+          add: { type: "array", items: { type: "object" }, description: "Node entries to append" },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["path", "set", "nodes", "add"]);
+          const path = requiredText(args, "path");
+          const add = args.add;
+          if (add !== undefined && !Array.isArray(add)) throw new ToolError("add must be an array");
+          const edit: ScenarioEdit = {
+            set: optionalObject(args, "set"),
+            nodes: optionalObject(args, "nodes"),
+            add: add as Record<string, unknown>[] | undefined,
+          };
+          if (edit.set === undefined && edit.nodes === undefined && edit.add === undefined) {
+            throw new ToolError("nothing to change: give set, nodes or add");
+          }
+          return editFile(path, edit);
+        }),
+    },
+    {
+      name: "add_node",
+      description:
+        "Add a node entry to a scenario file inside the workspace, checked before it is written: { id, board, position, radios, firmware, count?, ip?, internet_gateway? } as in the scenario format. Takes effect on the next run: a run in progress cannot gain a board.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file inside the workspace" },
+          node: { type: "object", description: "The node entry" },
+        },
+        required: ["path", "node"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["path", "node"]);
+          const node = optionalObject(args, "node");
+          if (!node) throw new ToolError("node must be an object");
+          return editFile(requiredText(args, "path"), { add: [node] });
+        }),
+    },
+    {
+      name: "remove_node",
+      description:
+        "Remove a node entry from a scenario file inside the workspace, by its id. Refused, with the field that still names it, while a link rule, timeline entry, assertion or scripted send refers to the node; remove those in the same edit_scenario call. Takes effect on the next run.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Scenario file inside the workspace" },
+          id: { type: "string" },
+        },
+        required: ["path", "id"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["path", "id"]);
+          return editFile(requiredText(args, "path"), {
+            nodes: { [requiredText(args, "id")]: null },
+          });
         }),
     },
     {

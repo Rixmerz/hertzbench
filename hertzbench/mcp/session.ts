@@ -97,6 +97,24 @@ export class Session {
     return target;
   }
 
+  /**
+   * Replace a file inside the workspace in one step: the text goes to a
+   * temporary file next to it, which then takes its name, so a reader never
+   * sees half of it.
+   */
+  async replaceFile(target: string, text: string): Promise<void> {
+    const temp = `${target}.${crypto.randomUUID()}.tmp`;
+    await Deno.writeTextFile(temp, text, { createNew: true });
+    try {
+      await Deno.rename(temp, target);
+    } catch (error) {
+      await Deno.remove(temp).catch(
+        () => {/* already gone; the rename's error is the one to report */},
+      );
+      throw error;
+    }
+  }
+
   /** Load, check and start a run in the background. Fails at once on anything known before boot. */
   async start(path: string, options: { seed?: number; out?: string }): Promise<Run> {
     if (this.#preparing) {

@@ -216,3 +216,92 @@ Deno.test("mcp drive: send_serial types into an ESP32's UART0 through the worker
     await Deno.remove(fake, { recursive: true });
   }
 });
+
+const PAIR = `# two scripted boards
+name: pair
+seed: 5
+duration: 2s
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    firmware: { send: [{ to: b, every: 100ms, count: 5 }] }
+  - { id: b, board: scripted, position: [5, 0], firmware: {} }
+  - { id: s, count: 2, board: scripted, position: { grid: { origin: [0, 10], step: [5, 0] } }, firmware: {} }
+`;
+
+Deno.test("mcp drive: read, edit, add and remove nodes in a scenario file, checked before writing", async () => {
+  await withServer(async (client, workspace) => {
+    await client.ok("create_scenario", { path: "pair.yaml", yaml: PAIR });
+    const read = await client.ok("read_scenario", { path: "pair.yaml" });
+    assertEquals([read.valid, read.yaml], [true, PAIR]);
+    assertEquals(read.scenario.nodes.map((n: Json) => n.id), ["a", "b", "s-1", "s-2"]);
+
+    const edited = await client.ok("edit_scenario", {
+      path: "pair.yaml",
+      set: {
+        seed: 9,
+        environment: { preset: "urban", shadowing_sigma_db: 0 },
+        links: [{ from: "a", to: "b", extra_jitter_ms: 3, interference_db: 6 }],
+      },
+      nodes: { b: { position: [40, 0], radios: [{ phy: "wifi", channel: 6, tx_power_dbm: 8 }] } },
+    });
+    assertStringIncludes(edited.note, "comments");
+    assertEquals(edited.scenario.seed, 9);
+    assertEquals(edited.scenario.links, 1);
+    const b = edited.scenario.nodes.find((n: Json) => n.id === "b");
+    assertEquals([b.position, b.channel], [{ x: 40, y: 0 }, 6]);
+    const text = await Deno.readTextFile(`${workspace}/pair.yaml`);
+    assertStringIncludes(text, "interference_db: 6");
+    assert(!text.includes("# two scripted boards"), "comments do not survive a rewrite");
+
+    const added = await client.ok("add_node", {
+      path: "pair.yaml",
+      node: { id: "c", board: "scripted", position: [0, 20], firmware: {} },
+    });
+    assertEquals(added.scenario.nodes.length, 5);
+    const removed = await client.ok("remove_node", { path: "pair.yaml", id: "c" });
+    assertEquals(removed.scenario.nodes.length, 4);
+
+    // Refusals leave the file exactly as it was.
+    const before = await Deno.readTextFile(`${workspace}/pair.yaml`);
+    assertStringIncludes(
+      await client.refused("remove_node", { path: "pair.yaml", id: "b" }),
+      "nothing was written",
+    );
+    assertStringIncludes(
+      await client.refused("edit_scenario", {
+        path: "pair.yaml",
+        nodes: { "s-2": { position: [1, 1] } },
+      }),
+      "group s",
+    );
+    assertStringIncludes(
+      await client.refused("edit_scenario", { path: "pair.yaml", set: { duration: "forever" } }),
+      "duration",
+    );
+    assertStringIncludes(
+      await client.refused("edit_scenario", {
+        path: "pair.yaml",
+        set: JSON.parse('{"__proto__": {"polluted": true}}'),
+      }),
+      "not allowed",
+    );
+    assertStringIncludes(
+      await client.refused("add_node", { path: "pair.yaml", node: { id: "a", board: "scripted" } }),
+      "already exists",
+    );
+    assertEquals(await Deno.readTextFile(`${workspace}/pair.yaml`), before);
+    assertStringIncludes(
+      await client.refused("edit_scenario", { path: LIVE, set: { seed: 1 } }),
+      "inside the workspace",
+    );
+
+    // A node edited in the file is the node the next run plays.
+    await client.ok("run_scenario", { path: "pair.yaml" });
+    const status = await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    assertEquals(status.nodes.find((n: Json) => n.id === "b").position, { x: 40, y: 0 });
+    assertEquals(status.seed, 9);
+    await client.ok("stop");
+  });
+});

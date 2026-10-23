@@ -12,7 +12,9 @@ import {
 } from "./mcp_client.ts";
 
 const TOOLS = [
+  "add_node",
   "create_scenario",
+  "edit_scenario",
   "export_capture",
   "get_events",
   "get_metrics",
@@ -21,6 +23,8 @@ const TOOLS = [
   "inject_fault",
   "list_boards",
   "move_node",
+  "read_scenario",
+  "remove_node",
   "run_scenario",
   "send_serial",
   "stop",
