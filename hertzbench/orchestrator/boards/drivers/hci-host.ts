@@ -84,9 +84,17 @@ export class HciHost {
       const result = new Promise<CommandResult>((resolve, reject) => {
         this.#pending = { op, resolve, reject };
       });
-      await this.#write(
-        encodeHci({ type: "command", opcode: op, params: Uint8Array.from(params) }),
-      );
+      const mine = this.#pending;
+      try {
+        await this.#write(
+          encodeHci({ type: "command", opcode: op, params: Uint8Array.from(params) }),
+        );
+      } catch (error) {
+        // Nobody will await `result`: free the slot so a later fail() does not reject it unheard.
+        if (this.#pending === mine) this.#pending = null;
+        result.catch(() => {});
+        throw error;
+      }
       return await result;
     };
     const next = this.#commands.then(run, run);

@@ -392,18 +392,24 @@ export class AttClient {
       );
       if (!rsp) break;
       const size = rsp[1] ?? 0;
-      let last = start;
+      // A zero element length would never advance the walk below.
+      if (size === 0) break;
+      // Entries below the asked start were already read, or never existed; an answer of only
+      // those would never move the walk forward, so it ends the walk.
+      let last = -1;
       for (let i = 2; i + size <= rsp.length; i += size) {
+        const startHandle = readU16(rsp, i);
         const endHandle = readU16(rsp, i + 2);
+        if (startHandle < start) continue;
         services.push({
           uuid: uuidToString(rsp.slice(i + 4, i + size)),
-          startHandle: readU16(rsp, i),
+          startHandle,
           endHandle,
           characteristics: [],
         });
         last = endHandle;
       }
-      if (size === 0 || last >= 0xffff) break;
+      if (last < start || last >= 0xffff) break;
       start = last + 1;
     }
     for (const service of services) {
@@ -419,9 +425,11 @@ export class AttClient {
         );
         if (!rsp) break;
         const size = rsp[1] ?? 0;
-        let last = start;
+        if (size === 0) break;
+        let last = -1;
         for (let i = 2; i + size <= rsp.length; i += size) {
           const declarationHandle = readU16(rsp, i);
+          if (declarationHandle < start) continue;
           service.characteristics.push({
             uuid: uuidToString(rsp.slice(i + 5, i + size)),
             declarationHandle,
@@ -431,7 +439,7 @@ export class AttClient {
           });
           last = declarationHandle;
         }
-        if (size === 0) break;
+        if (last < start) break;
         start = last + 1;
       }
       const chars = service.characteristics;
@@ -444,11 +452,14 @@ export class AttClient {
           );
           if (!rsp) break;
           const size = rsp[1] === 1 ? 4 : 18;
-          let last = start;
+          let last = -1;
           for (let j = 2; j + size <= rsp.length; j += size) {
-            last = readU16(rsp, j);
-            if (size === 4 && readU16(rsp, j + 2) === GATT_UUID.cccd) char.cccdHandle = last;
+            const handle = readU16(rsp, j);
+            if (handle < start) continue;
+            last = handle;
+            if (size === 4 && readU16(rsp, j + 2) === GATT_UUID.cccd) char.cccdHandle = handle;
           }
+          if (last < start) break;
           start = last + 1;
         }
       }
