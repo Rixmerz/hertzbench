@@ -506,7 +506,8 @@ const FRAME_KINDS: readonly FrameKind[] = [
   "tcp",
   "icmp",
   "ipv4",
-  "espnow-pseudo-ethernet",
+  "espnow",
+  "espnow-ack",
   "other",
 ];
 

@@ -1,5 +1,6 @@
 export * from "./channel.ts";
 export * from "./clock.ts";
+export * from "./espnow.ts";
 export * from "./events.ts";
 export * from "./gateway.ts";
 export * from "./medium.ts";

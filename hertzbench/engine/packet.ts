@@ -1,6 +1,7 @@
 // Just enough Ethernet / ARP / IPv4 / UDP to classify frames and to let the
 // virtual gateway answer ARP and DHCP. Everything else is carried as opaque bytes.
 
+import { parseEspNow } from "./espnow.ts";
 import type { FrameKind } from "./events.ts";
 
 export const ETHERTYPE_IPV4 = 0x0800;
@@ -104,14 +105,9 @@ export function parseUdp(frame: Uint8Array, ip: Ipv4Packet): UdpDatagram | null 
   };
 }
 
-// Pseudo-Ethernet that the lcgamboa fork uses for ESP-NOW action frames and
-// their ACKs: ethertype bytes are [0xE0 | channel, type/subtype] (ADR 0001).
-function isEspNowPseudoEthernet(frame: Uint8Array): boolean {
-  return ((frame[12] ?? 0) & 0xf0) === 0xe0;
-}
-
 export function classifyFrame(frame: Uint8Array): FrameKind {
-  if (isEspNowPseudoEthernet(frame)) return "espnow-pseudo-ethernet";
+  const espnow = parseEspNow(frame);
+  if (espnow) return espnow.type === "action" ? "espnow" : "espnow-ack";
   const eth = parseEthernet(frame);
   if (!eth) return "other";
   if (eth.etherType === ETHERTYPE_ARP) return "arp";

@@ -8,7 +8,16 @@ export type DropReason =
   | "retry_exhausted" // every MAC attempt failed on the channel
   | "extra_loss" // the scenario's per-link loss override
   | "channel_mismatch" // sender and receiver radios are on different channels
-  | "no_peer"; // the receiving board had not connected to its adapter port
+  | "no_peer" // the receiving board had not connected to its adapter port
+  | "ack_timeout" // an ESP-NOW ACK that would reach its sender after the fork's 10 ms wait
+  | "ack_unmatched"; // an ESP-NOW ACK for no frame its receiver holds that still waits for one
+
+/**
+ * How a unicast ESP-NOW frame ended, as the sending fork sees it: its ACK came
+ * back in time, the frame never reached the receiver, the ACK came too late,
+ * or the receiver never answered (its fork filtered the frame).
+ */
+export type EspNowOutcome = "acked" | "frame_lost" | "ack_timeout" | "no_ack";
 
 export type FrameKind =
   | "arp"
@@ -17,7 +26,8 @@ export type FrameKind =
   | "tcp"
   | "icmp"
   | "ipv4"
-  | "espnow-pseudo-ethernet"
+  | "espnow" // an ESP-NOW action frame, in the QEMU fork's pseudo-Ethernet
+  | "espnow-ack" // the fork's ACK for a unicast one
   | "other";
 
 interface Stamped {
@@ -68,6 +78,15 @@ export type EngineEvent =
     extraLossPct: number;
     extraLatencyMs: number;
   })
+  | (Stamped & {
+    type: "espnow-send";
+    from: string;
+    to: string;
+    outcome: EspNowOutcome;
+    /** From the frame going on the air to its ACK reaching the sender; null when no ACK came. */
+    roundTripMs: number | null;
+  })
+  | (Stamped & { type: "warning"; text: string })
   | (Stamped & { type: "phase"; label: string })
   | (Stamped & { type: "serial"; node: string; text: string });
 
