@@ -3,7 +3,7 @@
 // plays. The last run stays readable after it ends, until the next one starts.
 
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { computeMetrics, type EngineEvent, type Position } from "../engine/mod.ts";
+import { computeMetrics, type EngineEvent, type LinkBudget, type Position } from "../engine/mod.ts";
 import { BoardError, type BoardLauncher } from "../orchestrator/boards/board.ts";
 import { resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { checkFirmwareFiles, type LoadedScenario, loadScenario } from "../orchestrator/load.ts";
@@ -205,6 +205,16 @@ export class Session {
     if (run.result) return run.result.scenario.durationMs;
     if (run.finalElapsedMs !== null) return run.finalElapsedMs;
     return run.live ? Math.min(run.live.elapsedMs(), run.loaded.scenario.durationMs) : null;
+  }
+
+  /** The budget of every directed link between nodes on the medium now; empty before time zero. */
+  linkBudgets(run: Run): { from: string; to: string; budget: LinkBudget }[] {
+    const live = run.live;
+    if (!live) return [];
+    const ids = run.loaded.scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
+    return ids.flatMap((from) =>
+      ids.filter((to) => to !== from).map((to) => ({ from, to, budget: live.budget(from, to) }))
+    );
   }
 
   status() {
