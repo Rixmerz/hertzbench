@@ -1,13 +1,16 @@
-// The network of a LoRa or nRF24 scenario: one radio chip model per node on
-// the chip-level air, each reachable by its board over spi-link. The Wi-Fi
-// network (Phase 1) is built in runner.ts; both hand the runner the same shape.
+// The network of a LoRa, nRF24 or BLE scenario: one radio model per node on the
+// chip-level air. A LoRa or nRF24 chip is reached by its board over spi-link;
+// a BLE virtual controller over HCI on ble-hci. The Wi-Fi network (Phase 1) is
+// built in runner.ts; all hand the runner the same shape.
 
 import {
   type AirFrame,
   AirMedium,
+  bleLlRecord,
   type Clock,
   type EngineEvent,
   type EventLog,
+  LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR,
   LINKTYPE_LORATAP,
   LINKTYPE_USER0,
   type MediumControl,
@@ -17,6 +20,12 @@ import {
 import { isLoraFrame, Sx127x } from "../adapters/lora-sx127x/mod.ts";
 import { isNrf24Frame, Nrf24l01 } from "../adapters/nrf24/mod.ts";
 import { SpiLinkAdapter } from "../adapters/spi-link/mod.ts";
+import {
+  BleController,
+  BleHciAdapter,
+  type BtsnoopWriter,
+  isBleFrame,
+} from "../adapters/ble-hci/mod.ts";
 import type { Scenario } from "./scenario.ts";
 
 export interface NetworkSetup {
@@ -30,6 +39,8 @@ export interface NetworkSetup {
   dot11Pcap?: PcapWriter;
   /** Features the firmware used that the chip model does not model, once each. */
   warnings: string[];
+  /** BLE only: each node's HCI traffic, written as hci-<node>.btsnoop. */
+  hciCaptures?: Map<string, BtsnoopWriter>;
 }
 
 export interface AirNetworkContext {
@@ -72,7 +83,67 @@ export function nrf24Record(frame: AirFrame): Uint8Array {
   return out;
 }
 
+/** The LE link-layer record of a BLE frame, as the transmitter put it on the air. */
+export function bleRecord(frame: AirFrame): Uint8Array {
+  if (!isBleFrame(frame)) return frame.payload.slice();
+  const h = frame.header;
+  return bleLlRecord(h.channel, h.accessAddress, frame.payload, h.crcInit, frame.txPowerDbm);
+}
+
+function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSetup {
+  const { clock, log } = ctx;
+  const pcap = new PcapWriter(ctx.epochMs, LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR);
+  const warnings: string[] = [];
+  const air = new AirMedium({
+    seed: scenario.seed,
+    environment: scenario.environment,
+    clock,
+    log,
+    tap: (tMs, _node, frame) => pcap.addFrame(tMs, bleRecord(frame)),
+  });
+  const adapter = new BleHciAdapter(() => clock.now(), ctx.epochMs, ctx.onProblem);
+  const ports = new Map<string, number>();
+  const hciCaptures = new Map<string, BtsnoopWriter>();
+  const controllers: BleController[] = [];
+  for (const node of scenario.nodes) {
+    const radio = node.radio;
+    if (radio.phy !== "ble") throw new Error(`${node.id}: not a BLE node`);
+    const attachment = adapter.listen(node.id, (toHost) =>
+      new BleController({
+        nodeId: node.id,
+        address: node.mac,
+        txPowerDbm: radio.txPowerDbm,
+        clock,
+        log,
+        rng: substream(scenario.seed, `ble:${node.id}`),
+        transmit: (frame) => air.transmit(node.id, frame),
+        toHost,
+        warn: (message) => warnings.push(`${node.id}: ${message}`),
+      }));
+    controllers.push(attachment.controller);
+    ports.set(node.id, attachment.port);
+    hciCaptures.set(node.id, attachment.snoop);
+    air.addNode(
+      { id: node.id, position: node.position, antennaGainDbi: radio.antennaGainDbi },
+      attachment.controller,
+    );
+  }
+  return {
+    medium: air,
+    ports,
+    waitConnected: (id, timeoutMs) => adapter.waitConnected(id, timeoutMs),
+    close: async () => {
+      for (const controller of controllers) controller.close();
+      await adapter.close();
+    },
+    pcap,
+    warnings,
+    hciCaptures,
+  };
+}
+
 export function createAirNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSetup {
+  if (scenario.phy === "ble") return createBleNetwork(scenario, ctx);
   const { clock, log } = ctx;
   const lora = scenario.phy === "lora";
   const pcap = new PcapWriter(ctx.epochMs, lora ? LINKTYPE_LORATAP : LINKTYPE_USER0);
@@ -134,7 +205,8 @@ export function declaredMismatches(scenario: Scenario, events: readonly EngineEv
   const out: string[] = [];
   for (const node of scenario.nodes) {
     const radio = node.radio;
-    if (radio.phy === "wifi") continue;
+    // Wi-Fi has no chip registers to read back, and a BLE controller is configured over HCI.
+    if (radio.phy === "wifi" || radio.phy === "ble") continue;
     const declared: Record<string, string | number> = radio.phy === "lora"
       ? {
         frequency_mhz: Number((radio.frequencyHz / 1e6).toFixed(4)),

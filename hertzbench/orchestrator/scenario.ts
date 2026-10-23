@@ -28,13 +28,23 @@ export interface ScriptedSend {
    * the channel; null on LoRa, whose PHY has no addresses (every listener hears it).
    */
   to: string | null;
-  /** Wi-Fi only: a UDP datagram, or an ESP-NOW frame through the fork's MAC model. */
-  via: "udp" | "espnow";
+  /** Wi-Fi: a UDP datagram, or an ESP-NOW frame through the fork's MAC model. BLE: an ATT PDU on the connection. */
+  via: "udp" | "espnow" | "gatt";
   everyMs: number;
   count: number;
   startMs: number;
   port: number;
   payload: string;
+}
+
+/** What a scripted BLE board does besides its sends. */
+export interface BleScript {
+  /** Peripheral: advertise, connectable, until a central connects, and again after it leaves. */
+  advertise: { name: string; intervalMs: number } | null;
+  /** Central: connect to these nodes, and again whenever a connection drops. */
+  connect: { peers: string[]; intervalMs: number; timeoutMs: number } | null;
+  /** Log every advertisement heard (passive scan). */
+  scan: boolean;
 }
 
 export type FirmwareSpec =
@@ -45,6 +55,8 @@ export type FirmwareSpec =
     send: ScriptedSend[];
     /** Chip radios: keep the receiver on between sends. Defaults to true for a node that sends nothing. */
     listen: boolean;
+    /** BLE only. */
+    ble: BleScript | null;
   };
 
 export interface ScenarioNode {
@@ -331,9 +343,88 @@ const READERS = { fail, record, num, int, known };
 /** The `to` of a scripted ESP-NOW send that goes to every station on the channel. */
 export const BROADCAST_TARGET = "broadcast";
 
-function parseScript(value: unknown, path: string, phy: Phy): FirmwareSpec {
+const BLE_SCRIPT_FIELDS = ["advertise", "connect", "scan"] as const;
+
+/** A duration in [min, max] that is a whole number of `stepMs` (the link layer's units). */
+function linkLayerDuration(
+  value: unknown,
+  fallback: number,
+  path: string,
+  minMs: number,
+  maxMs: number,
+  stepMs: number,
+): number {
+  const ms = value === undefined ? fallback : parseDuration(value, path);
+  if (ms < minMs || ms > maxMs) fail(path, `must be between ${minMs} ms and ${maxMs} ms`);
+  if (Math.abs(ms / stepMs - Math.round(ms / stepMs)) > 1e-9) {
+    fail(path, `must be a multiple of ${stepMs} ms`);
+  }
+  return ms;
+}
+
+function parseBleScript(obj: Obj, path: string, nodeName: string): BleScript {
+  let advertise: BleScript["advertise"] = null;
+  if (obj.advertise !== undefined && obj.advertise !== false) {
+    const a = obj.advertise === true ? {} : record(obj.advertise, `${path}.advertise`);
+    known(a, ["name", "interval"], `${path}.advertise`);
+    const name = a.name === undefined ? nodeName : text(a.name, `${path}.advertise.name`);
+    if (new TextEncoder().encode(name).length > 26) {
+      fail(`${path}.advertise.name`, "must fit in 26 bytes of advertising data");
+    }
+    advertise = {
+      name,
+      intervalMs: linkLayerDuration(
+        a.interval,
+        100,
+        `${path}.advertise.interval`,
+        20,
+        10240,
+        0.625,
+      ),
+    };
+  }
+  let connect: BleScript["connect"] = null;
+  if (obj.connect !== undefined) {
+    const c = record(obj.connect, `${path}.connect`);
+    known(c, ["peers", "interval", "timeout"], `${path}.connect`);
+    const peers = list(c.peers, `${path}.connect.peers`).map((p, i) =>
+      text(p, `${path}.connect.peers[${i}]`)
+    );
+    if (peers.length === 0) fail(`${path}.connect.peers`, "names no node to connect to");
+    const intervalMs = linkLayerDuration(
+      c.interval,
+      30,
+      `${path}.connect.interval`,
+      7.5,
+      4000,
+      1.25,
+    );
+    const timeoutMs = linkLayerDuration(c.timeout, 1000, `${path}.connect.timeout`, 100, 32000, 10);
+    if (timeoutMs <= 2 * intervalMs) {
+      fail(`${path}.connect.timeout`, "must be more than twice the connection interval");
+    }
+    connect = { peers, intervalMs, timeoutMs };
+  }
+  if (obj.scan !== undefined && typeof obj.scan !== "boolean") {
+    fail(`${path}.scan`, "expected true or false");
+  }
+  if (advertise && connect) {
+    fail(path, "a scripted BLE board is a peripheral (advertise) or a central (connect), not both");
+  }
+  return { advertise, connect, scan: obj.scan === true };
+}
+
+function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): FirmwareSpec {
   const obj = record(value, path);
-  known(obj, ["send", "listen"], path);
+  known(obj, ["send", "listen", ...BLE_SCRIPT_FIELDS], path);
+  for (const field of BLE_SCRIPT_FIELDS) {
+    if (phy !== "ble" && obj[field] !== undefined) {
+      fail(`${path}.${field}`, "is a BLE notion; this node's radio is not ble");
+    }
+  }
+  if (phy === "ble" && obj.listen !== undefined) {
+    fail(`${path}.listen`, "is not a BLE notion: a peripheral advertises, a central connects");
+  }
   const send = list(obj.send ?? [], `${path}.send`).map((raw, i): ScriptedSend => {
     const p = `${path}.send[${i}]`;
     const entry = record(raw, p);
@@ -341,20 +432,30 @@ function parseScript(value: unknown, path: string, phy: Phy): FirmwareSpec {
     if (phy === "lora" && entry.to !== undefined) {
       fail(`${p}.to`, "LoRa has no addresses: every listening node hears a send; leave `to` out");
     }
-    const via = entry.via === undefined ? "udp" : text(entry.via, `${p}.via`);
-    if (via !== "udp" && via !== "espnow") fail(`${p}.via`, 'expected "udp" or "espnow"');
+    const via = entry.via === undefined
+      ? (phy === "ble" ? "gatt" : "udp")
+      : text(entry.via, `${p}.via`);
+    if (phy === "ble" && via !== "gatt") fail(`${p}.via`, 'a BLE node sends "gatt"');
+    if (phy !== "ble" && via === "gatt") fail(`${p}.via`, "GATT needs a ble radio");
+    if (via !== "udp" && via !== "espnow" && via !== "gatt") {
+      fail(`${p}.via`, 'expected "udp", "espnow" or "gatt"');
+    }
     if (via === "espnow" && phy !== "wifi") fail(`${p}.via`, "ESP-NOW needs a wifi radio");
     const to = phy === "lora" ? null : text(entry.to, `${p}.to`);
     if (to === BROADCAST_TARGET && via !== "espnow") {
       fail(`${p}.to`, `"${BROADCAST_TARGET}" needs via: espnow`);
     }
-    if (via === "espnow" && entry.port !== undefined) {
-      fail(`${p}.port`, "ESP-NOW has no ports");
+    if ((via === "espnow" || via === "gatt") && entry.port !== undefined) {
+      fail(`${p}.port`, via === "gatt" ? "GATT has no ports" : "ESP-NOW has no ports");
     }
     const payload = entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`);
     // Room for ":<sequence>" inside ESP-NOW's 250-byte payload.
     if (via === "espnow" && new TextEncoder().encode(payload).length > 200) {
       fail(`${p}.payload`, "an ESP-NOW payload must stay within 200 bytes");
+    }
+    // Room for ":<sequence>" in the 20 bytes an ATT notification carries at the default MTU.
+    if (via === "gatt" && new TextEncoder().encode(payload).length > 14) {
+      fail(`${p}.payload`, "a GATT payload must stay within 14 bytes");
     }
     return {
       to,
@@ -370,11 +471,22 @@ function parseScript(value: unknown, path: string, phy: Phy): FirmwareSpec {
     fail(`${path}.listen`, "expected true or false");
   }
   const listen = typeof obj.listen === "boolean" ? obj.listen : send.length === 0;
-  return { kind: "script", send, listen };
+  return {
+    kind: "script",
+    send,
+    listen,
+    ble: phy === "ble" ? parseBleScript(obj, path, nodeName) : null,
+  };
 }
 
-function parseFirmware(board: BoardKind, value: unknown, path: string, phy: Phy): FirmwareSpec {
-  if (board === "scripted") return parseScript(value ?? {}, path, phy);
+function parseFirmware(
+  board: BoardKind,
+  value: unknown,
+  path: string,
+  phy: Phy,
+  nodeName: string,
+): FirmwareSpec {
+  if (board === "scripted") return parseScript(value ?? {}, path, phy, nodeName);
   const file = text(value, path);
   return { kind: file.endsWith(".bin") ? "binary" : "sketch", path: file };
 }
@@ -450,10 +562,13 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
       fail(`${path}.internet_gateway`, "must be a single esp32 node");
     }
     if (radio.phy !== "wifi" && internetGateway) {
-      fail(`${path}.internet_gateway`, "is a Wi-Fi notion; a LoRa or nRF24 node has no IP network");
+      fail(
+        `${path}.internet_gateway`,
+        "is a Wi-Fi notion; a LoRa, nRF24 or BLE node has no IP network",
+      );
     }
     if (radio.phy !== "wifi" && obj.ip !== undefined) {
-      fail(`${path}.ip`, "is a Wi-Fi notion; a LoRa or nRF24 node has no IP address");
+      fail(`${path}.ip`, "is a Wi-Fi notion; a LoRa, nRF24 or BLE node has no IP address");
     }
     for (let k = 0; k < count; k++) {
       const index = nodes.length + 1;
@@ -462,10 +577,11 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
         fail(`${path}.ip`, "cannot be set on a node with count > 1");
       }
       if (explicitIp !== null) checkHostAddress(explicitIp, subnetPrefix, `${path}.ip`);
+      const id = count === 1 ? baseId : `${baseId}-${k + 1}`;
       nodes.push({
-        id: count === 1 ? baseId : `${baseId}-${k + 1}`,
+        id,
         board,
-        firmware: parseFirmware(board, obj.firmware, `${path}.firmware`, radio.phy),
+        firmware: parseFirmware(board, obj.firmware, `${path}.firmware`, radio.phy, id),
         position: positionFor(obj.position, k, count, `${path}.position`),
         radio,
         ip: explicitIp ?? `${subnetPrefix}.${FIRST_HOST + index - 1}`,
@@ -546,6 +662,9 @@ const FRAME_KINDS: readonly FrameKind[] = [
   "lora",
   "nrf24",
   "nrf24-ack",
+  "ble-adv",
+  "ble-data",
+  "ble-acl",
   "other",
 ];
 
@@ -661,8 +780,16 @@ function checkReferences(scenario: Scenario): void {
     }
   });
   const phases = new Set(scenario.timeline.flatMap((e) => (e.label ? [e.label] : [])));
+  const connects = (central: ScenarioNode, peripheral: string) =>
+    central.firmware.kind === "script" &&
+    (central.firmware.ble?.connect?.peers.includes(peripheral) ?? false);
   scenario.nodes.forEach((node, i) => {
     if (node.firmware.kind !== "script") return;
+    node.firmware.ble?.connect?.peers.forEach((peer, j) => {
+      const p = `nodes[${i}].firmware.connect.peers[${j}]`;
+      if (!medium.includes(peer)) fail(p, `no node named ${JSON.stringify(peer)} on the medium`);
+      if (peer === node.id) fail(p, "a node cannot connect to itself");
+    });
     node.firmware.send.forEach((send, j) => {
       if (send.to === null || send.to === BROADCAST_TARGET) return;
       if (!medium.includes(send.to)) {
@@ -673,6 +800,13 @@ function checkReferences(scenario: Scenario): void {
       }
       if (send.to === node.id) {
         fail(`nodes[${i}].firmware.send[${j}].to`, "a node cannot send to itself");
+      }
+      const peer = scenario.nodes.find((n) => n.id === send.to);
+      if (send.via === "gatt" && peer && !connects(node, send.to) && !connects(peer, node.id)) {
+        fail(
+          `nodes[${i}].firmware.send[${j}].to`,
+          `GATT goes over a connection, and neither ${node.id} nor ${send.to} connects to the other`,
+        );
       }
     });
   });

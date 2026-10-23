@@ -1,5 +1,6 @@
-// The `radios:` entry of a scenario node: one radio per node, Wi-Fi (Phase 1)
-// or a chip-level radio on the board's SPI bus (Phase 3: LoRa SX127x, nRF24L01+).
+// The `radios:` entry of a scenario node: one radio per node, Wi-Fi (Phase 1),
+// a chip-level radio on the board's SPI bus (Phase 3: LoRa SX127x, nRF24L01+),
+// or BLE through a virtual controller on an HCI UART (Phase 6).
 //
 // For a chip radio the scenario's modem settings are what a scripted board
 // programs. Real firmware programs its own chip; for it the scenario's values
@@ -10,8 +11,8 @@ import type { RadioConfig } from "../engine/channel.ts";
 import { isNrf24DataRate, type Nrf24DataRate } from "../engine/nrf24.ts";
 import { bandwidthCode, LORA_BANDWIDTHS_HZ } from "../engine/lora.ts";
 
-export type Phy = "wifi" | "lora" | "nrf24";
-export const PHYS: readonly Phy[] = ["wifi", "lora", "nrf24"];
+export type Phy = "wifi" | "lora" | "nrf24" | "ble";
+export const PHYS: readonly Phy[] = ["wifi", "lora", "nrf24", "ble"];
 
 export interface WifiRadio extends RadioConfig {
   phy: "wifi";
@@ -48,7 +49,15 @@ export interface Nrf24Radio {
   pins: { csn: number; ce: number; irq: number | null };
 }
 
-export type NodeRadio = WifiRadio | LoraRadio | Nrf24Radio;
+export interface BleRadio {
+  phy: "ble";
+  txPowerDbm: number;
+  antennaGainDbi: number;
+  /** The UART the firmware's host stack writes HCI to. UART0 is the serial console. */
+  hciUart: 1 | 2;
+}
+
+export type NodeRadio = WifiRadio | LoraRadio | Nrf24Radio | BleRadio;
 
 type Obj = Record<string, unknown>;
 type Fail = (path: string, message: string) => never;
@@ -106,6 +115,26 @@ const NRF24_FIELDS = [
   "retry_delay_us",
   "pins",
 ] as const;
+
+const BLE_FIELDS = ["phy", "tx_power_dbm", "antenna_gain_dbi", "hci_uart"] as const;
+
+function parseBle(r: FieldReaders, radio: Obj, path: string): BleRadio {
+  r.known(radio, BLE_FIELDS, path);
+  const uart = r.int(radio.hci_uart ?? 1, `${path}.hci_uart`, 0, 2);
+  if (uart === 0) {
+    r.fail(
+      `${path}.hci_uart`,
+      "UART0 is the serial console; HCI bytes there would corrupt it. Use 1 or 2",
+    );
+  }
+  return {
+    phy: "ble",
+    // The ESP32's BLE transmitter range is -12 to +9 dBm; other boards may differ.
+    txPowerDbm: r.num(radio.tx_power_dbm ?? 0, `${path}.tx_power_dbm`, -20, 20),
+    antennaGainDbi: r.num(radio.antenna_gain_dbi ?? 0, `${path}.antenna_gain_dbi`, -20, 30),
+    hciUart: uart as 1 | 2,
+  };
+}
 
 function parseCodingRate(r: FieldReaders, value: unknown, path: string): number {
   if (value === undefined) return 5;
@@ -194,6 +223,7 @@ export function parseNodeRadio(r: FieldReaders, value: unknown, path: string): N
   const phy = radio.phy;
   if (phy === "lora") return parseLora(r, radio, `${path}[0]`);
   if (phy === "nrf24") return parseNrf24(r, radio, `${path}[0]`);
+  if (phy === "ble") return parseBle(r, radio, `${path}[0]`);
   if (phy !== "wifi") r.fail(`${path}[0].phy`, `expected one of ${PHYS.join(", ")}`);
   r.known(radio, WIFI_FIELDS, `${path}[0]`);
   return {
@@ -204,7 +234,7 @@ export function parseNodeRadio(r: FieldReaders, value: unknown, path: string): N
   };
 }
 
-/** One line for the report: "wifi ch 5", "lora 868.1 MHz SF7 BW125 CR4/5", "nrf24 ch 76 1 Mbit/s". */
+/** One line for the report: "wifi ch 5", "lora 868.1 MHz SF7 BW125 CR4/5", "nrf24 ch 76 1 Mbit/s", "ble 1M, HCI on UART1". */
 export function describeRadio(radio: NodeRadio): string {
   switch (radio.phy) {
     case "wifi":
@@ -217,6 +247,8 @@ export function describeRadio(radio: NodeRadio): string {
       return `nrf24 ch ${radio.channel} ${
         radio.dataRate === 250_000 ? "250 kbit/s" : `${radio.dataRate / 1e6} Mbit/s`
       }`;
+    case "ble":
+      return `ble 1M ${radio.txPowerDbm} dBm, HCI on UART${radio.hciUart}`;
   }
 }
 

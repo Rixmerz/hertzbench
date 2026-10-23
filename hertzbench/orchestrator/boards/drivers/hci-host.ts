@@ -144,7 +144,12 @@ export class HciHost {
     await this.ok(OP.leSetAdvEnable, [1], "LE Set Advertising Enable");
   }
 
-  async scan(active: boolean, intervalMs: number, windowMs: number): Promise<void> {
+  async scan(
+    active: boolean,
+    intervalMs: number,
+    windowMs: number,
+    filterDuplicates = false,
+  ): Promise<void> {
     await this.ok(OP.leSetScanParams, [
       active ? 1 : 0,
       ...u16(Math.round(intervalMs / 0.625)),
@@ -152,7 +157,7 @@ export class HciHost {
       0,
       0,
     ], "LE Set Scan Parameters");
-    await this.ok(OP.leSetScanEnable, [1, 0], "LE Set Scan Enable");
+    await this.ok(OP.leSetScanEnable, [1, filterDuplicates ? 1 : 0], "LE Set Scan Enable");
   }
 
   async setAcceptList(addresses: readonly string[]): Promise<void> {

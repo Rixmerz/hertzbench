@@ -30,6 +30,13 @@ const ADAPTER_FIDELITY: Record<
     level: "F1",
     meaning: "same firmware binary, the nRF24L01+ modelled at its SPI command interface",
   },
+  ble: {
+    component: "ble-hci virtual controller over an HCI UART",
+    protocol: "ble",
+    level: "F3",
+    meaning:
+      "the firmware's own BLE host stack runs, in a simulation-only build that sends HCI over a UART to a link-layer controller the engine plays; the binary differs from production",
+  },
 };
 
 const ESPNOW_FIDELITY: (typeof ADAPTER_FIDELITY)[Phy] = {
@@ -176,6 +183,32 @@ function espnowRows(links: readonly LinkStats[]): string[][] {
   });
 }
 
+/** HCI disconnection reasons a BLE run can end a connection with. */
+const BLE_REASONS: Record<number, string> = {
+  0x08: "supervision timeout",
+  0x13: "remote user terminated",
+  0x16: "terminated by local host",
+  0x28: "instant passed",
+  0x3e: "failed to be established",
+};
+
+function bleLinkRows(result: RunResult): string[][] {
+  return result.events.flatMap((e) => {
+    if (e.type !== "ble-link") return [];
+    const reason = e.reason === null
+      ? ""
+      : ` (0x${e.reason.toString(16).padStart(2, "0")} ${BLE_REASONS[e.reason] ?? "other"})`;
+    return [[
+      e.t.toFixed(1),
+      e.node,
+      e.peer,
+      e.role,
+      e.state === "up" ? "connected" : `disconnected${reason}`,
+      ms(e.intervalMs),
+    ]];
+  });
+}
+
 const LINK_HEADER = [
   "link",
   "sent",
@@ -206,6 +239,9 @@ export function renderReport(result: RunResult): string {
   out.push(
     scenario.phy === "wifi"
       ? "  latency below is MODELLED by the channel model, not measured on a guest clock"
+      : scenario.phy === "ble"
+      ? "  latency below is MODELLED: ble-adv and ble-data are time on air plus propagation; " +
+        "ble-acl is host to host, waiting for connection events and retransmissions included"
       : "  latency below is MODELLED: time on air from the chip's registers plus propagation",
   );
   out.push("");
@@ -241,6 +277,16 @@ export function renderReport(result: RunResult): string {
       "ESP-NOW unicast sends, as the sending firmware sees them (the fork waits 10 ms for each ACK)",
     );
     out.push(...table(ESPNOW_HEADER, espnowTotal).map((l) => `  ${l}`));
+  }
+  const bleLinks = bleLinkRows(result);
+  if (bleLinks.length) {
+    out.push("");
+    out.push("BLE connections, as each side's controller saw them");
+    out.push(
+      ...table(["t ms", "node", "peer", "role", "event", "interval ms"], bleLinks).map((l) =>
+        `  ${l}`
+      ),
+    );
   }
   if (metrics.phases.length > 1) {
     for (const phase of metrics.phases) {

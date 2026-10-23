@@ -186,6 +186,53 @@ async function assertMonotonic(dir: string): Promise<void> {
   }
 }
 
+Deno.test("run: the BLE example connects three sensors, loses the one that walks away, and writes LE and HCI captures", async () => {
+  await inTempDir(async (dir) => {
+    const run = await hertzbench(["run", `${EXAMPLES}ble-sensors-scripted.yaml`, "--out", dir]);
+    assertEquals(run.code, 0, run.stdout + run.stderr);
+    assertStringIncludes(run.stdout, "ble: F3");
+    assertStringIncludes(run.stdout, "disconnected (0x08 supervision timeout)");
+
+    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/metrics.json`));
+    assertEquals(metrics.phy, "ble");
+    assertEquals(metrics.passed, true);
+    assertEquals(metrics.nodes[0].channel, null);
+    assertEquals(metrics.fidelity[0].level, "F3");
+    await assertMonotonic(dir);
+
+    const events = (await Deno.readTextFile(`${dir}/events.jsonl`)).trim().split("\n")
+      .map((l) => JSON.parse(l));
+    const links = events.filter((e) => e.type === "ble-link");
+    assertEquals(links.filter((e) => e.state === "up").length, 6, "three connections, both sides");
+    const down = links.filter((e) => e.state === "down");
+    assertEquals(down.map((e) => `${e.node}-${e.peer}-${e.reason}`).sort(), [
+      "gw-sensor-3-8",
+      "sensor-3-gw-8",
+    ]);
+
+    const pcap = await Deno.readFile(`${dir}/air.pcap`);
+    const view = new DataView(pcap.buffer);
+    assertEquals(view.getUint32(20, true), 256, "LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR");
+    // First record: pseudo-header, then the advertising access address 0x8e89bed6.
+    assertEquals(view.getUint32(24 + 16 + 10, true), 0x8e89bed6);
+
+    for (const node of ["gw", "sensor-1", "sensor-2", "sensor-3"]) {
+      const snoop = await Deno.readFile(`${dir}/hci-${node}.btsnoop`);
+      assertEquals(new TextDecoder().decode(snoop.subarray(0, 7)), "btsnoop");
+      assertEquals(new DataView(snoop.buffer).getUint32(12), 1002, "H4 datalink");
+    }
+    // BlueZ's own decoder reads the HCI the hosts and controllers exchanged.
+    const btmon = await new Deno.Command("btmon", { args: ["-r", `${dir}/hci-gw.btsnoop`] })
+      .output().catch(() => null);
+    if (btmon) {
+      const text = new TextDecoder().decode(btmon.stdout);
+      assertStringIncludes(text, "LE Connection Complete");
+      assertStringIncludes(text, "ATT: Handle Value Notification (0x1b)");
+      assertStringIncludes(text, "Reason: Connection Timeout (0x08)");
+    }
+  });
+});
+
 Deno.test("run: the LoRa example loses more the farther the node, and writes a LoRaTap capture", async () => {
   await inTempDir(async (dir) => {
     const run = await hertzbench(["run", `${EXAMPLES}lora-gateway-6-scripted.yaml`, "--out", dir]);

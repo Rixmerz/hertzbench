@@ -98,7 +98,7 @@ export interface NodeReport {
   ip: string;
   mac: string;
   position: Position;
-  /** Wi-Fi or nRF24 channel; null for LoRa, which `radio` describes by frequency. */
+  /** Wi-Fi or nRF24 channel; null for LoRa, which `radio` describes by frequency, and for BLE, which hops. */
   channel: number | null;
   /** The declared radio in one line, e.g. "lora 868.1 MHz SF7 BW125 CR4/5". */
   radio: string;
@@ -321,7 +321,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     ip: node.ip,
     mac: node.mac,
     position: node.internetGateway ? node.position : medium.node(node.id).position,
-    channel: node.radio.phy === "lora" ? null : node.radio.channel,
+    channel: node.radio.phy === "lora" || node.radio.phy === "ble" ? null : node.radio.channel,
     radio: describeRadio(node.radio),
     onMedium: !node.internetGateway,
     clock: clocks.get(node.id) ?? "not started",
@@ -337,7 +337,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     passed: problems.length === 0 && assertions.every((a) => a.passed),
     files: [],
   };
-  result.files = await writeOutputs(result, options, network.pcap, network.dot11Pcap);
+  result.files = await writeOutputs(result, options, network);
   return result;
 }
 
@@ -425,9 +425,9 @@ export function dot11CapturePath(pcapPath: string): string {
 async function writeOutputs(
   result: RunResult,
   options: RunOptions,
-  pcap: PcapWriter,
-  dot11Pcap: PcapWriter | undefined,
+  network: NetworkSetup,
 ): Promise<string[]> {
+  const { pcap, dot11Pcap } = network;
   const files: string[] = [];
   const write = async (path: string, data: string | Uint8Array) => {
     await ensureParentDir(path);
@@ -444,6 +444,11 @@ async function writeOutputs(
     options.outputs.events,
     result.events.map((e) => JSON.stringify(e)).join("\n") + (result.events.length ? "\n" : ""),
   );
+  for (const [node, snoop] of network.hciCaptures ?? []) {
+    if (snoop.packetCount > 0) {
+      await write(`${options.outDir}/hci-${node}.btsnoop`, snoop.toBytes());
+    }
+  }
   const serialByNode = new Map<string, string[]>();
   for (const event of result.events) {
     if (event.type !== "serial") continue;
