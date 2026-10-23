@@ -9,8 +9,8 @@ The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards
 a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
 build, run and steer those scenarios, **Phase 3**, LoRa and nRF24 radio chips modelled at their SPI
 interface, **Phase 4**, ESP-NOW between the boards, **Phase 5**, a mobile bridge that lets a real
-phone reach a simulated board over Wi-Fi/IP or BLE, and **Phase 6**, BLE between the boards through
-a virtual controller on an HCI UART.
+phone reach a simulated board over Wi-Fi/IP or BLE, **Phase 6**, BLE between the boards through a
+virtual controller on an HCI UART, and **Phase 7**, an optional live view in the browser.
 
 ## Status
 
@@ -22,12 +22,12 @@ a virtual controller on an HCI UART.
 | `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                                          |
 | ESP32 boards under QEMU                                                                                | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first                   |
 | MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                                  |
+| View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards; ESP32 not run, same reason as above                                                                     |
 | `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                                   |
 | ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and through the CLI with scripted boards; **not run against QEMU**, see [ESP-NOW](#esp-now)                        |
 | LoRa (SX127x) and nRF24L01+ chip models over `spi-link` (Phase 3)                                      | see `adapters/lora-sx127x/`, `adapters/nrf24/` and `scenarios/examples/lora-gateway-6-*.yaml`                                                                                 |
 | BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and through the CLI with scripted hosts; ESP32 relay tested with a fake worker; **Bluedroid firmware not run**, see [BLE](#ble)                |
 | Mobile bridge (Phase 5): IP proxy with mDNS (5a), BlueZ GATT mirror (5b), the phone as a node          | done, tested end to end with scripted boards and stand-ins for the host's network and BlueZ; **no real phone, LAN mDNS or adapter used**, see [Mobile bridge](#mobile-bridge) |
-| Canvas                                                                                                 | later phase                                                                                                                                                                   |
 
 ## Quick start (no QEMU needed)
 
@@ -49,7 +49,8 @@ libqemu, see [docs/e2e-esp32.md](docs/e2e-esp32.md).
 ```
 hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
 hertzbench validate <scenario.yaml>
-hertzbench mcp [--workspace DIR]
+hertzbench view <scenario.yaml> [--port N] [--out DIR] [--seed N]
+hertzbench mcp [--workspace DIR] [--view-port N]
 ```
 
 To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin directory, usually
@@ -142,6 +143,18 @@ agent can move a node or break a link while it runs and read the effect in the m
 writes stays inside its workspace. Registration without installing, the tool reference and the ESP32
 setup are in [docs/mcp.md](docs/mcp.md).
 
+## Watch it live (optional)
+
+```bash
+deno task hertzbench view scenarios/examples/live-3-scripted.yaml --out /tmp/hzb-view
+```
+
+Open the address it prints (`http://127.0.0.1:7480/`). The page draws the nodes on a map, colors
+each link by its signal or by its loss over the last 2 s, and plots every frame on a timeline. Drag
+a node, or focus it and use the arrow keys, to move it while the run plays: the move goes through
+the same `move_node` tool an agent uses. `hertzbench mcp --view-port 7480` draws the agent's run the
+same way. No build step and no Velxio patch; see [docs/view.md](docs/view.md).
+
 ## How it works
 
 ```
@@ -171,9 +184,10 @@ orchestrator/    scenario parser, runner, assertions, report, boards (esp32, scr
                  model, scripted LoRa/nRF24/BLE hosts, scripted TCP servers, ATT/GATT)
 bridge/          mobile bridge: ip/ (host TCP proxy, mDNS), ble/ (GATT mirror, BlueZ helper)
 mcp/             MCP server: JSON-RPC over stdio, tools, resources, the live run
-cli/             hertzbench run | validate | mcp
+view/            the live view: loopback HTTP server, scene model, static page (no build)
+cli/             hertzbench run | validate | view | mcp
 scenarios/       examples/
-tests/           deno tests (engine, adapter, scenario, orchestrator, CLI, MCP)
+tests/           deno tests (engine, adapter, scenario, orchestrator, CLI, MCP, view)
 docs/            PLAN, discovery, ADRs, fidelity, scenario format, e2e, upstream sync
 brand.ts         the product name, in one place
 ```
@@ -182,7 +196,7 @@ brand.ts         the product name, in one place
 
 ```bash
 cd hertzbench
-deno task test      # unit + adapter + CLI and MCP end to end; no QEMU needed
+deno task test      # unit + adapter + CLI, MCP and view end to end; no QEMU needed
 deno task check     # type check
 deno lint && deno fmt --check
 ```
@@ -203,6 +217,7 @@ check when it is not.
   Code
 - [docs/mobile-bridge.md](docs/mobile-bridge.md): a real phone to a simulated board, over IP (with
   mDNS) or BLE (through BlueZ)
+- [docs/view.md](docs/view.md): the live view, what its colors mean, what it reuses from Velxio
 - [docs/e2e-esp32.md](docs/e2e-esp32.md): running the ESP32 example, and what to verify on the first
   run
 - [docs/upstream-sync.md](docs/upstream-sync.md): the Velxio patches and the sync policy

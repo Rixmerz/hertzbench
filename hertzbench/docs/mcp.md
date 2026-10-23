@@ -69,7 +69,7 @@ directory, so the default is usually what you want.
 | `get_status`        | none                                                                        | `idle` before the first run. Then `starting`, `running`, `finished` (with `passed`, the assertions and the files), `failed` (with the error) or `stopped`. Also elapsed time, live node positions, board problems and, with a mobile bridge, `bridge`: its host endpoints (or mirrored GATT table) and its live position.                                                 |
 | `get_serial`        | `node`, `since_ms?`, `tail?`                                                | The node's serial lines, each with its engine time; the bridge's id gives the bridge's log. Returns the last `tail` lines (default 200, at most 2000). Pass the returned `next_since_ms` back as `since_ms` to read only new lines.                                                                           |
 | `get_metrics`       | none                                                                        | Per-link metrics for the whole run and per phase. While the run plays, and after `stop`, they are computed from the event log so far and marked `partial: true`. Once the run has finished, this is the `metrics.json` document.                                     |
-| `move_node`         | `node`, `position` (`[x, y]` or `[x, y, z]`), `phase?`                      | Moves a node now, or the mobile bridge's station (its id, `phone` by default). Every later frame uses the new position. Returns the new distance, RSSI and SNR from that node to each of the others.                                                                                                                             |
+| `move_node`         | `node`, `position` (`[x, y]` or `[x, y, z]`), `phase?`                      | Moves a node now, or the mobile bridge's station (its id, `phone` by default). Every later frame uses the new position. Returns the new distance, RSSI and SNR from that node to each of the others (Wi-Fi runs; empty on LoRa, nRF24 and BLE, whose medium reports no budget).                                                                                                                             |
 | `inject_fault`      | `link` (`from->to`, `*` allowed), `extra_loss_pct?`, `extra_latency_ms?`, `phase?` | Forces loss and/or extra latency on the matching directed links, now. It replaces any earlier override on those links; setting both values to 0 clears it. Same effect as a `links` rule in the scenario.                                                     |
 | `stop`              | none                                                                        | Stops the run and its boards. See [Stopping](#stopping).                                                                                                                                                                                                             |
 
@@ -108,6 +108,12 @@ example three scripted boards ping each other for two minutes, and nothing is sc
 the same instant, exactly like a timeline entry with `label`, so you can compare before and after
 in `get_metrics`. A metric assertion in the scenario can only name a phase from the timeline,
 because assertions are checked before the run.
+
+### Watching it
+
+Start the server with `--view-port 7480` (add it after `mcp` in the `claude mcp add` line) and open
+`http://127.0.0.1:7480/` to watch the agent's run on a map with a packet timeline. Dragging a node
+there calls `move_node`, so the agent sees the move in `get_status`. See [view.md](view.md).
 
 ## How a run works through the server
 

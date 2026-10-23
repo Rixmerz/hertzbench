@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hertzbench view</title>
+    <link rel="stylesheet" href="/velxio/tokens/index.css">
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <header class="bar">
+      <h1 class="brand">Hertzbench</h1>
+      <p class="run" id="run">Waiting for a run</p>
+      <p class="state" id="state" role="status" aria-live="polite">connecting</p>
+      <p class="clock" id="clock"></p>
+    </header>
+
+    <main class="layout">
+      <section class="map-pane" aria-labelledby="map-title">
+        <div class="pane-head">
+          <h2 id="map-title">Map</h2>
+          <p class="hint"
+            id="map-hint">Drag a node, or focus it and use the arrow keys (Shift: 5 m), to move it while
+            the run plays.</p>
+        </div>
+        <div class="map-box" id="map-box">
+          <svg id="map" class="map" role="group"
+            aria-label="Map of the nodes and their links"></svg>
+        </div>
+        <p class="notice" id="notice" role="alert" hidden></p>
+      </section>
+
+      <aside class="side" aria-labelledby="links-title">
+        <fieldset class="mode">
+          <legend>Color links by</legend>
+          <label><input type="radio" name="mode" value="signal" checked> Signal (RSSI)</label>
+          <label><input type="radio" name="mode" value="loss"> Loss, last <span id="window">2</span> s</label>
+        </fieldset>
+        <ul class="legend" id="legend" aria-label="Color legend"></ul>
+
+        <h2 id="links-title">Links</h2>
+        <div class="table-box">
+          <table class="links">
+            <thead>
+              <tr>
+                <th scope="col">Link</th>
+                <th scope="col">RSSI</th>
+                <th scope="col">SNR</th>
+                <th scope="col">Rate</th>
+                <th scope="col">Loss</th>
+                <th scope="col">Quality</th>
+              </tr>
+            </thead>
+            <tbody id="links"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="links-empty">No links yet: the boards are still starting.</p>
+
+        <h2>Problems</h2>
+        <ul class="problems" id="problems"></ul>
+        <p class="fineprint"
+          id="fineprint">Latency is modelled by the channel model, not measured on a guest clock.</p>
+      </aside>
+
+      <section class="timeline-pane" aria-labelledby="timeline-title">
+        <div class="pane-head">
+          <h2 id="timeline-title">Packets, last 10 s</h2>
+          <ul class="legend legend-inline" aria-label="Timeline legend">
+            <li><span class="mark mark-deliver" aria-hidden="true"></span>delivered</li>
+            <li><span class="mark mark-drop" aria-hidden="true"></span>lost</li>
+            <li><span class="mark mark-move" aria-hidden="true"></span>move</li>
+            <li><span class="mark mark-phase" aria-hidden="true"></span>phase</li>
+            <li><span class="mark mark-override" aria-hidden="true"></span>forced loss or latency</li>
+          </ul>
+        </div>
+        <div class="timeline-box" id="timeline-box">
+          <canvas id="timeline" class="timeline" role="img" aria-label="Packet timeline"></canvas>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
