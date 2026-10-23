@@ -26,7 +26,8 @@ const MIDDLE = WIFI_RATES.find((rate) => rate.mbps === 24)!;
 /**
  * good: the link carries the fastest rate (54 Mbit/s). fair: 24 Mbit/s or
  * more. poor: only the slow rates decode. bad: below the slowest rate's
- * threshold, where frames are lost even with every retry.
+ * threshold, where the loss climbs from a few percent to every frame within
+ * about 4 dB.
  */
 export function signalQuality(snrDb: number): Exclude<Quality, "idle"> {
   if (snrDb >= FASTEST.minSnrDb) return "good";

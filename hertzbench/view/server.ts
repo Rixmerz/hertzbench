@@ -35,7 +35,8 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // Reused from the Velxio frontend as they are, read from disk: its design
-// tokens and board drawings. Nothing in frontend/ is changed or built.
+// tokens, the fonts they name and its board drawings. Nothing in frontend/ is
+// changed or built.
 const VELXIO = new URL("../../frontend/", import.meta.url);
 const VELXIO_TOKENS = [
   "index.css",
@@ -47,11 +48,12 @@ const VELXIO_TOKENS = [
   "motion.css",
   "z-index.css",
 ];
+const VELXIO_FONTS = ["Inter.var.woff2", "JetBrainsMono.var.woff2"];
 const BOARD_IMAGES: Record<string, string> = { esp32: "esp32-devkit-v1.svg" };
 
 const HEADERS = {
   "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; " +
-    "img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; " +
+    "img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; " +
     "frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
@@ -100,6 +102,11 @@ export function serveView(session: Session, options: ViewOptions): ViewServer {
     const token = url.pathname.match(/^\/velxio\/tokens\/([a-z-]+\.css)$/)?.[1];
     if (token && VELXIO_TOKENS.includes(token)) {
       return await file(new URL(`src/tokens/${token}`, VELXIO), "text/css; charset=utf-8");
+    }
+    // The tokens load their fonts from /fonts/, as in the Velxio app.
+    const font = url.pathname.match(/^\/fonts\/([A-Za-z.]+\.woff2)$/)?.[1];
+    if (font && VELXIO_FONTS.includes(font)) {
+      return await file(new URL(`public/fonts/${font}`, VELXIO), "font/woff2");
     }
     const board = url.pathname.match(/^\/velxio\/boards\/([a-z0-9-]+\.svg)$/)?.[1];
     if (board && Object.values(BOARD_IMAGES).includes(board)) {
