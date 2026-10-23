@@ -17,6 +17,7 @@ Every protocol and board declares how faithful it is (PLAN.md D10). `hertzbench 
 | `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings, and sends ESP-NOW through a model of the fork's MAC (`orchestrator/boards/espnow-fork-model.ts`). On LoRa, nRF24 and BLE it replays the host side of a sketch over the same socket firmware would use (for BLE, a small HCI host in `orchestrator/boards/drivers/hci-host.ts`). It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
 | Internet gateway node (`internet_gateway: true`) | n/a | The one board that keeps SLIRP. See below. |
 | LoRa (SX127x) and nRF24L01+ (Phase 3) | **F1** | The same firmware binary; the radio chip is modelled at its SPI interface (`adapters/lora-sx127x/`, `adapters/nrf24/`, over `adapters/spi-link/`). |
+| Mobile bridge (Phase 5) | n/a | Not a board: a real phone's traffic, replayed by a station on the medium. The phone-to-host leg is real and not modelled; the bridge-to-board leg pays the channel model. See [Mobile bridge](#mobile-bridge) below. |
 | `ble-hci` adapter, BLE (Phase 6) | **F3** | The firmware's own BLE host stack (Bluedroid) runs, built host-only with HCI over UART1; the board relays that UART to a virtual link-layer controller in the engine. The binary differs from production. See [BLE](#ble) below. |
 
 ## Clock and latency
@@ -180,3 +181,14 @@ An ACK for which no frame is waiting (already answered, or lost on the way) is d
 - Interference between BLE and Wi-Fi: a scenario runs one PHY.
 
 **Not known without running the firmware.** Whether Bluedroid host-only starts against this controller (the ADR 0002 gate); which vendor-specific commands it sends first (each is listed as a warning); and whether the fork's UART1 carries bytes both ways through `uart_tx` and `uart_send` (the worker relays any UART number, but only UART0 has been used).
+
+## Mobile bridge
+
+**Status: built and tested with scripted boards and stand-ins; no phone, LAN or Bluetooth adapter used.** [mobile-bridge.md](mobile-bridge.md) has the guide and the test list.
+
+**IP (5a).** The phone's TCP connection ends at the host's proxy. A second connection, the bridge's, runs on the medium from the bridge's station (`engine/tcp.ts`): real segments with pseudo-header checksums, the MSS option, an RFC 6298 retransmission timer with go-back-N recovery, the peer's window, FIN and RST. Its segments are frames like any other: per-receiver RSSI and SNR from the bridge's position, rate fallback, MAC retries, link overrides. So the channel shows up to the phone as **delay** (MAC retries, then TCP retransmissions), never as loss or reordering, and the phone's own TCP behaviour (its window, its retransmissions) never reaches the board. Not modelled in the bridge's TCP: congestion control, fast retransmit, SACK, window scaling, timestamps, TIME_WAIT; received data is handed over at once, so the window it advertises is always 65535. The phone-to-host leg (the real Wi-Fi) adds its own latency on top and is not in any metric.
+
+**BLE (5b).** The phone's GATT operations end at BlueZ. Each is replayed as one ATT request from the bridge's node, a central on the simulated air with its own virtual controller, so it waits for connection events and pays retransmissions like any ACL data, and the phone gets the node's answer once it has crossed the air. The phone's MTU, BlueZ's handles and the phone's link parameters are not mirrored: the simulated connection keeps ATT_MTU 23 and the bridge's `interval` and `timeout`. Writes over 20 bytes are refused; long and reliable writes, security and pairing are not carried. The host advertises the mirrored name and the first service UUID, not the node's advertising data.
+
+**Metrics.** The bridge's links are in the report and `metrics.json` like a board's: `phone->web` with kind `tcp` for IP, `phone->sensor-1` with kinds `ble-data` and `ble-acl` for BLE. They measure the simulated leg only.
+

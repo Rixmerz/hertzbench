@@ -118,9 +118,27 @@ Until the image exists, `validate` and `run` stop with `firmware not found` and 
 
 Open `air.pcap` in Wireshark: it should decode as Bluetooth LE Link Layer, with `ADV_IND`, `CONNECT_IND` and data PDUs carrying L2CAP and ATT. If Wireshark marks every CRC wrong, the CRC bit order in `engine/ble.ts` (`bleCrcBytes`) is the suspect; record it in [fidelity.md](fidelity.md#ble).
 
+## The mobile bridge
+
+`scenarios/examples/bridge-web-esp32.yaml` puts an ESP32 running `fw/web-node` (the core's `WebServer`) behind the IP bridge, and `bridge-ble-esp32.yaml` mirrors the `fw/ble-sensor` firmware's GATT server through BlueZ. **Never run**: no libqemu, no ESP-IDF, no phone on this host. Do the Wi-Fi first run above (steps 0 and 1) before either.
+
+IP bridge, in this order:
+
+1. `deno task lan run scenarios/examples/bridge-web-esp32.yaml`. The progress lines print `bridge phone: http web:80 at 0.0.0.0:8080` and the mDNS line. If the run stops with "the bridge may not listen", the task was `hertzbench`, not `lan`.
+2. `serial-web.log` shows `wifi up ip=192.168.4.11` and `http listening on 80`.
+3. From the host: `curl http://127.0.0.1:8080/status` answers `web-node uptime_ms=... requests=1`, and `serial-phone.log` shows `bridge 127.0.0.1:<port> -> web:80 connected` then `closed: <n> B to the node, <n> B from it`. If the request hangs: `events.jsonl` should show `tx` from `phone` of kind `tcp`, then ARP from `web` for 192.168.4.250 and the bridge's answer. No SYN-ACK from `web` with the ARP answered means lwIP dropped the SYN: check its checksum in `air.pcap` (Wireshark validates TCP checksums when told to).
+4. From the phone on the same Wi-Fi: `http://<host address>:8080/status`, then `http://hzb-web.local:8080/status`. `avahi-browse -art` on another Linux host should list `web-80` under `_http._tcp`. If it does not, the report's mDNS line says why.
+5. After 60 s the bridge's station is behind the 12 dB wall: requests from the phone take longer, and the report's `phone->web` rows in phase `behind-wall` show more attempts and a higher latency.
+
+BLE bridge, after the BLE example's step 1 (Bluedroid starts host-only):
+
+1. `deno task hertzbench run scenarios/examples/bridge-ble-esp32.yaml` on a Linux host with `bluetoothd`, PyGObject and a powered adapter. `serial-phone.log` shows `bridge connected to sensor`, `bridge discovered service 0000ff00-... with 1 characteristic(s)` and `bridge advertising "hzb sensor" to the phone (BlueZ on hci0)`. A BlueZ refusal is a problem in the report, with BlueZ's message.
+2. In nRF Connect on the phone, connect to `hzb sensor`, subscribe to `0xFF01`: a reading arrives every 200 ms (the firmware's `NOTIFY_PERIOD_MS`), and `serial-phone.log` shows `bridge notify ...` for each.
+3. A write to `0xFF01` fails with "write not permitted" (the firmware's characteristic is read-only), and `serial-phone.log` shows `bridge phone write ... failed: ATT error 0x03`.
+
 ## Without libqemu
 
-`scenarios/examples/udp-3-scripted.yaml`, `espnow-mesh-scripted.yaml` and `ble-sensors-scripted.yaml` are the same experiments with scripted boards. They need only Deno, take a few seconds each and exercise the adapter, engine, metrics, pcaps and assertions, but they say nothing about firmware.
+`scenarios/examples/udp-3-scripted.yaml`, `espnow-mesh-scripted.yaml`, `ble-sensors-scripted.yaml`, `bridge-web-scripted.yaml` and `bridge-ble-scripted.yaml` are the same experiments with scripted boards. They need only Deno, take a few seconds each and exercise the adapter, engine, metrics, pcaps and assertions, but they say nothing about firmware.
 
 ```bash
 cd hertzbench

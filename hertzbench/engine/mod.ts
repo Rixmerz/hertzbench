@@ -12,3 +12,4 @@ export * from "./lora.ts";
 export * from "./nrf24.ts";
 export * from "./air.ts";
 export * from "./ble.ts";
+export * from "./tcp.ts";

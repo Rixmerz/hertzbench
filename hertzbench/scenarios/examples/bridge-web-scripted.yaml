@@ -1,0 +1,49 @@
+# Phase 5a with scripted boards: a phone on this host's LAN reaches a
+# simulated node over HTTP, WebSocket and MQTT through the IP bridge, and the
+# link between the bridge's station and the node is the channel model's.
+#
+# `web` serves HTTP on port 80 (a WebSocket upgrade on any path echoes each
+# message) and is an MQTT broker on 1883. The bridge stands 3 m from it; at
+# 40 s it walks 60 m away, behind nothing but distance, and every request
+# from then on pays the longer path: lower SNR, slower rates, MAC retries.
+#
+# Run it, then from the host (or, with `listen: 0.0.0.0` and `deno task lan`,
+# from a phone on the same Wi-Fi):
+#   curl http://127.0.0.1:8080/status
+#   websocat ws://127.0.0.1:8080/ws
+#   mosquitto_sub -h 127.0.0.1 -p 1883 -t 'demo/#' & mosquitto_pub -h 127.0.0.1 -p 1883 -t demo/a -m hi
+name: bridge-web-scripted
+seed: 5
+duration: 90s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: web
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      serve:
+        - { port: 80, protocol: http }
+        - { port: 1883, protocol: mqtt }
+  - id: sensor
+    board: scripted
+    position: [8, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      send: [{ to: web, every: 1s, count: 90, payload: ping }]
+bridge:
+  id: phone
+  position: [3, 0]
+  listen: 127.0.0.1 # 0.0.0.0 to reach it from the LAN; mDNS then turns on
+  expose:
+    - { node: web, port: 80, service: http, listen_port: 8080 }
+    - { node: web, port: 1883, service: mqtt, listen_port: 1883 }
+timeline:
+  - at: 40s
+    label: walked-away
+    move: { node: phone, to: [60, 0] }
+assertions:
+  - serial: { node: web, contains: "tcp listening on 80 (http)", within: 10s }
+  - serial: { node: phone, contains: "bridge listening on 127.0.0.1:8080" }

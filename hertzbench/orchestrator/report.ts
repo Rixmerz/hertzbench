@@ -4,6 +4,7 @@
 
 import type { LinkStats } from "../engine/mod.ts";
 import { PRODUCT } from "../brand.ts";
+import { bridgeLines } from "../bridge/bridge.ts";
 import type { Phy } from "./radios.ts";
 import type { RunResult } from "./runner.ts";
 
@@ -118,6 +119,7 @@ export function metricsDocument(result: RunResult) {
       to_ms: p.toMs,
       links: p.links.map(linkJson),
     })),
+    bridge: result.bridge,
     warnings: metrics.warnings,
     problems: result.problems,
     assertions: result.assertions,
@@ -263,6 +265,11 @@ export function renderReport(result: RunResult): string {
       ]),
     ).map((l) => `  ${l}`),
   );
+  if (result.bridge) {
+    out.push("");
+    out.push("Mobile bridge");
+    for (const line of bridgeLines(result.bridge)) out.push(`  ${line}`);
+  }
   out.push("");
   out.push("Links, whole run");
   out.push(

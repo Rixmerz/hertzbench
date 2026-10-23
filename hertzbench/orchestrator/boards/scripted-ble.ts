@@ -4,11 +4,15 @@
 // virtual controllers, the air, the metrics and the assertions run end to end
 // on a host without libqemu.
 //
-// A peripheral advertises its name and, once connected, sends each `send` as
-// an ATT Handle Value Notification on handle 0x0010. A central connects to its
-// peers through the filter accept list, reconnects when a link drops, and
-// sends ATT Write Commands on the same handle. Both answer any ATT request
-// with "Request Not Supported": there is no attribute table to discover.
+// A peripheral advertises its name and serves one GATT service, laid out like
+// the ESP32 example firmware's (scenarios/examples/fw/ble-sensor): service
+// 0xFF00 with characteristic 0xFF01 (read, write, write without response,
+// notify) whose value is handle 0x0010, and its CCCD at 0x0011. Once connected
+// it sends each `send` as a notification on 0x0010, whether or not the CCCD
+// is enabled, as that firmware does; a read returns the last value sent or
+// written. A central connects to its peers through the filter accept list,
+// reconnects when a link drops, sends ATT Write Commands on 0x0010, and
+// answers any ATT request with "Request Not Supported".
 //
 // Serial lines, for `serial:` assertions:
 //   ble ready addr=<address>
@@ -24,9 +28,18 @@ import { OP, STATUS } from "../../adapters/ble-hci/hci.ts";
 import type { BleScript, ScriptedSend } from "../scenario.ts";
 import type { BoardContext, RunningBoard } from "./board.ts";
 import { advertisedName, HciHost } from "./drivers/hci-host.ts";
+import { ATT, GattServer, PROPERTY } from "./drivers/att.ts";
 
-/** The attribute handle scripted boards notify and write. */
+/** The attribute handle scripted boards notify and write: the value of characteristic 0xFF01. */
 export const SCRIPTED_ATT_HANDLE = 0x0010;
+const SERVICE = {
+  uuid: 0xff00,
+  firstHandle: SCRIPTED_ATT_HANDLE - 2,
+  characteristic: {
+    uuid: 0xff01,
+    properties: PROPERTY.read | PROPERTY.write | PROPERTY.writeWithoutResponse | PROPERTY.notify,
+  },
+};
 const ATT_ERROR_RSP = 0x01;
 const ATT_NOTIFY = 0x1b;
 const ATT_INDICATE = 0x1d;
@@ -50,11 +63,14 @@ class ScriptedBleBoard implements RunningBoard {
   readonly #peerOf = new Map<number, string>();
   #initiating = false;
   #stopped = false;
+  /** A peripheral's attribute table; null for a central. */
+  readonly #gatt: GattServer | null;
 
   constructor(ctx: BoardContext, conn: Deno.TcpConn, script: BleScript) {
     this.#ctx = ctx;
     this.#conn = conn;
     this.#script = script;
+    this.#gatt = script.advertise ? new GattServer(SERVICE, () => {}) : null;
     this.#host = new HciHost((bytes) => this.#write(bytes), {
       connected: (handle, role, peer, status) => this.#onConnected(handle, role, peer, status),
       disconnected: (handle, reason) => this.#onDisconnected(handle, reason),
@@ -203,6 +219,17 @@ class ScriptedBleBoard implements RunningBoard {
   #onAtt(handle: number, pdu: Uint8Array): void {
     const peer = this.#peerOf.get(handle) ?? `handle ${handle}`;
     const op = pdu[0] ?? 0;
+    if (this.#gatt) {
+      if (op === ATT.writeReq || op === ATT.writeCmd) {
+        const target = (pdu[1] ?? 0) | ((pdu[2] ?? 0) << 8);
+        if (target === SCRIPTED_ATT_HANDLE) {
+          this.#ctx.onSerial(`ble rx "${new TextDecoder().decode(pdu.subarray(3))}" from ${peer}`);
+        }
+      }
+      const answer = this.#gatt.handle(pdu);
+      if (answer) this.#host.sendAtt(handle, answer);
+      return;
+    }
     if (op === ATT_NOTIFY || op === ATT_INDICATE || op === ATT_WRITE_CMD) {
       this.#ctx.onSerial(`ble rx "${new TextDecoder().decode(pdu.subarray(3))}" from ${peer}`);
       if (op === ATT_INDICATE) this.#host.sendAtt(handle, Uint8Array.of(ATT_CONFIRM));
@@ -227,13 +254,15 @@ class ScriptedBleBoard implements RunningBoard {
             this.#ctx.onSerial(`ble tx ${text} to ${to} skipped: not connected`);
             return;
           }
+          const value = new TextEncoder().encode(text);
+          this.#gatt?.setValue(value);
           this.#host.sendAtt(
             handle,
             Uint8Array.from([
               opcode,
               SCRIPTED_ATT_HANDLE & 0xff,
               SCRIPTED_ATT_HANDLE >> 8,
-              ...new TextEncoder().encode(text),
+              ...value,
             ]),
           );
           this.#ctx.onSerial(`ble tx ${text} to ${to}`);
