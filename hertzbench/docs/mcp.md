@@ -116,6 +116,9 @@ because assertions are checked before the run.
 - **Time.** Every time the tools report (`elapsed_ms`, `at_ms`, `t_ms`, phase bounds) is engine time
   in milliseconds since time zero: the moment every board's netdev connected, as in
   `metrics.json`. Serial lines from before time zero have negative times.
+- **While `starting`** nothing of the run is readable yet: serial lines, problems and metrics show up
+  from `running` on, boot lines included. If start-up fails, `get_status` carries the error, and
+  each ESP32 board's own complaint is in `worker-<node>.stderr.log` in the run's `out_dir`.
 - **Outputs.** By default each run writes to its own directory, `out/<scenario file name>/<run
   id>/`, inside the workspace. Its contents are the same as for `hertzbench run`: `metrics.json`,
   `air.pcap`, `events.jsonl` and `serial-<node>.log`, plus `efuse-<node>.bin` and
