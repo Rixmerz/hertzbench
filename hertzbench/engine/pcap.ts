@@ -1,0 +1,59 @@
+// Classic libpcap writer, Ethernet link type. One record per frame put on the
+// air, stamped with engine time. Losses are not in the capture (pcap has no way
+// to say "dropped"); they are in the event log and metrics.json.
+//
+// ESP-NOW action frames cross the netdev as the fork's pseudo-Ethernet (ADR
+// 0001), so Wireshark shows them as unknown Ethernet until an 802.11 + radiotap
+// converter exists. That is Phase 4.
+
+const GLOBAL_HEADER_BYTES = 24;
+const RECORD_HEADER_BYTES = 16;
+const LINKTYPE_ETHERNET = 1;
+const SNAPLEN = 65535;
+
+export class PcapWriter {
+  readonly #epochMs: number;
+  readonly #chunks: Uint8Array[] = [];
+  #packets = 0;
+
+  /** `epochMs` is the Unix time of engine time 0, so the capture has real-looking timestamps. */
+  constructor(epochMs: number) {
+    this.#epochMs = epochMs;
+    const header = new DataView(new ArrayBuffer(GLOBAL_HEADER_BYTES));
+    header.setUint32(0, 0xa1b2c3d4, true); // magic, microsecond timestamps
+    header.setUint16(4, 2, true);
+    header.setUint16(6, 4, true);
+    header.setInt32(8, 0, true); // timezone offset
+    header.setUint32(12, 0, true); // timestamp accuracy
+    header.setUint32(16, SNAPLEN, true);
+    header.setUint32(20, LINKTYPE_ETHERNET, true);
+    this.#chunks.push(new Uint8Array(header.buffer));
+  }
+
+  get packetCount(): number {
+    return this.#packets;
+  }
+
+  addFrame(tMs: number, frame: Uint8Array): void {
+    const totalUs = Math.round((this.#epochMs + tMs) * 1000);
+    const captured = Math.min(frame.length, SNAPLEN);
+    const header = new DataView(new ArrayBuffer(RECORD_HEADER_BYTES));
+    header.setUint32(0, Math.floor(totalUs / 1_000_000), true);
+    header.setUint32(4, totalUs % 1_000_000, true);
+    header.setUint32(8, captured, true);
+    header.setUint32(12, frame.length, true);
+    this.#chunks.push(new Uint8Array(header.buffer), frame.slice(0, captured));
+    this.#packets++;
+  }
+
+  toBytes(): Uint8Array {
+    const size = this.#chunks.reduce((sum, c) => sum + c.length, 0);
+    const out = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of this.#chunks) {
+      out.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return out;
+  }
+}
