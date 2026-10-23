@@ -1,14 +1,17 @@
 /* The view takes Velxio's design tokens (served from frontend/src/tokens/) and
- * its dark workbench look. The quality scale is ours: Velxio's green, amber
- * and red feedback hues plus the matching system yellow for "fair". The
- * fallbacks keep the page readable if the tokens are not there. */
+ * its dark workbench look, and its light theme when the system asks for one
+ * (app.js sets data-theme). The quality scale is ours: Velxio's green, amber
+ * and red feedback hues plus its gold for "fair", the one yellow the tokens
+ * darken for a light page. Every text color clears 4.5:1 on the surface it
+ * sits on and every line and mark 3:1, in both themes (tests/view_ui_test.ts).
+ * The fallbacks keep the page readable if the tokens are not there. */
 
 :root {
   --hzb-good: var(--color-feedback-success, #30d158);
-  --hzb-fair: #ffd60a;
+  --hzb-fair: var(--color-probe-dc, #ffd60a);
   --hzb-poor: var(--color-feedback-warning, #ff9f0a);
   --hzb-bad: var(--color-feedback-error, #ff453a);
-  --hzb-idle: var(--wb-9, #6e6e6e);
+  --hzb-idle: var(--wb-10, #888888);
   --hzb-accent: var(--color-accent-fg, #4ea8ff);
   --hzb-bg: var(--wb-1, #1a1a1a);
   --hzb-panel: var(--wb-3, #252526);
@@ -16,8 +19,16 @@
   --hzb-border: var(--wb-6, #333333);
   --hzb-text: var(--wb-12, #cccccc);
   --hzb-strong: var(--wb-13, #f0f0f0);
-  --hzb-muted: var(--wb-10, #888888);
+  --hzb-muted: var(--wb-11, #9d9d9d);
+  --hzb-problem: var(--color-probe-error, #ff9999);
+  --hzb-wall: var(--wb-10, #888888);
+  --hzb-grid: rgba(255, 255, 255, 0.05);
   color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --hzb-grid: var(--color-canvas-grid, rgba(23, 32, 48, 0.07));
+  color-scheme: light;
 }
 
 * {
@@ -59,6 +70,8 @@ h2 {
 
 .bar p {
   margin: 0;
+  /* A scenario's name has no spaces to break at. */
+  overflow-wrap: anywhere;
 }
 
 .run {
@@ -67,20 +80,24 @@ h2 {
 
 .state {
   padding-inline: var(--space-4, 8px);
+  border: 1px solid transparent;
   border-radius: var(--radius-sm, 4px);
   background: var(--hzb-row);
+  color: var(--hzb-strong);
   font-weight: 600;
 }
 
+/* The hue is on the tint and the border; the words stay in the strong text
+ * color, which keeps 4.5:1 on both themes where the hue itself does not. */
 .state[data-state="running"] {
   background: var(--color-feedback-success-soft, rgba(48, 209, 88, 0.14));
-  color: var(--hzb-good);
+  border-color: var(--hzb-good);
 }
 
 .state[data-state="failed"],
 .state[data-state="disconnected"] {
   background: var(--color-feedback-error-soft, rgba(255, 69, 58, 0.14));
-  color: var(--hzb-bad);
+  border-color: var(--hzb-bad);
 }
 
 .clock {
@@ -148,7 +165,7 @@ h2 {
 }
 
 .grid-line {
-  stroke: rgba(255, 255, 255, 0.05);
+  stroke: var(--hzb-grid);
   stroke-width: 1;
 }
 
@@ -165,10 +182,9 @@ h2 {
 }
 
 .wall {
-  stroke: var(--wb-11, #9d9d9d);
+  stroke: var(--hzb-wall);
   stroke-width: 6;
   stroke-linecap: round;
-  opacity: 0.6;
 }
 
 .link {
@@ -264,6 +280,7 @@ h2 {
 
 .notice {
   margin: 0;
+  overflow-wrap: anywhere;
   padding: var(--space-3, 6px) var(--space-4, 8px);
   border: 1px solid var(--color-feedback-error-border, rgba(255, 69, 58, 0.32));
   border-radius: var(--radius-sm, 4px);
@@ -410,7 +427,8 @@ h2 {
 .problems {
   margin: 0;
   padding-inline-start: var(--space-6, 16px);
-  color: var(--hzb-bad);
+  color: var(--hzb-problem);
+  overflow-wrap: anywhere;
 }
 
 .problems:empty::after {
