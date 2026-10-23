@@ -14,7 +14,7 @@ import { PRODUCT } from "../brand.ts";
 import { ToolError } from "../mcp/protocol.ts";
 import type { Session } from "../mcp/session.ts";
 import { tools } from "../mcp/tools.ts";
-import { LOSS_WINDOW_MS, sceneLinks, sceneObstacles, timelineSince } from "./scene.ts";
+import { viewState } from "./scene.ts";
 
 export interface ViewOptions {
   /** 0 picks a free port. */
@@ -121,30 +121,12 @@ export function serveView(session: Session, options: ViewOptions): ViewServer {
   }
 
   function view(since: number) {
-    const status = session.status();
-    const run = session.run;
-    if (!run) {
-      return { status, board_images: {}, scene: null, timeline: null };
-    }
-    const events = session.events(run);
-    const now = session.elapsedMs(run);
+    const state = viewState(session, since);
     return {
-      status,
-      board_images: Object.fromEntries(
+      ...state,
+      board_images: state.scene === null ? {} : Object.fromEntries(
         Object.entries(BOARD_IMAGES).map(([kind, name]) => [kind, `/velxio/boards/${name}`]),
       ),
-      scene: {
-        obstacles: sceneObstacles(run.loaded.scenario.environment.obstacles),
-        window_ms: LOSS_WINDOW_MS,
-        links: now === null ? [] : sceneLinks(session.linkBudgets(run), events, now),
-        // ponytail: budgets come from the Wi-Fi medium only; coloring LoRa, nRF24 and BLE
-        // links needs a live budget on the chip-level air first.
-        links_note: run.loaded.scenario.phy === "wifi"
-          ? null
-          : `Link budgets are reported on the Wi-Fi medium only; this run is ${run.loaded.scenario.phy}. ` +
-            "The timeline still shows every packet.",
-      },
-      timeline: timelineSince(events, since),
     };
   }
 

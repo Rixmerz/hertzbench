@@ -9,8 +9,14 @@
 // at least the PHY's capture threshold stronger. Half-duplex is the models'
 // job: a radio that is transmitting is not in a receive state.
 
-import { type Environment, linkBudgetAt, type Position } from "./channel.ts";
-import { chipPacketErrorRate } from "./channel.ts";
+import {
+  chipPacketErrorRate,
+  type ChipSignal,
+  type Environment,
+  type LinkBudget,
+  linkBudgetAt,
+  type Position,
+} from "./channel.ts";
 import type { Clock } from "./clock.ts";
 import type { DropReason, EventLog, FrameKind } from "./events.ts";
 import type { LinkOverride, MediumControl } from "./medium.ts";
@@ -69,6 +75,11 @@ export interface AirNode {
   id: string;
   position: Position;
   antennaGainDbi: number;
+  /**
+   * The signal the node's radio is declared with, for a budget read before it
+   * has transmitted. Its first frame replaces it: firmware is the truth.
+   */
+  signal?: ChipSignal;
 }
 
 export type AirTap = (tMs: number, node: string, frame: AirFrame) => void;
@@ -95,6 +106,18 @@ interface NodeState extends AirNode {
   receiver: AirReceiver;
   /** Signals currently arriving at this node. */
   arriving: Signal[];
+}
+
+function signalOf(frame: AirFrame): ChipSignal {
+  return {
+    frequencyHz: frame.frequencyHz,
+    bandwidthHz: frame.bandwidthHz,
+    noiseFigureDb: frame.noiseFigureDb,
+    txPowerDbm: frame.txPowerDbm,
+    requiredSnrDb: frame.requiredSnrDb,
+    referenceBytes: frame.referenceBytes,
+    rateBps: frame.rateBps,
+  };
 }
 
 export class AirMedium implements MediumControl {
@@ -149,6 +172,34 @@ export class AirMedium implements MediumControl {
     this.#cancels.clear();
   }
 
+  /**
+   * The budget of a directed link now, read against the sender's last frame
+   * or, before its first, its declared signal: the same numbers its next frame
+   * of that kind would get.
+   */
+  budget(from: string, to: string): LinkBudget & { signal: ChipSignal } {
+    const sender = this.#requireNode(from);
+    const signal = sender.signal;
+    if (!signal) {
+      throw new Error(`${from} has not transmitted and declares no signal: no budget yet`);
+    }
+    return { ...this.#budget(sender, this.#requireNode(to), signal), signal };
+  }
+
+  #budget(sender: NodeState, receiver: NodeState, signal: ChipSignal): LinkBudget {
+    return linkBudgetAt(
+      this.#opts.environment,
+      {
+        position: sender.position,
+        txPowerDbm: signal.txPowerDbm,
+        antennaGainDbi: sender.antennaGainDbi,
+      },
+      receiver,
+      signal,
+      this.#shadowingDb(sender.id, receiver.id),
+    );
+  }
+
   /** A radio model started sending `frame`. Its own TxDone is the model's business. */
   transmit(from: string, frame: AirFrame): void {
     const sender = this.#requireNode(from);
@@ -166,20 +217,11 @@ export class AirMedium implements MediumControl {
       radio: frame.params,
     });
     this.#opts.tap?.(now, from, frame);
+    sender.signal = signalOf(frame);
 
     for (const receiver of this.#nodes.values()) {
       if (receiver.id === from) continue;
-      const budget = linkBudgetAt(
-        environment,
-        {
-          position: sender.position,
-          txPowerDbm: frame.txPowerDbm,
-          antennaGainDbi: sender.antennaGainDbi,
-        },
-        receiver,
-        frame,
-        this.#shadowingDb(from, receiver.id),
-      );
+      const budget = this.#budget(sender, receiver, sender.signal);
       receiver.arriving = receiver.arriving.filter((s) => s.endMs > now);
       const hearing = receiver.receiver.hear(frame, from);
       const signal: Signal = {

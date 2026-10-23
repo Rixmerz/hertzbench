@@ -1,9 +1,11 @@
 // What the map and the packet timeline show, computed here on the server from
 // the run's event log and link budgets, so the browser only draws. Quality
-// buckets come from the channel model's own rate table, not from numbers made
-// up for the picture.
+// buckets come from the channel model's own rate table (Wi-Fi) and error curve
+// (LoRa, nRF24, BLE), not from numbers made up for the picture.
 
 import {
+  chipPacketErrorRate,
+  type ChipSignal,
   type EngineEvent,
   type LinkBudget,
   linkStats,
@@ -12,6 +14,7 @@ import {
   type Position,
   WIFI_RATES,
 } from "../engine/mod.ts";
+import type { Session } from "../mcp/session.ts";
 
 /** How a link is drawn. `idle` is a loss bucket only: no frame in the window. */
 export type Quality = "good" | "fair" | "poor" | "bad" | "idle";
@@ -36,6 +39,22 @@ export function signalQuality(snrDb: number): Exclude<Quality, "idle"> {
   return "bad";
 }
 
+/**
+ * A chip-level link (LoRa, nRF24, BLE) by the share of reference-length frames
+ * its SNR alone would lose, on the same buckets as the measured loss: good
+ * under 1%, fair under 10% (10% is the PHY's demodulation floor), poor under
+ * 50%, bad from 50%.
+ */
+export function chipSignalQuality(snrDb: number, signal: ChipSignal): Exclude<Quality, "idle"> {
+  const per = chipPacketErrorRate(
+    snrDb,
+    signal.requiredSnrDb,
+    signal.referenceBytes,
+    signal.referenceBytes,
+  );
+  return lossQuality(per * 100) as Exclude<Quality, "idle">;
+}
+
 /** good under 1% lost, fair under 10%, poor under 50%, bad from 50%; idle with no frame. */
 export function lossQuality(lossPct: number | null): Quality {
   if (lossPct === null) return "idle";
@@ -48,7 +67,8 @@ export function lossQuality(lossPct: number | null): Quality {
 export interface DirectedBudget {
   from: string;
   to: string;
-  budget: LinkBudget;
+  /** On the chip-level air, with the signal it was read against. */
+  budget: LinkBudget & { signal?: ChipSignal };
 }
 
 export interface SceneLink {
@@ -57,8 +77,10 @@ export interface SceneLink {
   distance_m: number;
   rssi_dbm: number;
   snr_db: number;
-  /** The rate the channel model picks at this SNR. */
-  rate_mbps: number;
+  /** Wi-Fi: the rate the channel model picks at this SNR. LoRa, nRF24, BLE: the radio's bit rate. */
+  rate_bps: number;
+  /** The SNR a chip-level PHY needs (10% loss at its reference length); null on Wi-Fi, which picks a rate instead. */
+  required_snr_db: number | null;
   signal: Exclude<Quality, "idle">;
   /** Frames with an outcome on this link in the last LOSS_WINDOW_MS. */
   window_frames: number;
@@ -98,8 +120,11 @@ export function sceneLinks(
       distance_m: round(budget.distanceM),
       rssi_dbm: round(budget.rssiDbm),
       snr_db: round(budget.snrDb),
-      rate_mbps: pickRate(budget.snrDb).mbps,
-      signal: signalQuality(budget.snrDb),
+      rate_bps: budget.signal ? round(budget.signal.rateBps) : pickRate(budget.snrDb).mbps * 1e6,
+      required_snr_db: budget.signal ? round(budget.signal.requiredSnrDb) : null,
+      signal: budget.signal
+        ? chipSignalQuality(budget.snrDb, budget.signal)
+        : signalQuality(budget.snrDb),
       window_frames: stats?.sent ?? 0,
       window_loss_pct: lossPct === null ? null : round(lossPct),
       loss: lossQuality(lossPct),
@@ -217,6 +242,29 @@ function toEntry(event: EngineEvent): TimelineEntry | null {
     case "warning":
       return null;
   }
+}
+
+/**
+ * What the map draws now: the run's status, its links with their live budgets
+ * and recent loss, its walls, and the timeline entries after `since` (-1 for
+ * all). `scene` and `timeline` are null before the first run.
+ */
+export function viewState(session: Session, since: number) {
+  const status = session.status();
+  const run = session.run;
+  if (!run) return { status, scene: null, timeline: null };
+  const events = session.events(run);
+  const now = session.elapsedMs(run);
+  return {
+    status,
+    scene: {
+      phy: run.loaded.scenario.phy,
+      obstacles: sceneObstacles(run.loaded.scenario.environment.obstacles),
+      window_ms: LOSS_WINDOW_MS,
+      links: now === null ? [] : sceneLinks(session.linkBudgets(run), events, now),
+    },
+    timeline: timelineSince(events, since),
+  };
 }
 
 /** Walls as segments in metres, for the map. */

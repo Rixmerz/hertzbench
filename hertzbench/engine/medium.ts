@@ -17,6 +17,7 @@
 // radio sends a late ACK.
 import {
   ACK_AIRTIME_US,
+  type ChipSignal,
   type Environment,
   type LinkBudget,
   linkBudget,
@@ -62,8 +63,11 @@ export interface MediumControl {
   setLinkOverride(from: string, to: string, override: LinkOverride): void;
   startPhase(label: string): void;
   node(id: string): Readonly<{ position: Position }>;
-  /** The link budget between two nodes; only media with a fixed PHY answer it. */
-  budget?(from: string, to: string): LinkBudget;
+  /**
+   * The budget of a directed link now. On the chip-level air it carries the
+   * signal it was read against: the sender's last frame, or its declared radio.
+   */
+  budget(from: string, to: string): LinkBudget & { signal?: ChipSignal };
   close(): void;
 }
 

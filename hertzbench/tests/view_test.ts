@@ -3,8 +3,9 @@
 // `hertzbench mcp --view-port`, each a separate process on a scripted run.
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import type { EngineEvent, LinkBudget } from "../engine/mod.ts";
+import type { ChipSignal, EngineEvent, LinkBudget } from "../engine/mod.ts";
 import {
+  chipSignalQuality,
   lossQuality,
   sceneLinks,
   signalQuality,
@@ -47,6 +48,27 @@ Deno.test("loss quality: under 1%, under 10%, under 50%, from 50%, and idle with
   assertEquals(lossQuality(9.99), "fair");
   assertEquals(lossQuality(10), "poor");
   assertEquals(lossQuality(50), "bad");
+});
+
+// SF7 at 125 kHz: a 10% loss floor at -7.5 dB SNR for 20-byte frames.
+const LORA_SF7: ChipSignal = {
+  frequencyHz: 868.1e6,
+  bandwidthHz: 125e3,
+  noiseFigureDb: 6,
+  txPowerDbm: 14,
+  requiredSnrDb: -7.5,
+  referenceBytes: 20,
+  rateBps: 5468.75,
+};
+
+Deno.test("chip signal quality follows the PHY's error curve: 10% loss at its floor", () => {
+  // The waterfall falls tenfold per 1.5 dB: 3 dB of margin loses 0.1%, 1.5 dB about 1%.
+  assertEquals(chipSignalQuality(-4.5, LORA_SF7), "good");
+  assertEquals(chipSignalQuality(-6, LORA_SF7), "fair");
+  // At the floor itself the curve gives 10% less a rounding error; just below it, more.
+  assertEquals(chipSignalQuality(-7.4, LORA_SF7), "fair");
+  assertEquals(chipSignalQuality(-7.6, LORA_SF7), "poor");
+  assertEquals(chipSignalQuality(-9, LORA_SF7), "bad");
 });
 
 function budget(distanceM: number, rssiDbm: number, snrDb: number): LinkBudget {
@@ -125,7 +147,8 @@ Deno.test("scene links: loss counts only the recent window, overrides follow the
     distance_m: 10,
     rssi_dbm: -60,
     snr_db: 31,
-    rate_mbps: 54,
+    rate_bps: 54e6,
+    required_snr_db: null,
     signal: "good",
     window_frames: 4,
     window_loss_pct: 25,
@@ -133,7 +156,7 @@ Deno.test("scene links: loss counts only the recent window, overrides follow the
     override: null,
   });
   assertEquals(links[1]!.signal, "bad");
-  assertEquals(links[1]!.rate_mbps, 6);
+  assertEquals(links[1]!.rate_bps, 6e6);
   assertEquals(links[1]!.window_frames, 0);
   assertEquals(links[1]!.window_loss_pct, null);
   assertEquals(links[1]!.loss, "idle");
@@ -430,7 +453,22 @@ Deno.test("mcp --view-port: the page draws the agent's run, and a drag shows up 
   }
 });
 
-Deno.test("view: a LoRa run draws without link budgets, and a drag still moves the node", async () => {
+Deno.test("scene links: a chip-level link is judged by its PHY's floor and shows its own bit rate", () => {
+  const [near, far] = sceneLinks(
+    [
+      { from: "n1", to: "gw", budget: { ...budget(300, -110, -4), signal: LORA_SF7 } },
+      { from: "n6", to: "gw", budget: { ...budget(1800, -135, -15), signal: LORA_SF7 } },
+    ],
+    [],
+    1000,
+  );
+  assertEquals(near!.signal, "good");
+  assertEquals(near!.rate_bps, 5468.75);
+  assertEquals(near!.required_snr_db, -7.5);
+  assertEquals(far!.signal, "bad");
+});
+
+Deno.test("view: a LoRa run draws its link budgets, and a drag moves the node and its budget", async () => {
   const dir = await Deno.makeTempDir({ prefix: "hzb-view-lora-" });
   const view = new Spawned(["view", LORA, "--port", "0", "--out", `${dir}/out`]);
   try {
@@ -442,13 +480,24 @@ Deno.test("view: a LoRa run draws without link budgets, and a drag still moves t
         v.timeline.entries.some((e: Json) => e.type === "deliver"),
       "a running LoRa scene with a delivered packet",
     );
-    // Only the Wi-Fi medium reports budgets; the page says so instead of drawing none silently.
-    assertEquals(running.scene.links, []);
-    assertStringIncludes(running.scene.links_note, "Wi-Fi");
+    // Seven stations, every directed pair, each with the LoRa budget the chip model would use.
+    assertEquals(running.scene.phy, "lora");
+    assertEquals(running.scene.links.length, 42);
+    const link = (from: string) =>
+      running.scene.links.find((l: Json) => l.from === from && l.to === "gw");
+    assertEquals(link("node-1").signal, "good");
+    assertEquals(link("node-6").signal, "bad");
+    assertEquals(link("node-1").required_snr_db, -7.5);
+    assertEquals(Math.round(link("node-1").rate_bps), 5469);
 
     const moved = await postMove(url!, { node: "node-6", position: [100, 0] });
     assertEquals(moved.status, 200, moved.body);
-    assertEquals(JSON.parse(moved.body).links, []);
+    const toGw = JSON.parse(moved.body).links.find((l: Json) => l.link === "node-6->gw");
+    assertEquals(toGw.distance_m, 100);
+    assert(
+      toGw.snr_db > link("node-1").snr_db,
+      "at 100 m node-6 hears better than node-1 at 300 m",
+    );
     const after = await getView(url!);
     assertEquals(after.status.nodes.find((n: Json) => n.id === "node-6").position, {
       x: 100,

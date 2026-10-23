@@ -1,7 +1,7 @@
 // The chip-level air on a manual clock: timing, collisions, capture,
 // half-duplex through the receiver's answer, and seeded determinism.
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   type AirFrame,
   AirMedium,
@@ -98,6 +98,36 @@ Deno.test("air: a frame reaches a listening node when its airtime ends, with the
   assertEquals(r.outcomes(), ["a>gw deliver"]);
   const tx = r.log.events.find((e) => e.type === "tx");
   assert(tx?.type === "tx" && tx.airtimeMs === 50 && tx.radio?.sf === 7);
+});
+
+Deno.test("air: a link's budget reads the declared signal, then the sender's last frame", () => {
+  const r = rig({ gw: { x: 100, y: 0 } });
+  const declared = {
+    frequencyHz: 868.1e6,
+    bandwidthHz: 125e3,
+    noiseFigureDb: 6,
+    txPowerDbm: 20,
+    requiredSnrDb: -7.5,
+    referenceBytes: 20,
+    rateBps: 5468.75,
+  };
+  r.air.addNode(
+    { id: "a", position: { x: 0, y: 0 }, antennaGainDbi: 0, signal: declared },
+    new FakeRadio(r.clock),
+  );
+  const before = r.air.budget("a", "gw");
+  assertEquals(before.signal, declared);
+  assert(Math.abs(before.rssiDbm - (20 - 71.21)) < 0.02);
+  // Firmware is the truth: once it transmits at 14 dBm, the budget follows the frame.
+  r.air.transmit("a", frame({ txPowerDbm: 14 }));
+  const after = r.air.budget("a", "gw");
+  assertEquals(after.signal.txPowerDbm, 14);
+  assert(Math.abs(after.rssiDbm - (14 - 71.21)) < 0.02);
+  r.clock.runAll();
+  const delivered = r.log.events.find((e) => e.type === "deliver");
+  assert(delivered?.type === "deliver" && delivered.rssiDbm === after.rssiDbm);
+  // A node that has neither sent nor declared a signal has no budget yet.
+  assertThrows(() => r.air.budget("gw", "a"), Error, "no budget yet");
 });
 
 Deno.test("air: deaf radios log nothing, mismatched ones log phy_mismatch", () => {

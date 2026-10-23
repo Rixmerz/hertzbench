@@ -177,6 +177,19 @@ export interface RfParams {
   noiseFigureDb: number;
 }
 
+/**
+ * A chip-level PHY's signal (LoRa, nRF24, BLE): what a link budget is read
+ * against between frames, and what says how good that budget is.
+ */
+export interface ChipSignal extends RfParams {
+  txPowerDbm: number;
+  /** SNR at which a frame of `referenceBytes` is lost 10% of the time. */
+  requiredSnrDb: number;
+  referenceBytes: number;
+  /** Raw bit rate on the air. */
+  rateBps: number;
+}
+
 export interface Transmitter {
   position: Position;
   txPowerDbm: number;

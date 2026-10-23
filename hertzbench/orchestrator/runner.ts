@@ -14,6 +14,7 @@ import {
   MdnsPublisher,
 } from "../bridge/mod.ts";
 import {
+  type ChipSignal,
   type Clock,
   computeMetrics,
   type EngineEvent,
@@ -93,8 +94,8 @@ export interface LiveRun {
   problems(): readonly string[];
   /** Where a node on the medium is now. */
   position(id: string): Position;
-  /** The current budget of a directed link. */
-  budget(from: string, to: string): LinkBudget;
+  /** The current budget of a directed link; on the chip-level air, with the signal it was read against. */
+  budget(from: string, to: string): LinkBudget & { signal?: ChipSignal };
   moveNode(id: string, to: Position): void;
   /** Applies the rule now; returns the directed pairs it set. */
   setLink(rule: LinkRule): [string, string][];
@@ -305,10 +306,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         events: () => log.events.map((event) => ({ ...event, t: event.t - zeroMs })),
         problems: () => problems,
         position: (id) => medium.node(id).position,
-        budget: (from, to) => {
-          if (!medium.budget) throw new Error("link budgets are only reported on the Wi-Fi medium");
-          return medium.budget(from, to);
-        },
+        budget: (from, to) => medium.budget(from, to),
         moveNode: (id, to) => {
           whileActive();
           medium.moveNode(id, to);

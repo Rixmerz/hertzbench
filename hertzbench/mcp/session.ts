@@ -3,7 +3,13 @@
 // plays. The last run stays readable after it ends, until the next one starts.
 
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { computeMetrics, type EngineEvent, type LinkBudget, type Position } from "../engine/mod.ts";
+import {
+  type ChipSignal,
+  computeMetrics,
+  type EngineEvent,
+  type LinkBudget,
+  type Position,
+} from "../engine/mod.ts";
 import { BoardError, type BoardLauncher } from "../orchestrator/boards/board.ts";
 import { resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { checkFirmwareFiles, type LoadedScenario, loadScenario } from "../orchestrator/load.ts";
@@ -208,13 +214,15 @@ export class Session {
   }
 
   /**
-   * The budget of every directed link between nodes on the medium now; empty
-   * before time zero and on the chip-level air, which reports no budget.
+   * The budget of every directed link between stations on the medium now,
+   * whatever the PHY; empty before time zero.
    */
-  linkBudgets(run: Run): { from: string; to: string; budget: LinkBudget }[] {
+  linkBudgets(
+    run: Run,
+  ): { from: string; to: string; budget: LinkBudget & { signal?: ChipSignal } }[] {
     const live = run.live;
-    if (!live || run.loaded.scenario.phy !== "wifi") return [];
-    const ids = run.loaded.scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
+    if (!live) return [];
+    const ids = mediumIds(run.loaded.scenario);
     return ids.flatMap((from) =>
       ids.filter((to) => to !== from).map((to) => ({ from, to, budget: live.budget(from, to) }))
     );
@@ -320,13 +328,7 @@ export class Session {
     const from = live.position(node);
     if (phase !== null) live.startPhase(phase);
     live.moveNode(node, to);
-    // Only the Wi-Fi medium reports a budget; on the chip-level air the move stands without one.
-    const peers = run.loaded.scenario.phy === "wifi"
-      ? [
-        ...run.loaded.scenario.nodes.filter((n) => !n.internetGateway),
-        ...(bridge ? [{ id: bridge.id }] : []),
-      ].filter((n) => n.id !== node)
-      : [];
+    const peers = mediumIds(run.loaded.scenario).filter((id) => id !== node);
     return {
       node,
       from,
@@ -335,9 +337,9 @@ export class Session {
       phase,
       // What the channel model now gives each link from this node, before any frame.
       links: peers.map((peer) => {
-        const budget = live.budget(node, peer.id);
+        const budget = live.budget(node, peer);
         return {
-          link: `${node}->${peer.id}`,
+          link: `${node}->${peer}`,
           distance_m: round(budget.distanceM),
           rssi_dbm: round(budget.rssiDbm),
           snr_db: round(budget.snrDb),
@@ -404,6 +406,14 @@ export class Session {
     }
     return node;
   }
+}
+
+/** Every station on the medium: the boards but the internet gateway, and the bridge. */
+function mediumIds(scenario: Scenario): string[] {
+  return [
+    ...scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id),
+    ...(scenario.bridge ? [scenario.bridge.id] : []),
+  ];
 }
 
 async function nearestExisting(path: string): Promise<string> {
