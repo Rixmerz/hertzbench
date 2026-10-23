@@ -204,7 +204,8 @@ export function timelineSince(
     const entry = toEntry(event);
     if (entry) entries.push(entry);
   }
-  const shown = entries.length > cap ? entries.slice(-cap) : entries;
+  // Not slice(-cap): with a cap of 0 that is slice(0), every entry.
+  const shown = entries.length > cap ? entries.slice(entries.length - cap) : entries;
   return { entries: shown, next_since: next, truncated: shown.length < entries.length };
 }
 

@@ -73,10 +73,13 @@ export function serveView(session: Session, options: ViewOptions): ViewServer {
     port: options.port,
     onListen: () => {},
   }, async (request) => {
-    const url = new URL(request.url);
+    // Before the URL is parsed: Deno builds it from the Host header, and a Host
+    // that is not a valid authority ("127.0.0.1:7480.evil.example") would make
+    // the parse throw and turn a refusal into a 500.
     if (!allowedHosts().includes(request.headers.get("host") ?? "")) {
       return text(403, "unknown host");
     }
+    const url = new URL(request.url);
     try {
       if (request.method === "GET") return await get(url);
       if (request.method === "POST" && url.pathname === "/api/move") {
