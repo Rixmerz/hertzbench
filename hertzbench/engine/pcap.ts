@@ -1,5 +1,6 @@
 // Classic libpcap writer, one link type per file: Ethernet for Wi-Fi/IP,
-// LoRaTap for LoRa, a private one for nRF24, radiotap for ESP-NOW as 802.11.
+// LoRaTap for LoRa, a private one for nRF24, radiotap for ESP-NOW as 802.11,
+// the LE link layer for BLE.
 // One record per frame put on the air, stamped with engine time. Losses are not
 // in the capture (pcap has no way to say "dropped"); they are in the event log
 // and metrics.json.
@@ -17,6 +18,8 @@ export const LINKTYPE_IEEE802_11_RADIOTAP = 127;
 export const LINKTYPE_LORATAP = 270;
 /** Reserved for private use; hertzbench puts nRF24 frames here (docs/fidelity.md says how). */
 export const LINKTYPE_USER0 = 147;
+/** Bluetooth LE link-layer packets behind a 10-byte pseudo-header (engine/ble.ts, bleLlRecord). */
+export const LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR = 256;
 const SNAPLEN = 65535;
 
 export class PcapWriter {

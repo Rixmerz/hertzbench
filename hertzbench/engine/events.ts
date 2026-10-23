@@ -14,7 +14,8 @@ export type DropReason =
   | "phy_mismatch" // the receiver listened on the channel with other modem settings
   | "not_listening" // the receiver left its receive state before the frame ended
   | "ack_timeout" // an ESP-NOW ACK that would reach its sender after the fork's 10 ms wait
-  | "ack_unmatched"; // an ESP-NOW ACK for no frame its receiver holds that still waits for one
+  | "ack_unmatched" // an ESP-NOW ACK for no frame its receiver holds that still waits for one
+  | "link_lost"; // BLE ACL data still queued when its connection ended
 
 /**
  * How a unicast ESP-NOW frame ended, as the sending fork sees it: its ACK came
@@ -35,6 +36,9 @@ export type FrameKind =
   | "lora"
   | "nrf24"
   | "nrf24-ack"
+  | "ble-adv" // a BLE advertising-channel packet: ADV_IND, SCAN_REQ, SCAN_RSP, CONNECT_IND
+  | "ble-data" // a BLE data-channel packet: data, empty or control PDU of a connection
+  | "ble-acl" // one HCI ACL packet carried host to host; its delay includes waiting and retries
   | "other";
 
 interface Stamped {
@@ -95,6 +99,17 @@ export type EngineEvent =
     outcome: EspNowOutcome;
     /** From the frame going on the air to its ACK reaching the sender; null when no ACK came. */
     roundTripMs: number | null;
+  })
+  | (Stamped & {
+    type: "ble-link";
+    /** The node whose controller saw the change; each side of a connection logs its own. */
+    node: string;
+    peer: string;
+    role: "central" | "peripheral";
+    state: "up" | "down";
+    /** HCI error code of the disconnection (0x08 supervision timeout, 0x13 remote user, ...); null when up. */
+    reason: number | null;
+    intervalMs: number;
   })
   | (Stamped & { type: "warning"; text: string })
   | (Stamped & { type: "phase"; label: string })
