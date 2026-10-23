@@ -19,6 +19,7 @@ import {
 } from "../engine/mod.ts";
 import { EventLog, Medium } from "../engine/mod.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "../orchestrator/boards/espnow-fork-model.ts";
+import { loadScenario, type RunResult, runScenario } from "../orchestrator/mod.ts";
 import { macFor } from "./helpers.ts";
 
 const A = macFor(1);
@@ -311,4 +312,76 @@ Deno.test("espnow: the channel is the one the guest wrote into byte 12", () => {
   const warnings = computeMetrics(log.events, clock.now()).warnings;
   assertEquals(warnings.length, 1, "warned once per node");
   assert(warnings[0]!.includes("channel 6"));
+});
+
+// ── scripted ESP-NOW boards through the adapter, on the wall clock ───────────
+
+async function runYaml(yaml: string) {
+  const dir = await Deno.makeTempDir({ prefix: "hzb-espnow-" });
+  try {
+    await Deno.writeTextFile(`${dir}/s.yaml`, yaml);
+    const loaded = await loadScenario(`${dir}/s.yaml`, `${dir}/out`);
+    return await runScenario(loaded.scenario, { outDir: loaded.outDir, outputs: loaded.outputs });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+const serial = (result: RunResult, node: string) =>
+  result.events.flatMap((e) => (e.type === "serial" && e.node === node ? [e.text] : []));
+
+function espnowPair(extraLatencyMs: number, assertions = "") {
+  return `
+name: espnow-pair
+seed: 5
+duration: 2s
+environment: { shadowing_sigma_db: 0 }
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    firmware: { send: [{ to: b, via: espnow, every: 50ms, count: 20, payload: hello }] }
+  - id: b
+    board: scripted
+    position: [6, 0]
+    firmware: { send: [{ to: broadcast, via: espnow, every: 100ms, count: 5, payload: beacon }] }
+links:
+  - { from: a, to: b, extra_latency_ms: ${extraLatencyMs} }
+${assertions}`;
+}
+
+Deno.test("runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics count both", async () => {
+  const result = await runYaml(espnowPair(
+    0,
+    `assertions:
+  - serial: { node: b, contains: "espnow rx hello:0 from a" }
+  - serial: { node: a, contains: "espnow rx beacon:0 from b" }
+  - metric: { link: "a->b", kind: espnow, sent: { eq: 20 }, acked_pct: { gt: 50 }, ack_rtt_p95_ms: { lt: 10 } }
+`,
+  ));
+  for (const a of result.assertions) assert(a.passed, `${a.description}: ${a.detail}`);
+  assertEquals(result.problems, []);
+  const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
+  assertEquals(link.espnow!.sends, 20);
+  // Wall clock: two timers and loopback TCP per round trip, so not every ACK is
+  // promised; the engine and the sender's model must agree on each one.
+  const ok = serial(result, "a").filter((t) => t === "espnow tx ok to b").length;
+  assertEquals(ok, link.espnow!.acked);
+  assertEquals(serial(result, "b").filter((t) => t.startsWith("espnow rx hello")).length, 20);
+  assertEquals(serial(result, "b").filter((t) => t === "espnow tx ok to broadcast").length, 5);
+  assert(!result.events.some((e) => e.type === "tx" && e.node === "a" && e.kind === "espnow-ack"));
+});
+
+Deno.test("runner: 15 ms more on the a->b leg fails every ESP-NOW send at the sender, and says why", async () => {
+  const result = await runYaml(espnowPair(15));
+  const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
+  assertEquals(link.espnow!.sends, 20);
+  assertEquals(link.espnow!.outcomes, { ack_timeout: 20 });
+  assertEquals(serial(result, "a").filter((t) => t === "espnow tx fail to b").length, 20);
+  assert(
+    !serial(result, "a").some((t) => t.includes("tx ok to b") || t.includes("nothing in flight")),
+  );
+  // The frames themselves arrived: the failure is the ACK window, not the radio.
+  assertEquals(serial(result, "b").filter((t) => t.startsWith("espnow rx hello")).length, 20);
+  assert(result.metrics.warnings.some((w) => w.includes("a->b") && w.includes("10 ms ACK wait")));
 });

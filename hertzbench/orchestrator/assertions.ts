@@ -32,6 +32,10 @@ function metricValue(stats: LinkStats, field: MetricField): number | null {
       return stats.snrDb;
     case "mean_attempts":
       return stats.meanAttempts;
+    case "acked_pct":
+      return stats.espnow?.ackedPct ?? null;
+    case "ack_rtt_p95_ms":
+      return stats.espnow?.roundTripMs?.p95 ?? null;
     default:
       return assertNever(field);
   }
@@ -114,7 +118,10 @@ export function evaluateAssertions(
       for (const check of assertion.checks) {
         const actual = metricValue(link, check.field);
         if (actual === null) {
-          failures.push(`${link.from}->${link.to} ${check.field}: nothing was delivered`);
+          const why = check.field.startsWith("ack")
+            ? "no unicast ESP-NOW frame was acknowledged or resolved"
+            : "nothing was delivered";
+          failures.push(`${link.from}->${link.to} ${check.field}: ${why}`);
         } else if (!compare(actual, check)) {
           failures.push(`${link.from}->${link.to} ${check.field} = ${fmt(actual)}`);
         }

@@ -23,7 +23,9 @@ export class ScenarioError extends Error {
 export type BoardKind = "esp32" | "scripted";
 
 export interface ScriptedSend {
+  /** A node id, or "broadcast" for ESP-NOW. */
   to: string;
+  via: "udp" | "espnow";
   everyMs: number;
   count: number;
   startMs: number;
@@ -77,6 +79,8 @@ export const METRIC_FIELDS = [
   "rssi_dbm",
   "snr_db",
   "mean_attempts",
+  "acked_pct",
+  "ack_rtt_p95_ms",
 ] as const;
 export type MetricField = (typeof METRIC_FIELDS)[number];
 
@@ -325,20 +329,38 @@ function parseRadio(value: unknown, path: string): RadioConfig {
   };
 }
 
+/** The `to` of a scripted ESP-NOW send that goes to every station on the channel. */
+export const BROADCAST_TARGET = "broadcast";
+
 function parseScript(value: unknown, path: string): FirmwareSpec {
   const obj = record(value, path);
   known(obj, ["send"], path);
   const send = list(obj.send ?? [], `${path}.send`).map((raw, i): ScriptedSend => {
     const p = `${path}.send[${i}]`;
     const entry = record(raw, p);
-    known(entry, ["to", "every", "count", "start", "port", "payload"], p);
+    known(entry, ["to", "via", "every", "count", "start", "port", "payload"], p);
+    const via = entry.via === undefined ? "udp" : text(entry.via, `${p}.via`);
+    if (via !== "udp" && via !== "espnow") fail(`${p}.via`, 'expected "udp" or "espnow"');
+    const to = text(entry.to, `${p}.to`);
+    if (to === BROADCAST_TARGET && via !== "espnow") {
+      fail(`${p}.to`, `"${BROADCAST_TARGET}" needs via: espnow`);
+    }
+    if (via === "espnow" && entry.port !== undefined) {
+      fail(`${p}.port`, "ESP-NOW has no ports");
+    }
+    const payload = entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`);
+    // Room for ":<sequence>" inside ESP-NOW's 250-byte payload.
+    if (via === "espnow" && new TextEncoder().encode(payload).length > 200) {
+      fail(`${p}.payload`, "an ESP-NOW payload must stay within 200 bytes");
+    }
     return {
-      to: text(entry.to, `${p}.to`),
+      to,
+      via,
       everyMs: parseDuration(entry.every, `${p}.every`),
       count: int(entry.count, `${p}.count`, 1, 100_000),
       startMs: entry.start === undefined ? 0 : parseDuration(entry.start, `${p}.start`),
       port: int(entry.port ?? 5000, `${p}.port`, 1, 65535),
-      payload: entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`),
+      payload,
     };
   });
   return { kind: "script", send };
@@ -626,6 +648,7 @@ function checkReferences(scenario: Scenario): void {
   scenario.nodes.forEach((node, i) => {
     if (node.firmware.kind !== "script") return;
     node.firmware.send.forEach((send, j) => {
+      if (send.to === BROADCAST_TARGET) return;
       if (!medium.includes(send.to)) {
         fail(
           `nodes[${i}].firmware.send[${j}].to`,
