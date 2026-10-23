@@ -4,6 +4,7 @@
 
 import denoConfig from "../deno.json" with { type: "json" };
 import { PRODUCT } from "../brand.ts";
+import { serveView } from "../view/server.ts";
 import { McpServer, serveLines } from "./protocol.ts";
 import { Session, type SessionOptions } from "./session.ts";
 import { resources, tools } from "./tools.ts";
@@ -27,12 +28,20 @@ export function createServer(session: Session): McpServer {
   });
 }
 
-/** Serve on stdin and stdout until the client closes stdin or a signal arrives; then stop any run. */
-export async function runMcpServer(options: SessionOptions): Promise<void> {
-  const session = new Session({
-    ...options,
-    progress: options.progress ?? ((line) => console.error(`[${PRODUCT.slug}] ${line}`)),
-  });
+/**
+ * Serve on stdin and stdout until the client closes stdin or a signal arrives;
+ * then stop any run. With `viewPort`, the same session is also drawn by the
+ * visual layer on that loopback port, so a person can watch the agent's run.
+ */
+export async function runMcpServer(
+  options: SessionOptions & { viewPort?: number },
+): Promise<void> {
+  const log = (line: string) => console.error(`[${PRODUCT.slug}] ${line}`);
+  const session = new Session({ ...options, progress: options.progress ?? log });
+  const view = options.viewPort === undefined
+    ? null
+    : serveView(session, { port: options.viewPort });
+  if (view) log(`view: ${view.url}`);
   // A signal ends the server the way end of input does, so the run in progress
   // is stopped below and no board is left running.
   const shutdown = new AbortController();
@@ -49,5 +58,6 @@ export async function runMcpServer(options: SessionOptions): Promise<void> {
   } finally {
     for (const signal of signals) Deno.removeSignalListener(signal, onSignal);
     await session.close();
+    await view?.shutdown();
   }
 }
