@@ -109,7 +109,6 @@ export interface RunResult {
   files: string[];
 }
 
-
 export function expandLinkRule(rule: LinkRule, mediumIds: readonly string[]): [string, string][] {
   const pairs: [string, string][] = [];
   for (const from of mediumIds) {

@@ -179,7 +179,8 @@ export function parseDuration(value: unknown, path: string): number {
   return match[2] === "ms" ? amount : match[2] === "s" ? amount * 1000 : amount * 60_000;
 }
 
-function point(value: unknown, path: string): Position {
+/** `[x, y]` or `[x, y, z]` in metres. */
+export function parsePosition(value: unknown, path: string): Position {
   const coords = list(value, path);
   if (coords.length !== 2 && coords.length !== 3) fail(path, "expected [x, y] or [x, y, z]");
   const [x, y, z] = coords.map((c, i) => num(c, `${path}[${i}]`));
@@ -189,7 +190,7 @@ function point(value: unknown, path: string): Position {
 }
 
 function point2(value: unknown, path: string): Point2 {
-  const p = point(value, path);
+  const p = parsePosition(value, path);
   return [p.x, p.y];
 }
 
@@ -287,19 +288,27 @@ const NODE_FIELDS = [
   "internet_gateway",
 ] as const;
 
-const ESP32_BOARDS = new Set(["esp32", "esp32-devkit-v1"]);
+/** The names a scenario may give each board kind. */
+export const BOARD_NAMES: Record<BoardKind, readonly string[]> = {
+  esp32: ["esp32", "esp32-devkit-v1"],
+  scripted: ["scripted"],
+};
 
 function parseBoard(value: unknown, path: string): BoardKind {
   const board = text(value, path);
-  if (ESP32_BOARDS.has(board)) return "esp32";
-  if (board === "scripted") return "scripted";
+  for (const [kind, names] of Object.entries(BOARD_NAMES)) {
+    if (names.includes(board)) return kind as BoardKind;
+  }
   if (/c3|s3/.test(board)) {
     fail(
       path,
       `${board} cannot do Wi-Fi networking in Phase 1: the C3 asserts in eFuse reload when a NIC is attached and the S3 machine models no radio. Use esp32.`,
     );
   }
-  return fail(path, `unknown board ${JSON.stringify(board)} (esp32, esp32-devkit-v1, scripted)`);
+  return fail(
+    path,
+    `unknown board ${JSON.stringify(board)} (${Object.values(BOARD_NAMES).flat().join(", ")})`,
+  );
 }
 
 function parseRadio(value: unknown, path: string): RadioConfig {
@@ -348,14 +357,14 @@ function positionFor(value: unknown, index: number, count: number, path: string)
     if (count > 1) {
       fail(path, "count > 1 needs a grid position: { grid: { origin: [x, y], step: [dx, dy] } }");
     }
-    return point(value, path);
+    return parsePosition(value, path);
   }
   const obj = record(value, path);
   known(obj, ["grid"], path);
   const grid = record(obj.grid, `${path}.grid`);
   known(grid, GRID_FIELDS, `${path}.grid`);
-  const origin = point(grid.origin, `${path}.grid.origin`);
-  const step = point(grid.step, `${path}.grid.step`);
+  const origin = parsePosition(grid.origin, `${path}.grid.origin`);
+  const step = parsePosition(grid.step, `${path}.grid.step`);
   return {
     x: origin.x + index * step.x,
     y: origin.y + index * step.y,
@@ -453,7 +462,7 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
   return nodes;
 }
 
-function parseLinkRule(value: unknown, path: string): LinkRule {
+export function parseLinkRule(value: unknown, path: string): LinkRule {
   const obj = record(value, path);
   known(obj, ["from", "to", "extra_loss_pct", "extra_latency_ms"], path);
   return {
@@ -477,7 +486,7 @@ function parseTimeline(value: unknown): TimelineEvent[] {
         actions.push({
           kind: "move",
           node: text(move.node, `${path}.move.node`),
-          to: point(move.to, `${path}.move.to`),
+          to: parsePosition(move.to, `${path}.move.to`),
         });
       }
       if (obj.link !== undefined) {

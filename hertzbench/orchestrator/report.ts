@@ -13,7 +13,7 @@ const ADAPTER_FIDELITY = {
   meaning: "same firmware binary, frames captured at the netdev (layer 2 and up)",
 } as const;
 
-function linkJson(link: LinkStats) {
+export function linkJson(link: LinkStats) {
   return {
     from: link.from,
     to: link.to,

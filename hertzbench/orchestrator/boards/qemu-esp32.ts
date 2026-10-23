@@ -213,7 +213,8 @@ class Esp32Board implements RunningBoard {
   }
 }
 
-export const ESP32_FIDELITY = "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev)";
+export const ESP32_FIDELITY =
+  "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev)";
 
 /**
  * One launcher per run. Its firmware cache lives as long as the run, so a
