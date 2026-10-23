@@ -10,7 +10,6 @@ import {
   bridgeLines,
   type BridgeReport,
   BridgeStartError,
-  type EndpointPublisher,
   IpBridge,
   MdnsPublisher,
 } from "../bridge/mod.ts";

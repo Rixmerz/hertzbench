@@ -546,7 +546,12 @@ bridge:
     const running = await pollStatus(client, (s) => s.state === "running", "the boards to connect");
     const endpoint = running.bridge.endpoints[0];
     assertEquals([running.bridge.kind, endpoint.node, endpoint.port], ["ip", "web", 80]);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    for (const deadline = Date.now() + 10_000;;) {
+      const web = await client.ok("get_serial", { node: "web" });
+      if (web.lines.some((l: Json) => l.text === "tcp listening on 80 (http)")) break;
+      if (Date.now() > deadline) throw new Error("the web node never opened port 80");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     const response = await fetch(`http://127.0.0.1:${endpoint.hostPort}/hi`);
     assertEquals(await response.text(), "web: GET /hi\n");
 

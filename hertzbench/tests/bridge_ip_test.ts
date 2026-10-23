@@ -108,8 +108,16 @@ Deno.test("bridge ip: HTTP, WebSocket and MQTT reach a scripted node over the me
   const http = endpoints.endpoints.find((e) => e.service === "http");
   const mqtt = endpoints.endpoints.find((e) => e.service === "mqtt");
   assert(http && mqtt && http.hostPort > 0 && mqtt.hostPort > 0);
-  // Let the scripted node take its DHCP lease and open its ports.
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  // Until the scripted node has its lease it has no TCP, and a SYN waits out the 1 s retransmission timer.
+  const listening = () =>
+    control.events().filter((e) =>
+      e.type === "serial" && e.node === "web" && e.text.startsWith("tcp listening on ")
+    ).length;
+  for (const deadline = Date.now() + 10_000; listening() < 2;) {
+    if (Date.now() > deadline) throw new Error("the web node never opened its ports");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assertEquals(await get(http.hostPort, "/warm-up"), "web: GET /warm-up\n");
 
   const [first, nearMs] = await timed(() => get(http.hostPort, "/status"));
   assertEquals(first, "web: GET /status\n");
