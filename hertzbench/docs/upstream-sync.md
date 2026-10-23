@@ -17,7 +17,7 @@ git merge upstream/master   # or cherry-pick specific commits
 
 ## Patches
 
-Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`).
+Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`). Phase 7 (the view) touches **none** either: it serves a few Velxio frontend files read-only, listed below.
 
 | # | File | Commit subject | Upstreamable |
 |---|---|---|---|
@@ -60,3 +60,4 @@ Recorded so a merge that moves them gets noticed:
 - `esp32_worker.py` stdin protocol: one JSON config line, then `{"cmd": "stop"}` to end the run; stdout JSON lines with `uart_tx`, `serial_output`, `system` and `error` events.
 - `espidf_compiler.compile(files, board_fqbn)` returns `binary_content` (base64) and rewrites any `WiFi.begin()` to SSID `Espressif`, open auth, channel 5 (`espidf_compiler.py`, `_QEMU_WIFI_SSID` and `_QEMU_WIFI_CHANNEL`). The example sketch says so explicitly.
 - `QEMU_ESP32_LIB` names the libqemu shared library, as in `esp32_lib_manager.py`.
+- The view (`hertzbench/view/server.ts`) serves these frontend files as they are, at request time: `frontend/src/tokens/{index,colors,spacing,typography,radius,elevation,motion,z-index}.css` (and their `@import` of each other), `frontend/public/fonts/{Inter,JetBrainsMono}.var.woff2` at `/fonts/` (the path `typography.css` names), and `frontend/public/boards/esp32-devkit-v1.svg`. A rename upstream makes that request answer 404 and the page fall back to its own colors and the system font; see [view.md](view.md#what-comes-from-velxio).

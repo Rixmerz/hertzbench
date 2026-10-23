@@ -6,8 +6,8 @@ AGPLv3, based on [Velxio](https://github.com/davidmonterocrespo24/velxio) (which
 emulation).
 
 The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
-a channel model, run headless from a scenario file, and **Phase 2**, an MCP server so an AI agent
-can build, run and steer those scenarios.
+a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
+build, run and steer those scenarios, and **Phase 7**, an optional live view in the browser.
 
 ## Status
 
@@ -19,8 +19,9 @@ can build, run and steer those scenarios.
 | `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                        |
 | ESP32 boards under QEMU                                                                                | **written, not run**: this was built on a host without libqemu or Docker. [docs/e2e-esp32.md](docs/e2e-esp32.md) says how to run it and what to check first |
 | MCP server: `hertzbench mcp`, ten tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run, same reason as above                                |
+| View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards; ESP32 not run, same reason as above                                                   |
 | `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                 |
-| ESP-NOW, LoRa, BLE, nRF24, mobile bridge, canvas                                                       | later phases                                                                                                                                                |
+| ESP-NOW, LoRa, BLE, nRF24, mobile bridge                                                               | later phases                                                                                                                                                |
 
 ## Quick start (no QEMU needed)
 
@@ -42,7 +43,8 @@ libqemu, see [docs/e2e-esp32.md](docs/e2e-esp32.md).
 ```
 hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
 hertzbench validate <scenario.yaml>
-hertzbench mcp [--workspace DIR]
+hertzbench view <scenario.yaml> [--port N] [--out DIR] [--seed N]
+hertzbench mcp [--workspace DIR] [--view-port N]
 ```
 
 To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin directory, usually
@@ -65,6 +67,18 @@ agent can move a node or break a link while it runs and read the effect in the m
 `scenarios/examples/live-3-scripted.yaml` is a two-minute run made for that. Every file the server
 writes stays inside its workspace. Registration without installing, the tool reference and the ESP32
 setup are in [docs/mcp.md](docs/mcp.md).
+
+## Watch it live (optional)
+
+```bash
+deno task hertzbench view scenarios/examples/live-3-scripted.yaml --out /tmp/hzb-view
+```
+
+Open the address it prints (`http://127.0.0.1:7480/`). The page draws the nodes on a map, colors
+each link by its signal or by its loss over the last 2 s, and plots every frame on a timeline. Drag
+a node, or focus it and use the arrow keys, to move it while the run plays: the move goes through
+the same `move_node` tool an agent uses. `hertzbench mcp --view-port 7480` draws the agent's run the
+same way. No build step and no Velxio patch; see [docs/view.md](docs/view.md).
 
 ## How it works
 
@@ -91,9 +105,10 @@ engine/          RF engine: channel model, medium, switch, gateway, metrics, pca
 adapters/        qemu-wifi-l2 (QEMU stream netdev <-> engine), eFuse image builder
 orchestrator/    scenario parser, runner, assertions, report, boards (esp32, scripted)
 mcp/             MCP server: JSON-RPC over stdio, tools, resources, the live run
-cli/             hertzbench run | validate | mcp
+view/            the live view: loopback HTTP server, scene model, static page (no build)
+cli/             hertzbench run | validate | view | mcp
 scenarios/       examples/
-tests/           deno tests (engine, adapter, scenario, orchestrator, CLI, MCP)
+tests/           deno tests (engine, adapter, scenario, orchestrator, CLI, MCP, view)
 docs/            PLAN, discovery, ADRs, fidelity, scenario format, e2e, upstream sync
 brand.ts         the product name, in one place
 ```
@@ -102,7 +117,7 @@ brand.ts         the product name, in one place
 
 ```bash
 cd hertzbench
-deno task test      # unit + adapter + CLI and MCP end to end; no QEMU needed
+deno task test      # unit + adapter + CLI, MCP and view end to end; no QEMU needed
 deno task check     # type check
 deno lint && deno fmt --check
 ```
@@ -117,6 +132,7 @@ the repository root. It touches one Velxio file; see [docs/upstream-sync.md](doc
 - [docs/fidelity.md](docs/fidelity.md): fidelity levels, the channel model, what is not modelled
 - [docs/mcp.md](docs/mcp.md): the MCP server, its tools and resources, registering it with Claude
   Code
+- [docs/view.md](docs/view.md): the live view, what its colors mean, what it reuses from Velxio
 - [docs/e2e-esp32.md](docs/e2e-esp32.md): running the ESP32 example, and what to verify on the first
   run
 - [docs/upstream-sync.md](docs/upstream-sync.md): the Velxio patches and the sync policy

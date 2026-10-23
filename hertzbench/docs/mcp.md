@@ -109,6 +109,12 @@ the same instant, exactly like a timeline entry with `label`, so you can compare
 in `get_metrics`. A metric assertion in the scenario can only name a phase from the timeline,
 because assertions are checked before the run.
 
+### Watching it
+
+Start the server with `--view-port 7480` (add it after `mcp` in the `claude mcp add` line) and open
+`http://127.0.0.1:7480/` to watch the agent's run on a map with a packet timeline. Dragging a node
+there calls `move_node`, so the agent sees the move in `get_status`. See [view.md](view.md).
+
 ## How a run works through the server
 
 - **One run at a time.** `run_scenario` refuses while a run is `starting` or `running`. The last run

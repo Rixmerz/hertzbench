@@ -6,6 +6,8 @@
 # Try: move c to [42, 0] (behind the wall) with phase "behind-wall", then
 # compare the c->a link in the "start" and "behind-wall" phases of get_metrics.
 # Scripted boards are traffic generators, not firmware (fidelity: none).
+#
+# To watch it, or drag c there with the mouse: hertzbench view <this file>.
 name: live-3-scripted
 seed: 7
 duration: 120s
