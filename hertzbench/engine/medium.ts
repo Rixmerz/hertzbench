@@ -43,6 +43,17 @@ export interface LinkOverride {
   extraLatencyMs: number;
 }
 
+/** What the runner and the timeline do to a medium, whichever PHY it carries. */
+export interface MediumControl {
+  moveNode(id: string, position: Position): void;
+  setLinkOverride(from: string, to: string, override: LinkOverride): void;
+  startPhase(label: string): void;
+  node(id: string): Readonly<{ position: Position }>;
+  /** The link budget between two nodes; only media with a fixed PHY answer it. */
+  budget?(from: string, to: string): LinkBudget;
+  close(): void;
+}
+
 export interface MediumOptions {
   seed: number;
   environment: Environment;

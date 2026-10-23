@@ -169,22 +169,41 @@ export interface Endpoint {
   radio: RadioConfig;
 }
 
+/** What the budget needs to know about the signal, whatever the PHY. */
+export interface RfParams {
+  frequencyHz: number;
+  /** Receiver bandwidth: sets the thermal noise floor. */
+  bandwidthHz: number;
+  noiseFigureDb: number;
+}
+
+export interface Transmitter {
+  position: Position;
+  txPowerDbm: number;
+  antennaGainDbi: number;
+}
+
+export interface Receiver {
+  position: Position;
+  antennaGainDbi: number;
+}
+
 /**
  * RSSI = txPower + gains - pathLoss - shadowing - obstacleLoss. `shadowingDb`
  * is the seeded Gaussian sample X-sigma, positive meaning extra loss.
  */
-export function linkBudget(
+export function linkBudgetAt(
   env: Environment,
-  tx: Endpoint,
-  rx: Endpoint,
+  tx: Transmitter,
+  rx: Receiver,
+  rf: RfParams,
   shadowingDb: number,
 ): LinkBudget {
   const distance = distanceM(tx.position, rx.position);
-  const pl = pathLossDb(env, wifiChannelFrequencyHz(tx.radio.channel), distance);
+  const pl = pathLossDb(env, rf.frequencyHz, distance);
   const walls = obstacleLossDb(tx.position, rx.position, env.obstacles);
-  const rssi = tx.radio.txPowerDbm + tx.radio.antennaGainDbi + rx.radio.antennaGainDbi - pl -
-    shadowingDb - walls;
-  const noise = noiseFloorDbm(env.noiseFigureDb);
+  const rssi = tx.txPowerDbm + tx.antennaGainDbi + rx.antennaGainDbi - pl - shadowingDb - walls;
+  const noise = noiseFloorDbm(rf.noiseFigureDb, rf.bandwidthHz);
   return {
     distanceM: distance,
     pathLossDb: pl,
@@ -194,6 +213,26 @@ export function linkBudget(
     noiseFloorDbm: noise,
     snrDb: rssi - noise,
   };
+}
+
+/** The 2.4 GHz Wi-Fi budget: 20 MHz channel, the environment's noise figure. */
+export function linkBudget(
+  env: Environment,
+  tx: Endpoint,
+  rx: Endpoint,
+  shadowingDb: number,
+): LinkBudget {
+  return linkBudgetAt(
+    env,
+    { position: tx.position, ...tx.radio },
+    { position: rx.position, antennaGainDbi: rx.radio.antennaGainDbi },
+    {
+      frequencyHz: wifiChannelFrequencyHz(tx.radio.channel),
+      bandwidthHz: 20e6,
+      noiseFigureDb: env.noiseFigureDb,
+    },
+    shadowingDb,
+  );
 }
 
 // ── PHY: rates, error rate, airtime ─────────────────────────────────────────
@@ -248,6 +287,23 @@ export function packetErrorRate(snrDb: number, rate: WifiRate, bytes: number): n
   const lambda = -Math.log(SURVIVAL_AT_MIN_SNR);
   const exponent = lambda * (bytes / REFERENCE_FRAME_BYTES) *
     10 ** ((rate.minSnrDb - snrDb) / BER_DECADE_DB);
+  return 1 - Math.exp(-exponent);
+}
+
+/**
+ * Frame error rate of a chip-level PHY (LoRa, nRF24) on the same waterfall:
+ * the bit error rate falls tenfold per 1.5 dB of margin over `requiredSnrDb`,
+ * and at that SNR a frame of `referenceBytes` is lost 10% of the time.
+ */
+export function chipPacketErrorRate(
+  snrDb: number,
+  requiredSnrDb: number,
+  bytes: number,
+  referenceBytes: number,
+): number {
+  const lambda = -Math.log(SURVIVAL_AT_MIN_SNR);
+  const exponent = lambda * (Math.max(bytes, 1) / referenceBytes) *
+    10 ** ((requiredSnrDb - snrDb) / BER_DECADE_DB);
   return 1 - Math.exp(-exponent);
 }
 

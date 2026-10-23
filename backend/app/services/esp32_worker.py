@@ -48,6 +48,7 @@ import json
 import os
 import queue
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -428,6 +429,135 @@ def valid_tcp_port(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 65536
 
 
+# ── hertzbench: a radio chip model on the guest's SPI bus (spi-link) ─────────
+# The other side of this protocol is hertzbench/adapters/spi-link/protocol.ts:
+# board -> engine  0x01 mosi (answered by 0x81 miso), 0x02 gpio level;
+# engine -> board  0x81 miso, 0x03 gpio level (the chip drives a board input).
+
+_RADIO_SPI_GPIO_MAX = 48
+
+
+def radio_spi_problem(value: object) -> str | None:
+    """Why a `radio_spi` config entry cannot be used, or None when it can."""
+    def gpio(v: object) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= _RADIO_SPI_GPIO_MAX
+
+    if not isinstance(value, dict):
+        return f'radio_spi must be an object, got {value!r}'
+    if not valid_tcp_port(value.get('port')):
+        return f'radio_spi.port must be a TCP port number, got {value.get("port")!r}'
+    if not gpio(value.get('cs')):
+        return f'radio_spi.cs must be a GPIO number, got {value.get("cs")!r}'
+    watch = value.get('watch', [])
+    if not isinstance(watch, list) or not all(gpio(g) for g in watch):
+        return f'radio_spi.watch must be a list of GPIO numbers, got {watch!r}'
+    return None
+
+
+class RadioSpiLink:
+    """The board side of hertzbench's spi-link: one ordered TCP stream to the
+    engine's model of a radio chip.
+
+    `transfer` blocks the calling (QEMU) thread until the engine answers, so
+    chip-select edges and bytes reach the model in the guest's order. What
+    the chip drives back (DIO0, IRQ) is applied on a thread of its own: the
+    QEMU thread may hold the IO-thread lock while it waits for a MISO, and a
+    reader that took that lock to set a pin would never deliver the MISO.
+    A link that fails reports once through `on_error` and then answers 0xFF,
+    the level of a bus nobody drives, instead of hanging the guest.
+    """
+
+    XFER, PIN, DRIVE, MISO = 0x01, 0x02, 0x03, 0x81
+
+    def __init__(self, port: int, on_drive, on_error, timeout_s: float = 1.0) -> None:
+        self._sock = socket.create_connection(('127.0.0.1', port), timeout=5)
+        self._sock.settimeout(None)
+        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._on_drive = on_drive
+        self._on_error = on_error
+        self._timeout_s = timeout_s
+        self._misos: queue.Queue = queue.Queue()
+        self._drives: queue.Queue = queue.Queue()
+        self._send_lock = threading.Lock()
+        self._failed = threading.Event()
+        self._closing = threading.Event()
+        threading.Thread(target=self._read_loop, daemon=True, name='hzb-spi-link-read').start()
+        threading.Thread(target=self._drive_loop, daemon=True, name='hzb-spi-link-drive').start()
+
+    def pin(self, gpio: int, level: int) -> None:
+        self._send(bytes((self.PIN, gpio & 0xFF, 1 if level else 0)))
+
+    def transfer(self, mosi: int) -> int:
+        if self._failed.is_set():
+            return 0xFF
+        self._send(bytes((self.XFER, mosi & 0xFF)))
+        try:
+            return self._misos.get(timeout=self._timeout_s)
+        except queue.Empty:
+            self._fail(f'no MISO from the engine within {self._timeout_s} s')
+            return 0xFF
+
+    def close(self) -> None:
+        self._closing.set()
+        self._failed.set()
+        self._drives.put(None)
+        try:
+            self._sock.close()
+        except OSError:
+            pass  # already closed by the engine; nothing left to release
+
+    def _send(self, data: bytes) -> None:
+        if self._failed.is_set():
+            return
+        with self._send_lock:
+            try:
+                self._sock.sendall(data)
+            except OSError as e:
+                self._fail(f'send failed: {e}')
+
+    def _read_loop(self) -> None:
+        pending = bytearray()
+        try:
+            while True:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    break
+                pending += chunk
+                while pending:
+                    op = pending[0]
+                    if op == self.MISO and len(pending) >= 2:
+                        self._misos.put(pending[1])
+                        del pending[:2]
+                    elif op == self.DRIVE and len(pending) >= 3:
+                        self._drives.put((pending[1], pending[2] & 1))
+                        del pending[:3]
+                    elif op in (self.MISO, self.DRIVE):
+                        break  # the rest of the message is still in flight
+                    else:
+                        self._fail(f'unknown message 0x{op:02x} from the engine')
+                        return
+        except OSError:
+            pass  # reported below unless the worker is the one closing
+        if not self._closing.is_set():
+            self._fail('the engine closed the connection')
+
+    def _drive_loop(self) -> None:
+        while True:
+            item = self._drives.get()
+            if item is None:
+                return
+            try:
+                self._on_drive(*item)
+            except Exception as e:  # noqa: BLE001 - a pin we cannot set must not end the link
+                self._on_error(f'driving GPIO {item[0]} failed: {e!r}')
+
+    def _fail(self, message: str) -> None:
+        if self._failed.is_set():
+            return
+        self._failed.set()
+        self._on_error(message)
+
+
 def wifi_nic_arg(machine: str, wifi_enabled: bool,
                  hostfwd_port: int = 0, l2_port: int = 0) -> str | None:
     """The `-nic` value for this machine, or None if it gets no radio.
@@ -728,6 +858,11 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     if efuse_image is not None and not (isinstance(efuse_image, str) and os.path.isfile(efuse_image)):
         _log(f'efuse_image must be the path of an existing file, got {efuse_image!r} — exiting')
         os._exit(1)
+    # hertzbench: a radio chip model (LoRa, nRF24) on the SPI bus. Optional.
+    radio_spi = cfg.get('radio_spi')
+    if radio_spi is not None and radio_spi_problem(radio_spi):
+        _log(f'{radio_spi_problem(radio_spi)} — exiting')
+        os._exit(1)
 
     # Adjust GPIO pinmap based on chip: ESP32-C3 has only 22 GPIOs; the
     # ESP32-S3 has 49 (GPIO0..48). The identity pinmap's length is what
@@ -979,6 +1114,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     # came first in this file won the whole bus.
     SPI_IDLE_MISO = 0xFF
     _spi_models: list = []        # responders built from the browser's map
+    _radio_spi: list = [None]     # hertzbench: the spi-link to a radio chip model
+    _radio_spi_resp: list = []    # its responder, outside the browser's map
     _spi_resp:   list = []        # every responder on the bus, in one list
     _spi_sel:    list = []        # the selected ones; recomputed on CS edges
     _spi_any_bus_id = [False]     # does any entry name one controller?
@@ -1741,6 +1878,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             return
         gpio = int(_PINMAP[slot]) if 1 <= slot <= _GPIO_COUNT else slot
         _pin_state[gpio] = value & 1
+        if _radio_spi[0] is not None and gpio in radio_spi['watch']:
+            _radio_spi[0].pin(gpio, value & 1)
         _pads.guest_level(gpio, value)
         # Matrix keypad: the output latch of one of its wires moved.
         _kp = _keypad_by_gpio.get(gpio)
@@ -2361,7 +2500,7 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     def _rebuild_spi_responders() -> None:
         """Every device that can be clocked on this board's SPI bus, in ONE
         list. Called whenever the population changes, never per byte."""
-        resp: list = list(_spi_models)
+        resp: list = list(_spi_models) + _radio_spi_resp
         for rt in _chip_spi_runtimes:
             for h in range(rt.spi_handle_count()):
                 resp.append(_chip_responder(rt, h))
@@ -2480,6 +2619,28 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         _rebuild_spi_responders()
         _recompute_spi_selection()
         _sync_cs_events()
+
+    if radio_spi is not None:
+        # The chip answers while its select pin is low, through the same
+        # arbitration as every other device on the bus.
+        try:
+            _radio_spi[0] = RadioSpiLink(
+                radio_spi['port'],
+                on_drive=lambda gpio, level: _set_pin_locked(gpio, level),
+                on_error=lambda message: _emit({'type': 'error', 'message': f'radio_spi: {message}'}),
+            )
+        except OSError as e:
+            _log(f'radio_spi: cannot reach the engine on port {radio_spi["port"]}: {e} — exiting')
+            os._exit(1)
+        responder = _responder(
+            'hertzbench-radio', None, True,
+            lambda _cs={'kind': 'pin', 'gpio': radio_spi['cs']}: _cs_active(_cs),
+            _radio_spi[0].transfer,
+        )
+        responder['fast'] = _radio_spi[0].transfer
+        _radio_spi_resp.append(responder)
+        _spi_population_changed()
+        _log(f'radio_spi: chip select GPIO {radio_spi["cs"]} on port {radio_spi["port"]}')
 
     def _bus_diag(code: str, bus_id: int, owners: list, message: str) -> None:
         """A diagnostic only this side can see. Reported once per (code, the
@@ -3349,6 +3510,29 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
 
     threading.Thread(target=_ledc_poll_thread, daemon=True, name='ledc-poll').start()
 
+    def _set_pin_locked(pin: int, value: int) -> None:
+        """Drive a board pin from outside the guest: the stdin `set_pin`
+        command, and a radio chip model's DIO0/IRQ line (radio_spi).
+
+        Must hold the QEMU IO-thread lock, same as uart_send below: with
+        attachInterrupt() armed on this pin, the injected edge raises the
+        GPIO interrupt into the guest CPU from THIS thread, and QEMU aborts
+        the whole process on it — `tcg_handle_interrupt: assertion failed:
+        (bql_locked())`, issue #273. A pin without an armed interrupt never
+        walked that path, which is why every ordinary button and sensor
+        worked while a rotary encoder ISR died on the first real edge.
+        """
+        if _lock_iothread:
+            _lock_iothread(b'esp32_worker.py:set_pin', 0)
+        try:
+            lib.qemu_picsimlab_set_pin(pin + 1, value)  # identity pinmap: slot = gpio + 1
+            # A strong drive: it beats a module pull until the guest takes
+            # the pad as an output.
+            _pads.inject(pin, value)
+        finally:
+            if _unlock_iothread:
+                _unlock_iothread()
+
     # ── 8. Command loop (main thread reads original stdin pipe) ───────────────
 
     for raw_line in os.fdopen(_orig_stdin_fd, 'r'):
@@ -3363,29 +3547,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         c = cmd.get('cmd', '')
 
         if c == 'set_pin':
-            # Identity pinmap: slot = gpio_num + 1
             # Keypad wires are driven synchronously by the keypad model; a
             # stale async gpio_in from the browser must not clobber them.
-            #
-            # Must hold the QEMU IO-thread lock, same as uart_send below: with
-            # attachInterrupt() armed on this pin, the injected edge raises the
-            # GPIO interrupt into the guest CPU from THIS thread, and QEMU
-            # aborts the whole process on it — `tcg_handle_interrupt: assertion
-            # failed: (bql_locked())`, issue #273. A pin without an armed
-            # interrupt never walked that path, which is why every ordinary
-            # button and sensor worked while a rotary encoder ISR died on the
-            # first real edge.
             if int(cmd['pin']) not in _keypad_by_gpio:
-                if _lock_iothread:
-                    _lock_iothread(b'esp32_worker.py:set_pin', 0)
-                try:
-                    lib.qemu_picsimlab_set_pin(int(cmd['pin']) + 1, int(cmd['value']))
-                    # A strong drive: it beats a module pull until the guest
-                    # takes the pad as an output.
-                    _pads.inject(int(cmd['pin']), int(cmd['value']))
-                finally:
-                    if _unlock_iothread:
-                        _unlock_iothread()
+                _set_pin_locked(int(cmd['pin']), int(cmd['value']))
 
         elif c == 'chip_net':
             # A chip on another board drove a net this board's chips share.
@@ -3709,6 +3874,8 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
 
         elif c == 'stop':
             _stopped.set()
+            if _radio_spi[0] is not None:
+                _radio_spi[0].close()
             # Request a clean shutdown via the QEMU main-loop thread.
             # qemu_system_shutdown_request() is safe to call from any thread:
             # it posts an event to the main loop which then tears down block

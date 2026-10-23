@@ -339,7 +339,7 @@ Deno.test("mcp: create, validate and run a scenario to the end, outputs inside t
     }
 
     const metrics = await client.ok("get_metrics");
-    assertEquals([metrics.state, metrics.schema, metrics.latency], ["finished", 1, "modelled"]);
+    assertEquals([metrics.state, metrics.schema, metrics.latency], ["finished", 2, "modelled"]);
     const ab = metrics.links.find((l: Json) => l.from === "a" && l.to === "b");
     assertEquals(ab.delivered >= 10, true, JSON.stringify(ab));
     assertEquals(metrics, {
