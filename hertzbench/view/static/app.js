@@ -276,7 +276,7 @@ function render() {
   drawLinks(proj, nodes, scene.links);
   drawNodes(proj, nodes, data.board_images ?? {});
   drawLegend();
-  drawTable(scene.links);
+  drawTable(scene.links, scene.links_note ?? null);
   drawProblems(status);
   drawTimeline(scene.links, status.elapsed_ms);
   const scripted = nodes.some((node) => node.board === "scripted");
@@ -494,7 +494,8 @@ function drawLegend() {
   ui.legend.replaceChildren(...items);
 }
 
-function drawTable(links) {
+function drawTable(links, note) {
+  ui.linksEmpty.textContent = note ?? "No links yet: the boards are still starting.";
   ui.linksEmpty.hidden = links.length > 0;
   const rows = links.map((link) => {
     const row = html("tr");
@@ -539,7 +540,13 @@ function drawTimeline(links, nowMs) {
   const rowHeight = 16;
   const axisHeight = 18;
   const labelWidth = 64;
-  const rows = links.map((link) => `${link.from}>${link.to}`);
+  // Rows for every link, plus any pair the packets name that has no budget (LoRa, nRF24, BLE).
+  const rows = [
+    ...new Set([
+      ...links.map((link) => `${link.from}>${link.to}`),
+      ...view.entries.filter((e) => e.from !== undefined).map((e) => `${e.from}>${e.to}`),
+    ]),
+  ];
   const width = Math.max(ui.timelineBox.getBoundingClientRect().width, 200);
   const height = Math.max(rows.length, 1) * rowHeight + axisHeight;
   const ratio = globalThis.devicePixelRatio || 1;

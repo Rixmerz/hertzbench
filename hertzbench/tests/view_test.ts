@@ -14,6 +14,8 @@ import {
 
 const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
 const LIVE = new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url).pathname;
+const LORA = new URL("../scenarios/examples/lora-gateway-6-scripted.yaml", import.meta.url)
+  .pathname;
 const PERMISSIONS = [
   "--allow-net=127.0.0.1",
   "--allow-read",
@@ -425,5 +427,36 @@ Deno.test("mcp --view-port: the page draws the agent's run, and a drag shows up 
     const code = await server.exited();
     await Deno.remove(workspace, { recursive: true });
     assertEquals(code, 0, server.stderr);
+  }
+});
+
+Deno.test("view: a LoRa run draws without link budgets, and a drag still moves the node", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "hzb-view-lora-" });
+  const view = new Spawned(["view", LORA, "--port", "0", "--out", `${dir}/out`]);
+  try {
+    const [, url] = await view.waitFor(/view: (http:\/\/127\.0\.0\.1:\d+\/)/);
+    const running = await pollView(
+      url!,
+      (v) =>
+        v.status.state === "running" &&
+        v.timeline.entries.some((e: Json) => e.type === "deliver"),
+      "a running LoRa scene with a delivered packet",
+    );
+    // Only the Wi-Fi medium reports budgets; the page says so instead of drawing none silently.
+    assertEquals(running.scene.links, []);
+    assertStringIncludes(running.scene.links_note, "Wi-Fi");
+
+    const moved = await postMove(url!, { node: "node-6", position: [100, 0] });
+    assertEquals(moved.status, 200, moved.body);
+    assertEquals(JSON.parse(moved.body).links, []);
+    const after = await getView(url!);
+    assertEquals(after.status.nodes.find((n: Json) => n.id === "node-6").position, {
+      x: 100,
+      y: 0,
+    });
+  } finally {
+    const { code, stderr } = await view.interrupt();
+    await Deno.remove(dir, { recursive: true });
+    assertEquals(code, 0, stderr);
   }
 });

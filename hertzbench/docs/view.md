@@ -86,6 +86,11 @@ Signal follows the node's position at once. Loss counts frames with an outcome, 
 by up to the 2 s window. A link with a forced loss or latency (`inject_fault`, or the scenario's
 `links:` and timed rules) is marked with `*` on the map and "forced" in the table.
 
+On LoRa, nRF24 and BLE runs there are no link lines and no link table: those PHYs share the
+chip-level air, which reports no live link budget, and the page says so. The nodes, the walls, the
+drag and the timeline work as on Wi-Fi; the timeline gets one row per pair that sent a packet.
+Coloring those links needs a live budget on the air medium first.
+
 Latency is modelled by the channel model, not measured on a guest clock (see
 [fidelity.md](fidelity.md)).
 
@@ -141,7 +146,7 @@ picture (its ring and name stay, and it can still be dragged); nothing else fail
 
 - `tests/view_test.ts`: the quality buckets, the loss window, the timeline, and the real
   `hertzbench view` and `hertzbench mcp --view-port` processes over HTTP, including refused hosts,
-  origins and content types.
+  origins and content types, and a LoRa run with no link budgets.
 - `tests/view_browser_test.ts`: headless Chromium over the DevTools protocol drags a node with real
   mouse events and checks that the engine moved it once, to where it was dropped. It is skipped when
   no Chromium is found; set `HERTZBENCH_CHROMIUM` to point at one.

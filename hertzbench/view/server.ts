@@ -137,6 +137,12 @@ export function serveView(session: Session, options: ViewOptions): ViewServer {
         obstacles: sceneObstacles(run.loaded.scenario.environment.obstacles),
         window_ms: LOSS_WINDOW_MS,
         links: now === null ? [] : sceneLinks(session.linkBudgets(run), events, now),
+        // ponytail: budgets come from the Wi-Fi medium only; coloring LoRa, nRF24 and BLE
+        // links needs a live budget on the chip-level air first.
+        links_note: run.loaded.scenario.phy === "wifi"
+          ? null
+          : `Link budgets are reported on the Wi-Fi medium only; this run is ${run.loaded.scenario.phy}. ` +
+            "The timeline still shows every packet.",
       },
       timeline: timelineSince(events, since),
     };

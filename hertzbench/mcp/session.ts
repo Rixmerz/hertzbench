@@ -207,10 +207,13 @@ export class Session {
     return run.live ? Math.min(run.live.elapsedMs(), run.loaded.scenario.durationMs) : null;
   }
 
-  /** The budget of every directed link between nodes on the medium now; empty before time zero. */
+  /**
+   * The budget of every directed link between nodes on the medium now; empty
+   * before time zero and on the chip-level air, which reports no budget.
+   */
   linkBudgets(run: Run): { from: string; to: string; budget: LinkBudget }[] {
     const live = run.live;
-    if (!live) return [];
+    if (!live || run.loaded.scenario.phy !== "wifi") return [];
     const ids = run.loaded.scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
     return ids.flatMap((from) =>
       ids.filter((to) => to !== from).map((to) => ({ from, to, budget: live.budget(from, to) }))
