@@ -87,9 +87,40 @@ deno task hertzbench run scenarios/examples/espnow-mesh-5-nodes.yaml --out /tmp/
 
 Open `air-80211.pcap` in Wireshark: the action frames should decode as 802.11 action, category vendor specific, Espressif OUI `18:fe:34`. If every frame shows 4 extra bytes at the end, the guest's body carries an FCS; record it in [fidelity.md](fidelity.md#esp-now).
 
+## The BLE example
+
+`scenarios/examples/ble-sensors-3-nodes.yaml` runs three ESP32 sensors (`fw/ble-sensor`, an ESP-IDF project) and a scripted central. The sensors run Bluedroid host-only and send HCI over UART1; the board relays it to the engine's virtual controller through the worker's `uart_tx` and `uart_send` (BLE is F3, ADR 0002). **Never compiled or run**: the host this was written on has neither ESP-IDF nor libqemu.
+
+The firmware is not built by Velxio's compile pipeline: that pipeline builds Arduino sketches from its own template, which keeps the on-chip controller. Build it once with ESP-IDF v5.3 or later (the release that added `esp_bluedroid_attach_hci_driver` and the host-only example this firmware follows; older ones are untested), and merge it into the 4 MB flash image the worker loads, the same layout Velxio's compiler writes (bootloader at 0x1000):
+
+```bash
+. "$IDF_PATH/export.sh"
+cd hertzbench/scenarios/examples/fw/ble-sensor
+idf.py set-target esp32
+idf.py build
+cd build && esptool.py --chip esp32 merge_bin --fill-flash-size 4MB -o ble-sensor-flash.bin @flash_args
+cd ../../../../..   # back to hertzbench/
+deno task hertzbench run scenarios/examples/ble-sensors-3-nodes.yaml --out /tmp/hzb-ble
+```
+
+Until the image exists, `validate` and `run` stop with `firmware not found` and the path to build.
+
+60 s of engine time; at 30 s sensor-3 walks from 40 m to 150 m. Settle these in order, after steps 0 and 1 of "First run" above:
+
+1. **ADR 0002 gate: Bluedroid starts host-only.** `serial-sensor-1.log` shows `ble up addr=02:68:7a:62:01:02`, then `ble advertising`. `hci-sensor-1.btsnoop` (`btmon -r` or Wireshark) shows Reset, Read Local Version, Read BD_ADDR, Read Local Supported Commands and the LE reads answered with status 0. If the log stops before `ble up`:
+   - the report's warnings name every HCI command the controller does not implement (`the host sent HCI command 0x....`). Bluedroid may stall on one it needs; implement it in `adapters/ble-hci/controller.ts` and add it to `SUPPORTED_COMMAND_BITS`;
+   - an empty btsnoop means no byte crossed UART1: check `worker-sensor-1.stderr.log`, and whether the fork's UART1 raises `uart_tx` (only UART0 has been used through the worker so far);
+   - if Bluedroid cannot run without the on-chip controller at all, stop and record it in ADR 0002: the fallback is the Arduino BLE API shim, with its own ADR.
+2. **Advertising and connection.** `serial-gw.log` shows `ble connected to sensor-1 as central` for all three sensors, and `serial-sensor-N.log` shows `ble connected peer=02:68:7a:62:01:01`. In `events.jsonl`, `"type":"ble-link"` events with `"state":"up"`, six of them.
+3. **Notifications.** `serial-gw.log` shows `ble rx "reading:<n>" from sensor-N`, and the sensors' `ble tx reading:<n>` lines match. The report's `ble-acl` rows hold the host-to-host delay, which should sit around the 30 ms interval. If the gateway never receives one, open `hci-gw.btsnoop`: ATT Handle Value Notifications on the handle Bluedroid gave the characteristic value carry the text.
+4. **The walk.** After 30 s, `serial-sensor-3.log` shows `ble disconnected reason=0x08` and the report's BLE connections table shows both sides of sensor-3 down about 1 s after the move.
+5. **Timing.** The relay carries each UART byte as one JSON event on the worker's stdout. If Bluedroid reports HCI command timeouts, that pipe is the suspect; record it in [fidelity.md](fidelity.md#ble).
+
+Open `air.pcap` in Wireshark: it should decode as Bluetooth LE Link Layer, with `ADV_IND`, `CONNECT_IND` and data PDUs carrying L2CAP and ATT. If Wireshark marks every CRC wrong, the CRC bit order in `engine/ble.ts` (`bleCrcBytes`) is the suspect; record it in [fidelity.md](fidelity.md#ble).
+
 ## Without libqemu
 
-`scenarios/examples/udp-3-scripted.yaml` and `espnow-mesh-scripted.yaml` are the same experiments with scripted boards. They need only Deno, take 6 s each and exercise the adapter, engine, metrics, pcaps and assertions, but they say nothing about firmware.
+`scenarios/examples/udp-3-scripted.yaml`, `espnow-mesh-scripted.yaml` and `ble-sensors-scripted.yaml` are the same experiments with scripted boards. They need only Deno, take a few seconds each and exercise the adapter, engine, metrics, pcaps and assertions, but they say nothing about firmware.
 
 ```bash
 cd hertzbench

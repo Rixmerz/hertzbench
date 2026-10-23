@@ -13,11 +13,11 @@ Every protocol and board declares how faithful it is (PLAN.md D10). `hertzbench 
 |---|---|---|
 | `qemu-wifi-l2` adapter, Wi-Fi/IP | **F2** | The board runs the production Wi-Fi driver. Its QEMU network device is a `stream` netdev to the engine. The engine sees Ethernet frames after the guest's embedded access point has converted 802.11 to Ethernet. It does not see the 802.11 exchange. |
 | `qemu-wifi-l2` adapter, ESP-NOW (Phase 4) | **F1** | The same adapter and netdev. The fork's Wi-Fi MAC model turns each 802.11 action frame into pseudo-Ethernet; the engine carries it as bytes and applies the channel model. See [ESP-NOW](#esp-now) below. |
-| `esp32` board | F2 for Wi-Fi/IP, F1 for ESP-NOW | The classic ESP32 only, machine `esp32-picsimlab`. The C3 asserts in eFuse reload when a NIC is attached, and the S3 machine models no radio (`esp32_worker.py`, `wifi_nic_arg`). |
-| `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings, and sends ESP-NOW through a model of the fork's MAC (`orchestrator/boards/espnow-fork-model.ts`). It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
+| `esp32` board | F2 for Wi-Fi/IP, F1 for ESP-NOW, F3 for BLE | The classic ESP32 only, machine `esp32-picsimlab`. The C3 asserts in eFuse reload when a NIC is attached, and the S3 machine models no radio (`esp32_worker.py`, `wifi_nic_arg`). |
+| `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings, and sends ESP-NOW through a model of the fork's MAC (`orchestrator/boards/espnow-fork-model.ts`). On LoRa, nRF24 and BLE it replays the host side of a sketch over the same socket firmware would use (for BLE, a small HCI host in `orchestrator/boards/drivers/hci-host.ts`). It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
 | Internet gateway node (`internet_gateway: true`) | n/a | The one board that keeps SLIRP. See below. |
 | LoRa (SX127x) and nRF24L01+ (Phase 3) | **F1** | The same firmware binary; the radio chip is modelled at its SPI interface (`adapters/lora-sx127x/`, `adapters/nrf24/`, over `adapters/spi-link/`). |
-| BLE | not yet | ADR [0002](adr/0002-ble-approach.md) (F3). |
+| `ble-hci` adapter, BLE (Phase 6) | **F3** | The firmware's own BLE host stack (Bluedroid) runs, built host-only with HCI over UART1; the board relays that UART to a virtual link-layer controller in the engine. The binary differs from production. See [BLE](#ble) below. |
 
 ## Clock and latency
 
@@ -139,3 +139,44 @@ An ACK for which no frame is waiting (already answered, or lost on the way) is d
 - Encryption: the protected flag passes through, nothing is ciphered or checked.
 - The RSSI the firmware reads in its receive callback is the fork's random number (`esp32_wifi.c:327`); the report's RSSI comes from the engine.
 - Long-range mode, per-peer channels and channel changes while running. The engine reads each frame's channel, but the warning only flags a sender that disagrees with the scenario.
+
+## BLE
+
+**Status: built and tested with scripted hosts; never run with firmware.** The host this was written on has no libqemu and no ESP-IDF. The ADR 0002 gate, an ESP-IDF build that boots Bluedroid over the external HCI UART, has not been run; [e2e-esp32.md](e2e-esp32.md#the-ble-example) makes it the first check.
+
+**Level F3.** The QEMU fork maps the Bluetooth block as an unimplemented device and has no HCI (discovery Q4). So the firmware is a simulation-only build: Bluedroid with `CONFIG_BT_CONTROLLER_DISABLED=y`, attached to an H4 driver on UART1 with `esp_bluedroid_attach_hci_driver` (`scenarios/examples/fw/ble-sensor`, adapted from ESP-IDF's `bluedroid_host_only_uart` example). Everything above HCI, GAP, GATT, ATT, L2CAP and the application, is the real stack. Everything below HCI is the engine's.
+
+**The path.** UART1's bytes leave the Velxio worker one `uart_tx` event at a time. The ESP32 board (`orchestrator/boards/qemu-esp32.ts`) gathers them and writes them to the node's `ble-hci` port; the controller's answers go back as `uart_send` commands. Both commands already exist in the worker, so BLE needs **no Velxio patch**. The UART's baud rate and pins do not matter to the emulated UART; hardware flow control is off in the example firmware because nothing drives CTS. Which UART carries HCI is the radio's `hci_uart` (1 or 2; UART0 is refused, it is the console).
+
+**The virtual controller** (`adapters/ble-hci/controller.ts`) answers the HCI commands a host sends to bring LE up and use it (the list is `SUPPORTED_COMMAND_BITS` in `adapters/ble-hci/hci.ts`; its Supported Commands bitmap was checked by decoding it with BlueZ's `btmon`). A command it does not implement is answered "Unknown HCI Command" and named once in the report's warnings: on the first run with real firmware, that list is where to look if the stack stalls during start-up. It reports HCI and LL version 4.2, company 0xFFFF, no optional LE features, 10 LE buffers of 27 bytes. Below HCI it plays the link layer on the 1M PHY (Core v5.x, Vol 6 Part B):
+
+| Modelled | How |
+|---|---|
+| Legacy advertising | `ADV_IND`, `ADV_SCAN_IND`, `ADV_NONCONN_IND` on the channels of the map, 1 ms apart, every interval plus a random 0-10 ms advDelay. After each connectable or scannable packet the advertiser listens for a request for T_IFS (150 us) plus 50 us. |
+| Scanning | Passive and active (`SCAN_REQ`/`SCAN_RSP`), windows rotating over 37, 38, 39, duplicate filtering, the filter accept list. An active scanner requests every advertisement it hears (no backoff). |
+| Connecting | The initiator answers a connectable advertisement from its peer, or from any device on the accept list, with `CONNECT_IND` T_IFS later. It picks the transmit window offset so the anchors of its connections stay 3 ms apart when their intervals are equal. |
+| Connections | Connection events at the interval, channel selection algorithm #1 over all 37 data channels, SN/NESN acknowledgement with retransmission of the unacknowledged packet, the MD bit (more exchanges while there is room before the next anchor), empty PDUs, supervision timeout (0x08), failure to establish within 6 events (0x3E). |
+| Procedures | Connection update from the central (`LL_CONNECTION_UPDATE_IND`, instant 6 events ahead; a peripheral that gets it late drops the link, 0x28), termination (`LL_TERMINATE_IND`), version and feature exchange, `LL_UNKNOWN_RSP` to anything else. |
+| Data | HCI ACL packets of up to 27 bytes go out one per data PDU (longer ones are fragmented). Number Of Completed Packets returns a buffer when the peer acknowledges the packet. |
+| RSSI | The RSSI in an LE Advertising Report and in Read RSSI is the **engine's**, rounded to a dBm. Unlike Wi-Fi, the firmware sees the channel model. |
+
+**The air.** Every packet is a frame on the chip-level air (`engine/air.ts`): log-distance path loss at the channel's frequency, shadowing, walls, a 1 MHz noise floor with the environment's noise figure, and the error rate of `engine/channel.ts` set so a 39-byte PDU is lost 10% of the time at the ESP32's -97 dBm sensitivity. Two packets on the same BLE channel that overlap at a receiver collide unless one is 10 dB stronger (the ESP32 datasheet's co-channel C/I). A radio that is transmitting, or locked onto another packet, does not hear. `extra_loss_pct` drops packets; `extra_latency_ms` and `base_latency_ms` delay every packet, and the link layer's timing is tight: a reply that starts more than 50 us after its window opened is missed, so a few hundred microseconds of extra latency break the link the way distance does.
+
+**Metrics.** Three frame kinds: `ble-adv` (advertising-channel packets), `ble-data` (data-channel packets, empty and control PDUs included) and `ble-acl` (one HCI ACL packet carried from one host to the other). `ble-adv` and `ble-data` delays are time on air plus propagation. A `ble-acl` delivery is logged once, when the peer first receives the packet's last fragment; its delay runs from the moment the host handed it to its controller, so it includes the wait for a connection event and every retransmission, and its `attempts` counts the transmissions. A `ble-acl` packet still queued when its connection ends is dropped as `link_lost`. While a connection holds, the link layer retransmits until a packet gets through, so ACL loss is zero and the cost of a bad link shows in the latency. `events.jsonl` has a `ble-link` event each time a side's controller sees a connection come up or go down, with the HCI reason; the report lists them.
+
+**Captures.** `air.pcap` uses `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR` (256): each packet as on the air without its preamble (access address, PDU, CRC) behind a 10-byte header that holds the RF channel and the transmit power. The CRC is computed with the Core spec's LFSR and the record's flags do not claim it was checked, so Wireshark checks it itself; the layout is pinned by tests and the file has not been opened in Wireshark on this host. `hci-<node>.btsnoop` holds every HCI packet between a node's host and its controller (btsnoop, datalink 1002); BlueZ's `btmon -r` decodes them, and a CLI test does.
+
+**Addresses.** A node's public device address is its station MAC, `02:68:7a:62:01:NN`, NN being its place in the scenario. Read BD_ADDR returns it; firmware that connects to a peer by address can compute it.
+
+**Clock.** BLE runs on the paced clock of the chip radios: each link-layer step happens at its modelled instant, in order, paced to real time. HCI is not timing-critical, but on an ESP32 board it rides the worker's stdout and stdin pipes, so a command's answer reaches the firmware later than on silicon.
+
+**Not modelled.**
+
+- Encryption and pairing: no LE Start Encryption, no LTK request, and the LE features say so. A GATT server that requires an encrypted link refuses the access, and SMP pairing does not complete.
+- Directed advertising (refused with 0x11), extended and periodic advertising, the 2M and Coded PHYs, the data length extension (PDUs carry at most 27 bytes), privacy and resolvable private addresses (the identity address is used, with a warning), channel map updates, LE ping.
+- Peripheral latency: a peripheral listens at every connection event. The connection parameters request procedure: a peripheral's host gets "Unsupported Remote Feature" from LE Connection Update and must use the L2CAP request instead, which works because it is ordinary ACL data.
+- Sleep clock accuracy and window widening: both sides keep exact time; every receive window is 50 us wide. A controller's connection events that would overlap are skipped, not rescheduled.
+- Event masks and controller-to-host flow control are accepted and not enforced: every event is sent.
+- Interference between BLE and Wi-Fi: a scenario runs one PHY.
+
+**Not known without running the firmware.** Whether Bluedroid host-only starts against this controller (the ADR 0002 gate); which vendor-specific commands it sends first (each is listed as a warning); and whether the fork's UART1 carries bytes both ways through `uart_tx` and `uart_send` (the worker relays any UART number, but only UART0 has been used).

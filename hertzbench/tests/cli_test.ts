@@ -162,6 +162,18 @@ Deno.test("validate: accepts the examples and the firmware they name", async () 
   }
 });
 
+Deno.test("validate: accepts the scripted BLE example, and names the firmware the ESP32 one needs built", async () => {
+  const scripted = await hertzbench(["validate", `${EXAMPLES}ble-sensors-scripted.yaml`]);
+  assertEquals(scripted.code, 0, scripted.stdout + scripted.stderr);
+  assertStringIncludes(scripted.stdout, "ok (4 nodes");
+  const esp32 = await hertzbench(["validate", `${EXAMPLES}ble-sensors-3-nodes.yaml`]);
+  // The scenario itself is valid: the only complaint is the image docs/e2e-esp32.md says to build.
+  assertEquals(esp32.code, 2, esp32.stdout + esp32.stderr);
+  assertStringIncludes(esp32.stderr, "firmware not found");
+  assertStringIncludes(esp32.stderr, "fw/ble-sensor/build/ble-sensor-flash.bin");
+  assertEquals(esp32.stderr.split("does not exist").length - 1, 3, esp32.stderr);
+});
+
 Deno.test("validate: accepts the LoRa examples, 1 gateway and 6 nodes each", async () => {
   for (const file of ["lora-gateway-6-nodes.yaml", "lora-gateway-6-scripted.yaml"]) {
     const run = await hertzbench(["validate", `${EXAMPLES}${file}`]);

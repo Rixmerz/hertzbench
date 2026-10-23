@@ -3,7 +3,16 @@
 // engine logs (frames, connections, host-to-host ACL delivery).
 
 import { assert, assertAlmostEquals, assertEquals, assertExists } from "@std/assert";
-import { BleController, isBleFrame, OP, STATUS } from "../adapters/ble-hci/mod.ts";
+import {
+  BleController,
+  BtsnoopWriter,
+  encodeHci,
+  isBleFrame,
+  OP,
+  STATUS,
+  SUPPORTED_COMMAND_BITS,
+  supportedCommands,
+} from "../adapters/ble-hci/mod.ts";
 import {
   AirMedium,
   bleAirtimeUs,
@@ -361,4 +370,54 @@ Deno.test("ble controller: frames on the air are BLE frames with the PHY's airti
   };
   assert(isBleFrame(frame));
   assert(!isBleFrame({ ...frame, kind: "lora" }));
+});
+
+Deno.test({
+  name:
+    "ble hci: BlueZ's btmon reads the Supported Commands bitmap back as the commands the controller answers",
+  ignore: !(await new Deno.Command("btmon", { args: ["--version"] }).output().then(() =>
+    true, () =>
+    false)),
+  fn: async () => {
+    const snoop = new BtsnoopWriter(0);
+    snoop.add(
+      0,
+      "host-to-controller",
+      encodeHci({ type: "command", opcode: OP.readLocalCommands, params: new Uint8Array() }),
+    );
+    snoop.add(
+      1,
+      "controller-to-host",
+      encodeHci({
+        type: "event",
+        code: 0x0e,
+        params: Uint8Array.from([
+          1,
+          OP.readLocalCommands & 0xff,
+          OP.readLocalCommands >> 8,
+          0,
+          ...supportedCommands(),
+        ]),
+      }),
+    );
+    const file = await Deno.makeTempFile({ suffix: ".btsnoop" });
+    try {
+      await Deno.writeFile(file, snoop.toBytes());
+      const out = new TextDecoder().decode(
+        (await new Deno.Command("btmon", { args: ["-r", file] }).output()).stdout,
+      );
+      assert(out.includes(`Commands: ${SUPPORTED_COMMAND_BITS.length} entries`), out);
+      for (
+        const name of [
+          "Reset (Octet 5 - Bit 7)",
+          "LE Create Connection (Octet 26 - Bit 4)",
+          "LE Read Supported States (Octet 28 - Bit 3)",
+        ]
+      ) {
+        assert(out.includes(name), `${name} missing from:\n${out}`);
+      }
+    } finally {
+      await Deno.remove(file);
+    }
+  },
 });

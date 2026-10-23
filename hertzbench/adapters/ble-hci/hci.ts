@@ -104,7 +104,7 @@ export const STATUS = {
  * The Supported_Commands bitmap (Vol 4 Part E §6.27): octet and bit of each
  * command this controller answers. Read Local Supported Commands itself has
  * no bit. A host reads this to decide what it may send, so it must list
- * exactly what the controller implements; tests/ble_hci_test.ts has btmon
+ * exactly what the controller implements; tests/ble_test.ts has btmon
  * decode it back to command names.
  */
 export const SUPPORTED_COMMAND_BITS: ReadonlyArray<readonly [octet: number, bit: number]> = [
