@@ -43,7 +43,7 @@ hertzbench validate <scenario.yaml>
 ```
 
 `hzb` is the short alias. Exit status: 0 passed, 1 an assertion failed, 2 invalid scenario or a host
-that cannot run it.
+that cannot run it, 130 interrupted (boards are stopped first).
 
 ## How it works
 
