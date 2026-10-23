@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import {
   buildArp,
   computeMetrics,
@@ -222,6 +222,29 @@ Deno.test("link override: interference lowers that link's SNR and costs it frame
   assert(spread(steady) < 5, `without jitter: ${spread(steady)} ms`);
   assert(spread(jittery) > 20, `with up to 40 ms of jitter: ${spread(jittery)} ms`);
   assert(Math.max(...jittery) < Math.max(...steady) + 40);
+});
+
+Deno.test("live channel and radio: sigma rescales each pair's draw, power moves RSSI, a channel change deafens", () => {
+  const rig = makeRig({ positions: { a: { x: 0, y: 0 }, b: { x: 20, y: 0 } } });
+  const before = rig.medium.budget("a", "b");
+  assert(before.shadowingDb !== 0, "indoor_office draws shadowing");
+  rig.medium.setEnvironment({ shadowingSigmaDb: 8, pathLossExponent: 3.5 });
+  const after = rig.medium.budget("a", "b");
+  // indoor_office's sigma is 4 dB: the same draw, twice as large.
+  assertAlmostEquals(after.shadowingDb, before.shadowingDb * 2, 1e-9);
+  assert(after.pathLossDb > before.pathLossDb);
+
+  rig.medium.setRadio("a", { txPowerDbm: 5 });
+  assertAlmostEquals(rig.medium.budget("a", "b").rssiDbm, after.rssiDbm - 10, 1e-9);
+  rig.medium.setRadio("b", { channel: 11 });
+  rig.medium.transmit("a", udpFrame(rig, "a", "b"));
+  rig.clock.runAll();
+  const drop = rig.log.events.find((e) => e.type === "drop");
+  assert(drop?.type === "drop" && drop.reason === "channel_mismatch");
+  assertEquals(
+    rig.log.events.filter((e) => e.type === "channel" || e.type === "radio").map((e) => e.type),
+    ["channel", "radio", "radio"],
+  );
 });
 
 Deno.test("gateway: DHCP and ARP are answered to the asker only, outside the loss model", () => {

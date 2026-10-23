@@ -1,7 +1,7 @@
 // The chip-level air on a manual clock: timing, collisions, capture,
 // half-duplex through the receiver's answer, and seeded determinism.
 
-import { assert, assertEquals, assertThrows } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import {
   type AirFrame,
   AirMedium,
@@ -242,6 +242,18 @@ Deno.test("air: interference lowers the link's SNR in its budget and its frames;
   assertEquals(toB.length, 10);
   assert(toB.every((d) => d >= 50 && d < 80.01), JSON.stringify(toB));
   assert(Math.max(...toB) - Math.min(...toB) > 10, JSON.stringify(toB));
+});
+
+Deno.test("air: live antenna gain moves the budget; channel and power stay the chip's", () => {
+  const r = rig({ a: { x: 0, y: 0 }, gw: { x: 100, y: 0 } });
+  r.air.transmit("a", frame());
+  r.clock.runAll();
+  const before = r.air.budget("a", "gw").rssiDbm;
+  r.air.setRadio("gw", { antennaGainDbi: 6 });
+  assertAlmostEquals(r.air.budget("a", "gw").rssiDbm, before + 6, 1e-9);
+  assertThrows(() => r.air.setRadio("a", { txPowerDbm: 20 }), Error, "only antennaGainDbi");
+  r.air.setEnvironment({ pathLossExponent: 3 });
+  assert(r.air.budget("a", "gw").rssiDbm < before);
 });
 
 Deno.test("air: same seed, same outcomes at a marginal SNR; another seed differs", () => {

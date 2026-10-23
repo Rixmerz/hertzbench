@@ -144,7 +144,8 @@ export function sceneLinks(
 
 /**
  * One mark on the packet timeline. Serial lines, raw transmissions, ESP-NOW
- * round trips, BLE link changes and warnings are left out.
+ * round trips, BLE link changes, channel and radio changes and warnings are
+ * left out.
  */
 export type TimelineEntry =
   | {
@@ -252,6 +253,8 @@ function toEntry(event: EngineEvent): TimelineEntry | null {
     case "serial":
     case "espnow-send":
     case "ble-link":
+    case "channel":
+    case "radio":
     case "warning":
       return null;
   }

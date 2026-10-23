@@ -27,6 +27,9 @@ const TOOLS = [
   "remove_node",
   "run_scenario",
   "send_serial",
+  "set_channel",
+  "set_radio",
+  "start_phase",
   "stop",
   "validate_scenario",
 ];

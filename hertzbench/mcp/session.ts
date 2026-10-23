@@ -4,11 +4,13 @@
 
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import {
+  type ChannelChanges,
   type ChipSignal,
   computeMetrics,
   type EngineEvent,
   type LinkBudget,
   type Position,
+  type RadioConfig,
 } from "../engine/mod.ts";
 import { BoardError, type BoardLauncher } from "../orchestrator/boards/board.ts";
 import { resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
@@ -365,6 +367,66 @@ export class Session {
         };
       }),
     };
+  }
+
+  /** Change channel-model parameters of the run in progress, for every later frame. */
+  setChannel(changes: ChannelChanges, phase: string | null) {
+    const run = this.#underway("set_channel");
+    if (run.loaded.scenario.phy !== "wifi" && changes.noiseFigureDb !== undefined) {
+      throw new ToolError(
+        `noise_figure_db is the Wi-Fi receiver's; on this ${run.loaded.scenario.phy} run each ` +
+          "chip's own receiver noise figure applies",
+      );
+    }
+    const live = run.live!;
+    if (phase !== null) live.startPhase(phase);
+    live.setEnvironment(changes);
+    return { changes, at_ms: round(live.elapsedMs()), phase };
+  }
+
+  /**
+   * Change a station's radio, as the medium models it, in the run in
+   * progress. Returns the budgets from that station afterwards.
+   */
+  setRadio(node: string, changes: Partial<RadioConfig>, phase: string | null) {
+    const run = this.#underway("set_radio");
+    const { scenario } = run.loaded;
+    if (scenario.bridge?.id !== node && this.#node(scenario, node).internetGateway) {
+      throw new ToolError(`${node} is the internet gateway: it is not on the medium`);
+    }
+    if (scenario.phy !== "wifi") {
+      const chipSet = Object.keys(changes).filter((key) => key !== "antennaGainDbi");
+      if (chipSet.length > 0) {
+        throw new ToolError(
+          `on a ${scenario.phy} run only antenna_gain_dbi can change: the chip's channel and ` +
+            "transmit power are in its registers, where the firmware put them",
+        );
+      }
+    }
+    const live = run.live!;
+    if (phase !== null) live.startPhase(phase);
+    live.setRadio(node, changes);
+    return {
+      node,
+      changes,
+      at_ms: round(live.elapsedMs()),
+      phase,
+      links: mediumIds(scenario).filter((id) => id !== node).map((peer) => {
+        const budget = live.budget(node, peer);
+        return {
+          link: `${node}->${peer}`,
+          rssi_dbm: round(budget.rssiDbm),
+          snr_db: round(budget.snrDb),
+        };
+      }),
+    };
+  }
+
+  /** Start a metrics phase now, without changing anything. */
+  startPhase(label: string) {
+    const run = this.#underway("start_phase");
+    run.live!.startPhase(label);
+    return { phase: label, at_ms: round(run.live!.elapsedMs()) };
   }
 
   fault(rule: LinkRule, phase: string | null) {

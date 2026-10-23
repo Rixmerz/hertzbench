@@ -16,10 +16,11 @@ import {
   type LinkBudget,
   linkBudgetAt,
   type Position,
+  type RadioConfig,
   withInterference,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
-import type { DropReason, EventLog, FrameKind } from "./events.ts";
+import type { ChannelChanges, DropReason, EventLog, FrameKind } from "./events.ts";
 import type { LinkOverride, MediumControl } from "./medium.ts";
 import { substream } from "./rng.ts";
 import { SPEED_OF_LIGHT_M_S } from "./channel.ts";
@@ -128,9 +129,11 @@ export class AirMedium implements MediumControl {
   readonly #ordinals = new Map<string, number>();
   readonly #shadowing = new Map<string, number>();
   readonly #cancels = new Set<() => void>();
+  #environment: Environment;
 
   constructor(opts: AirMediumOptions) {
     this.#opts = opts;
+    this.#environment = opts.environment;
   }
 
   addNode(node: AirNode, receiver: AirReceiver): void {
@@ -164,6 +167,26 @@ export class AirMedium implements MediumControl {
     });
   }
 
+  /** Change channel-model parameters now; every later frame and budget uses them. */
+  setEnvironment(changes: ChannelChanges): void {
+    this.#environment = { ...this.#environment, ...changes };
+    this.#opts.log.append({ type: "channel", t: this.#opts.clock.now(), changes });
+  }
+
+  /**
+   * Only the antenna gain belongs to the air: a chip's channel and transmit
+   * power are in its registers, where the firmware put them.
+   */
+  setRadio(id: string, changes: Partial<RadioConfig>): void {
+    const node = this.#requireNode(id);
+    const refused = Object.keys(changes).filter((key) => key !== "antennaGainDbi");
+    if (refused.length > 0) {
+      throw new Error(`the chip-level air sets only antennaGainDbi, not ${refused.join(", ")}`);
+    }
+    if (changes.antennaGainDbi !== undefined) node.antennaGainDbi = changes.antennaGainDbi;
+    this.#opts.log.append({ type: "radio", t: this.#opts.clock.now(), node: id, changes });
+  }
+
   startPhase(label: string): void {
     this.#opts.log.append({ type: "phase", t: this.#opts.clock.now(), label });
   }
@@ -191,7 +214,7 @@ export class AirMedium implements MediumControl {
     const interferenceDb = this.#overrides.get(`${sender.id}>${receiver.id}`)?.interferenceDb ?? 0;
     return withInterference(
       linkBudgetAt(
-        this.#opts.environment,
+        this.#environment,
         {
           position: sender.position,
           txPowerDbm: signal.txPowerDbm,
@@ -208,7 +231,8 @@ export class AirMedium implements MediumControl {
   /** A radio model started sending `frame`. Its own TxDone is the model's business. */
   transmit(from: string, frame: AirFrame): void {
     const sender = this.#requireNode(from);
-    const { clock, log, environment } = this.#opts;
+    const { clock, log } = this.#opts;
+    const environment = this.#environment;
     const now = clock.now();
     log.append({
       type: "tx",
@@ -319,11 +343,11 @@ export class AirMedium implements MediumControl {
     const key = a < b ? `${a}|${b}` : `${b}|${a}`;
     let value = this.#shadowing.get(key);
     if (value === undefined) {
-      value = this.#opts.environment.shadowingSigmaDb *
-        substream(this.#opts.seed, `shadow:${key}`).gaussian();
+      value = substream(this.#opts.seed, `shadow:${key}`).gaussian();
       this.#shadowing.set(key, value);
     }
-    return value;
+    // The draw is kept unscaled, so a sigma changed mid-run applies to every pair at once.
+    return this.#environment.shadowingSigmaDb * value;
   }
 
   #requireNode(id: string): NodeState {

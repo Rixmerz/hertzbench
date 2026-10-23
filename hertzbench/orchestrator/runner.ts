@@ -14,6 +14,7 @@ import {
   MdnsPublisher,
 } from "../bridge/mod.ts";
 import {
+  type ChannelChanges,
   type ChipSignal,
   type Clock,
   computeMetrics,
@@ -28,6 +29,7 @@ import {
   PacedClock,
   PcapWriter,
   type Position,
+  type RadioConfig,
   substream,
   VirtualGateway,
   WallClock,
@@ -97,6 +99,10 @@ export interface LiveRun {
   /** The current budget of a directed link; on the chip-level air, with the signal it was read against. */
   budget(from: string, to: string): LinkBudget & { signal?: ChipSignal };
   moveNode(id: string, to: Position): void;
+  /** Channel-model parameters, changed now for every later frame and budget. */
+  setEnvironment(changes: ChannelChanges): void;
+  /** A station's radio as the medium models it; the chip-level air takes only the antenna gain. */
+  setRadio(id: string, changes: Partial<RadioConfig>): void;
   /** Applies the rule now; returns the directed pairs it set. */
   setLink(rule: LinkRule): [string, string][];
   startPhase(label: string): void;
@@ -323,6 +329,14 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         moveNode: (id, to) => {
           whileActive();
           medium.moveNode(id, to);
+        },
+        setEnvironment: (changes) => {
+          whileActive();
+          medium.setEnvironment(changes);
+        },
+        setRadio: (id, changes) => {
+          whileActive();
+          medium.setRadio(id, changes);
         },
         setLink: (rule) => {
           whileActive();

@@ -13,6 +13,8 @@ import { CAPTURE_KINDS, type CaptureKind } from "../orchestrator/runner.ts";
 import { EVENT_TYPES } from "../engine/mod.ts";
 import {
   BOARD_NAMES,
+  CHANNEL_FIELDS,
+  parseChannelChanges,
   parseLinkRule,
   parsePosition,
   parseScenario,
@@ -50,6 +52,15 @@ function optionalInt(args: Args, key: string, min: number, max: number): number 
   if (value === undefined) return null;
   if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
     throw new ToolError(`${key} must be an integer from ${min} to ${max}`);
+  }
+  return value;
+}
+
+function optionalNumber(args: Args, key: string, min: number, max: number): number | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new ToolError(`${key} must be a number from ${min} to ${max}`);
   }
   return value;
 }
@@ -577,6 +588,94 @@ export function tools(session: Session): ToolDefinition[] {
           }, "inject_fault");
           return session.fault(rule, optionalText(args, "phase"));
         }),
+    },
+    {
+      name: "set_channel",
+      description:
+        "Change the channel model of the run in progress, now, for every later frame and link budget: path_loss_exponent, shadowing_sigma_db (scales each pair's seeded draw), noise_figure_db (Wi-Fi receivers; chip PHYs use their own), base_latency_ms, and obstacles (replaces every wall; scenario format: [{ polygon: [[x, y], ...], attenuation_db }]). Same units and ranges as the scenario's environment block. Logged as a channel event.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path_loss_exponent: { type: "number", minimum: 1, maximum: 8 },
+          shadowing_sigma_db: { type: "number", minimum: 0, maximum: 30 },
+          noise_figure_db: { type: "number", minimum: 0, maximum: 30 },
+          base_latency_ms: { type: "number", minimum: 0, maximum: 10000 },
+          obstacles: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                polygon: { type: "array", items: { type: "array", items: { type: "number" } } },
+                attenuation_db: { type: "number", minimum: 0 },
+              },
+              required: ["polygon", "attenuation_db"],
+            },
+          },
+          phase: PHASE_SCHEMA,
+        },
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, [...CHANNEL_FIELDS, "phase"]);
+          const { phase: _phase, ...fields } = args;
+          if (Object.keys(fields).length === 0) {
+            throw new ToolError(`nothing to change: give any of ${CHANNEL_FIELDS.join(", ")}`);
+          }
+          const changes = parseChannelChanges(fields, "set_channel");
+          return session.setChannel(changes, optionalText(args, "phase"));
+        }),
+    },
+    {
+      name: "set_radio",
+      description:
+        "Change a station's radio as the medium models it, in the run in progress, now. Wi-Fi: channel (the one the medium hears it on), tx_power_dbm, antenna_gain_dbi. LoRa, nRF24 and BLE: antenna_gain_dbi only, since the chip's channel and power are in its registers, where the firmware put them. The firmware is not told. Returns the new RSSI and SNR from that station to each other one.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node: { type: "string" },
+          channel: { type: "integer", minimum: 1, maximum: 14 },
+          tx_power_dbm: { type: "number", minimum: -20, maximum: 30 },
+          antenna_gain_dbi: { type: "number", minimum: -20, maximum: 30 },
+          phase: PHASE_SCHEMA,
+        },
+        required: ["node"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["node", "channel", "tx_power_dbm", "antenna_gain_dbi", "phase"]);
+          const node = requiredText(args, "node");
+          const channel = optionalInt(args, "channel", 1, 14);
+          const txPowerDbm = optionalNumber(args, "tx_power_dbm", -20, 30);
+          const antennaGainDbi = optionalNumber(args, "antenna_gain_dbi", -20, 30);
+          const changes = {
+            ...(channel !== null ? { channel } : {}),
+            ...(txPowerDbm !== undefined ? { txPowerDbm } : {}),
+            ...(antennaGainDbi !== undefined ? { antennaGainDbi } : {}),
+          };
+          if (Object.keys(changes).length === 0) {
+            throw new ToolError(
+              "nothing to change: give channel, tx_power_dbm or antenna_gain_dbi",
+            );
+          }
+          return session.setRadio(node, changes, optionalText(args, "phase"));
+        }),
+    },
+    {
+      name: "start_phase",
+      description:
+        "Start a metrics phase with this label now, without changing anything, so get_metrics can compare before and after something that happens on its own (firmware behaviour, a serial command).",
+      inputSchema: {
+        type: "object",
+        properties: { label: { type: "string" } },
+        required: ["label"],
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["label"]);
+        return Promise.resolve(session.startPhase(requiredText(args, "label")));
+      },
     },
     {
       name: "send_serial",

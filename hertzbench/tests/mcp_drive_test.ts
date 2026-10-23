@@ -2,7 +2,7 @@
 // `hertzbench mcp` process: link chaos, the channel and radios of a live run,
 // serial input, the event stream, captures, scenario edits and the view.
 
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals, assertStringIncludes } from "@std/assert";
 import { EXAMPLES, type Json, pollMetrics, pollStatus, withServer } from "./mcp_client.ts";
 
 const LIVE = `${EXAMPLES}live-3-scripted.yaml`;
@@ -302,6 +302,71 @@ Deno.test("mcp drive: read, edit, add and remove nodes in a scenario file, check
     const status = await pollStatus(client, (s) => s.state === "running", "the boards to connect");
     assertEquals(status.nodes.find((n: Json) => n.id === "b").position, { x: 40, y: 0 });
     assertEquals(status.seed, 9);
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: set_channel and set_radio change a live Wi-Fi run; start_phase marks it", async () => {
+  await withServer(async (client) => {
+    await client.ok("run_scenario", { path: LIVE });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+
+    const quiet = await client.ok("set_radio", { node: "c", antenna_gain_dbi: 0 });
+    const rssi = (r: Json, to: string) => r.links.find((l: Json) => l.link === `c->${to}`).rssi_dbm;
+    const louder = await client.ok("set_radio", { node: "c", tx_power_dbm: 25 });
+    assert(rssi(louder, "a") > rssi(quiet, "a"), `${rssi(quiet, "a")} -> ${rssi(louder, "a")}`);
+
+    const channel = await client.ok("set_channel", {
+      path_loss_exponent: 4,
+      obstacles: [{ polygon: [[1, -50], [1, 50]], attenuation_db: 20 }],
+      phase: "harsh",
+    });
+    assertEquals(channel.phase, "harsh");
+    assertEquals(channel.changes.obstacles.length, 1);
+    const harsh = await client.ok("set_radio", { node: "c", tx_power_dbm: 25 });
+    assert(rssi(harsh, "a") < rssi(louder, "a") - 20, "steeper path loss and a wall");
+
+    await client.ok("set_radio", { node: "b", channel: 11, phase: "b-retuned" });
+    const retuned = await pollMetrics(
+      client,
+      (m) => (link(m, "b-retuned", "a", "b")?.dropped.channel_mismatch ?? 0) >= 2,
+    );
+    assertEquals(link(retuned, "b-retuned", "a", "b").delivered, 0);
+    await client.ok("start_phase", { label: "calm" });
+    const changes = await client.ok("get_events", { types: ["channel", "radio", "phase"] });
+    assertEquals(
+      changes.events.map((e: Json) => e.type === "phase" ? e.label : e.type),
+      ["radio", "radio", "harsh", "channel", "radio", "b-retuned", "radio", "calm"],
+    );
+
+    assertStringIncludes(await client.refused("set_channel", {}), "nothing to change");
+    assertStringIncludes(
+      await client.refused("set_channel", { path_loss_exponent: 0.5 }),
+      "path_loss_exponent",
+    );
+    assertStringIncludes(await client.refused("set_radio", { node: "c", channel: 15 }), "channel");
+    await client.ok("stop");
+    assertStringIncludes(await client.refused("start_phase", { label: "x" }), "no run in progress");
+  });
+});
+
+Deno.test("mcp drive: on a LoRa run only the antenna gain is the medium's to change", async () => {
+  await withServer(async (client) => {
+    await client.ok("run_scenario", { path: `${EXAMPLES}lora-gateway-6-scripted.yaml` });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    assertStringIncludes(
+      await client.refused("set_radio", { node: "gw", tx_power_dbm: 20 }),
+      "only antenna_gain_dbi",
+    );
+    assertStringIncludes(
+      await client.refused("set_channel", { noise_figure_db: 3 }),
+      "chip's own receiver noise figure",
+    );
+    const before = await client.ok("set_radio", { node: "gw", antenna_gain_dbi: 0 });
+    const after = await client.ok("set_radio", { node: "gw", antenna_gain_dbi: 9 });
+    const snr = (r: Json) => r.links.find((l: Json) => l.link === "gw->node-1").snr_db;
+    assertAlmostEquals(snr(after), snr(before) + 9, 1e-6);
+    await client.ok("set_channel", { shadowing_sigma_db: 2, base_latency_ms: 1 });
     await client.ok("stop");
   });
 });

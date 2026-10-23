@@ -2,7 +2,7 @@
 // Metrics, the report and the assertions are all computed from it, so what the
 // run says and what the log says cannot disagree.
 
-import type { Position } from "./channel.ts";
+import type { Environment, Position, RadioConfig } from "./channel.ts";
 
 export type DropReason =
   | "retry_exhausted" // every MAC attempt failed on the channel
@@ -113,9 +113,21 @@ export type EngineEvent =
     reason: number | null;
     intervalMs: number;
   })
+  /** Channel-model parameters changed while the run plays. */
+  | (Stamped & { type: "channel"; changes: ChannelChanges })
+  /** A station's radio, as the medium models it, changed while the run plays. */
+  | (Stamped & { type: "radio"; node: string; changes: Partial<RadioConfig> })
   | (Stamped & { type: "warning"; text: string })
   | (Stamped & { type: "phase"; label: string })
   | (Stamped & { type: "serial"; node: string; text: string });
+
+/** The channel-model parameters a run can change while it plays. */
+export type ChannelChanges = Partial<
+  Pick<
+    Environment,
+    "pathLossExponent" | "shadowingSigmaDb" | "noiseFigureDb" | "baseLatencyMs" | "obstacles"
+  >
+>;
 
 // A record, not a list, so adding an event type without naming it here fails the type check.
 const EVENT_TYPE_SET: Record<EngineEvent["type"], true> = {
@@ -127,6 +139,8 @@ const EVENT_TYPE_SET: Record<EngineEvent["type"], true> = {
   "link-override": true,
   "espnow-send": true,
   "ble-link": true,
+  channel: true,
+  radio: true,
   warning: true,
   phase: true,
   serial: true,
