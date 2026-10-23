@@ -4,6 +4,18 @@
 // only draws. Text from the run (node ids, labels, errors) goes in through
 // textContent, never as markup.
 
+// Velxio's tokens are dark on a bare :root and light under data-theme="light".
+// The page follows the system's choice, and follows it when it changes.
+const prefersLight = matchMedia("(prefers-color-scheme: light)");
+function applyTheme() {
+  document.documentElement.dataset.theme = prefersLight.matches ? "light" : "dark";
+}
+applyTheme();
+prefersLight.addEventListener("change", () => {
+  applyTheme();
+  render();
+});
+
 const SVG = "http://www.w3.org/2000/svg";
 const POLL_MS = 250;
 const RETRY_MS = 1000;
@@ -13,6 +25,8 @@ const TIMELINE_SPAN_MS = 10_000;
 const MAX_LABELLED_NODES = 6;
 /** A half link shorter than this has no room for its label. */
 const MIN_LABELLED_HALF_PX = 50;
+/** Longest node name drawn on the map, in characters; the full name is in the tooltip and the label. */
+const MAX_NAME_CHARS = 16;
 const KEY_STEP_M = 1;
 const KEY_STEP_SHIFT_M = 5;
 
@@ -282,12 +296,14 @@ function render() {
   growBounds(nodes, scene.obstacles);
   const proj = projection();
   ui.map.setAttribute("viewBox", `0 0 ${proj.width} ${proj.height}`);
-  drawGrid(proj);
-  drawWalls(proj, scene.obstacles);
-  drawLinks(proj, nodes, scene.links);
-  drawNodes(proj, nodes, data.board_images ?? {});
+  // What a label must keep clear of: the scale, every node and name, then each label placed.
+  const taken = [];
+  drawGrid(proj, taken);
+  drawNodes(proj, nodes, data.board_images ?? {}, taken);
+  drawWalls(proj, scene.obstacles, taken);
+  drawLinks(proj, nodes, scene.links, taken);
   drawLegend();
-  drawTable(scene.links);
+  drawTable(scene.links, status, nodes);
   drawProblems(status);
   drawTimeline(scene.links, status.elapsed_ms);
   const scripted = nodes.some((node) => node.board === "scripted");
@@ -302,7 +318,17 @@ function niceStep(metresPerPixel) {
   return 1000;
 }
 
-function drawGrid(proj) {
+/** A box {l, t, r, b} centred on (cx, cy). */
+const boxAt = (cx, cy, w, h) => ({ l: cx - w / 2, t: cy - h / 2, r: cx + w / 2, b: cy + h / 2 });
+const touches = (a, b) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
+/** Whether a label box sits on the map and clear of everything in `taken`. */
+const isFree = (box, proj, taken) =>
+  box.l >= 0 && box.t >= 0 && box.r <= proj.width && box.b <= proj.height &&
+  !taken.some((other) => touches(box, other));
+/** The drawn width of an SVG text, with a little air. */
+const widthOf = (text) => text.getComputedTextLength() + 4;
+
+function drawGrid(proj, taken) {
   layers.grid.replaceChildren();
   const step = niceStep(1 / proj.k);
   const topLeft = proj.from(0, 0);
@@ -321,9 +347,10 @@ function drawGrid(proj) {
   const label = svg("text", { class: "scale-label", x: 16, y: y - 6 });
   label.textContent = `${step} m`;
   layers.grid.append(label);
+  taken.push(boxAt(16 + widthOf(label) / 2 - 2, y - 10, widthOf(label), 16));
 }
 
-function drawWalls(proj, obstacles) {
+function drawWalls(proj, obstacles, taken) {
   layers.walls.replaceChildren();
   for (const wall of obstacles) {
     const [x1, y1] = proj.to(wall.from[0], wall.from[1]);
@@ -332,9 +359,20 @@ function drawWalls(proj, obstacles) {
     const title = svg("title");
     title.textContent = `wall, ${wall.attenuation_db} dB`;
     line.append(title);
-    const label = svg("text", { class: "wall-label", x: x1 + 8, y: y1 + 14 });
+    const label = svg("text", { class: "wall-label", "text-anchor": "middle" });
     label.textContent = `wall ${wall.attenuation_db} dB`;
     layers.walls.append(line, label);
+    const w = widthOf(label);
+    // Beside an end or the middle of the wall, to the right and below it, then to the left and above.
+    const spots = [];
+    for (const t of [0, 0.5, 1]) {
+      const [px, py] = [x1 + (x2 - x1) * t, y1 + (y2 - y1) * t];
+      spots.push([px + 8 + w / 2, py + 10], [px - 8 - w / 2, py - 10]);
+    }
+    const spot = spots.find(([cx, cy]) => isFree(boxAt(cx, cy, w, 16), proj, taken)) ?? spots[0];
+    label.setAttribute("x", spot[0]);
+    label.setAttribute("y", spot[1] + 4);
+    taken.push(boxAt(spot[0], spot[1], w, 16));
   }
 }
 
@@ -357,7 +395,7 @@ function linkSentence(link) {
     `Signal ${link.signal}, loss ${link.loss}.`;
 }
 
-function drawLinks(proj, nodes, links) {
+function drawLinks(proj, nodes, links, taken) {
   layers.links.replaceChildren();
   layers.linkLabels.replaceChildren();
   const byKey = new Map(links.map((link) => [`${link.from}>${link.to}`, link]));
@@ -382,26 +420,40 @@ function drawLinks(proj, nodes, links) {
       layers.links.append(line);
       const halfLength = Math.hypot(mx - x1, my - y1);
       if (labelled && halfLength >= MIN_LABELLED_HALF_PX) {
-        // Halfway along the sending half, pushed off the line to its left: the
-        // two directions of a pair point opposite ways, so their labels land on
-        // opposite sides instead of on top of each other.
-        const nx = (my - y1) / halfLength;
-        const ny = -(mx - x1) / halfLength;
-        const label = svg("text", {
-          class: "link-label",
-          x: x1 + (mx - x1) * 0.5 + nx * 12,
-          y: y1 + (my - y1) * 0.5 + ny * 12 + 4,
-          "text-anchor": "middle",
-        });
+        const label = svg("text", { class: "link-label", "text-anchor": "middle" });
         label.textContent = `${linkValue(half)}${half.override ? " *" : ""}`;
         layers.linkLabels.append(label);
+        const w = widthOf(label);
+        // Halfway along the sending half, pushed off the line to its left: the
+        // two directions of a pair point opposite ways, so their labels land on
+        // opposite sides. Where something is in the way, slide along the line,
+        // then try the other side; with no room the label is left out (the
+        // table and the tooltips carry every value).
+        const nx = (my - y1) / halfLength;
+        const ny = -(mx - x1) / halfLength;
+        let spot = null;
+        for (const t of [0.5, 0.4, 0.6, 0.3, 0.7]) {
+          for (const side of [1, -1]) {
+            const cx = x1 + (mx - x1) * t + nx * 12 * side;
+            const cy = y1 + (my - y1) * t + ny * 12 * side;
+            if (!spot && isFree(boxAt(cx, cy, w, 15), proj, taken)) spot = [cx, cy];
+          }
+        }
+        if (spot) {
+          label.setAttribute("x", spot[0]);
+          label.setAttribute("y", spot[1] + 4);
+          taken.push(boxAt(spot[0], spot[1], w, 15));
+        } else {
+          label.remove();
+        }
       }
     }
   }
 }
 
-function drawNodes(proj, nodes, boardImages) {
+function drawNodes(proj, nodes, boardImages, taken) {
   const seen = new Set();
+  const placed = [];
   for (const node of nodes) {
     seen.add(node.id);
     let element = nodeElements.get(node.id);
@@ -413,6 +465,11 @@ function drawNodes(proj, nodes, boardImages) {
     const p = shownPosition(node);
     const [x, y] = proj.to(p.x, p.y);
     element.setAttribute("transform", `translate(${x} ${y})`);
+    // The body is the dot, or the board's drawing; the names go beside every body.
+    const half = element.querySelector("image") ? [10, 18] : [10, 10];
+    const body = boxAt(x, y, 2 * half[0], 2 * half[1]);
+    taken.push(body);
+    placed.push({ element, x, y, half });
     const movable = canMove(node);
     element.setAttribute("aria-disabled", String(!movable));
     element.classList.toggle("node-off", !node.on_medium);
@@ -430,6 +487,27 @@ function drawNodes(proj, nodes, boardImages) {
       nodeElements.delete(id);
     }
   }
+  for (const { element, x, y, half } of placed) placeName(proj, element, x, y, half, taken);
+}
+
+/**
+ * Put a node's name below its body, or above, or to either side, wherever it
+ * covers nothing; with no such place, below, pulled back onto the map.
+ */
+function placeName(proj, element, x, y, half, taken) {
+  const label = element.querySelector(".node-label");
+  const w = widthOf(label);
+  const h = 16;
+  const [side, up] = [half[0] + 2 + w / 2, half[1] + 2 + h / 2];
+  const spots = [[0, 30], [0, -30], [side, 0], [-side, 0], [side, up], [-side, up], [side, -up], [-side, -up]];
+  let spot = spots.find(([dx, dy]) => isFree(boxAt(x + dx, y + dy, w, h), proj, taken));
+  if (!spot) {
+    const dx = Math.min(Math.max(x, w / 2), proj.width - w / 2) - x;
+    spot = [dx, 30];
+  }
+  label.setAttribute("x", spot[0]);
+  label.setAttribute("y", spot[1] + 4);
+  taken.push(boxAt(x + spot[0], y + spot[1], w, h));
 }
 
 function createNode(node, image) {
@@ -442,8 +520,13 @@ function createNode(node, image) {
     group.append(svg("circle", { class: "node-dot", r: 9 }));
   }
   const label = svg("text", { class: "node-label", y: 34, "text-anchor": "middle" });
-  label.textContent = node.id;
+  label.textContent = node.id.length > MAX_NAME_CHARS
+    ? `${node.id.slice(0, MAX_NAME_CHARS - 1)}…`
+    : node.id;
   group.append(label);
+  const name = svg("title");
+  name.textContent = node.id;
+  group.append(name);
 
   group.addEventListener("pointerdown", (event) => {
     const current = view.latest?.status.nodes.find((n) => n.id === node.id);
@@ -508,8 +591,18 @@ function drawLegend() {
   ui.legend.replaceChildren(...items);
 }
 
-function drawTable(links) {
-  ui.linksEmpty.textContent = "No links yet: the boards are still starting.";
+/** Why the link table is empty, in the words of the state the run is in. */
+function noLinksText(status, nodes) {
+  if (status.state === "idle") return "No run yet: links appear once a run starts.";
+  if (nodes.filter((node) => node.on_medium).length < 2) {
+    return "No links: a link needs two nodes on the medium.";
+  }
+  if (status.state === "starting") return "No links yet: the boards are still starting.";
+  return "No links to show.";
+}
+
+function drawTable(links, status, nodes) {
+  ui.linksEmpty.textContent = noLinksText(status, nodes);
   ui.linksEmpty.hidden = links.length > 0;
   const rows = links.map((link) => {
     const row = html("tr");
@@ -559,10 +652,19 @@ function cssValue(name, fallback = "#888") {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
+/** `text` cut at the end with an ellipsis until it is at most `maxWidth` wide. */
+function fitText(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let end = text.length;
+  while (end > 1 && ctx.measureText(`${text.slice(0, end)}…`).width > maxWidth) end--;
+  return `${text.slice(0, end)}…`;
+}
+
 function drawTimeline(links, nowMs) {
   const rowHeight = 16;
-  const axisHeight = 18;
-  const labelWidth = 64;
+  // Two lines under the rows: the seconds, then what happened (moves, phases, faults).
+  const axisHeight = 34;
+  const minLabelWidth = 64;
   // Rows for every link, plus any pair the packets name that has no budget yet.
   const rows = [
     ...new Set([
@@ -583,7 +685,7 @@ function drawTimeline(links, nowMs) {
   ctx.clearRect(0, 0, width, height);
   const colors = {
     text: cssValue("--hzb-muted"),
-    grid: "rgba(255, 255, 255, 0.06)",
+    grid: cssValue("--hzb-grid"),
     deliver: cssValue("--hzb-good"),
     drop: cssValue("--hzb-bad"),
     move: cssValue("--hzb-strong"),
@@ -592,9 +694,16 @@ function drawTimeline(links, nowMs) {
   };
   ctx.font = `11px ${cssValue("--font-mono", "monospace")}`;
   ctx.textBaseline = "middle";
-  rows.forEach((row, index) => {
+  ctx.textAlign = "left";
+  // The names of the rows take what they need, up to 40% of the width.
+  const names = rows.map((row) => row.replace(">", "→"));
+  const labelWidth = Math.min(
+    Math.max(minLabelWidth, ...names.map((name) => ctx.measureText(name).width + 8)),
+    width * 0.4,
+  );
+  names.forEach((name, index) => {
     ctx.fillStyle = colors.text;
-    ctx.fillText(row.replace(">", "→"), 4, index * rowHeight + rowHeight / 2);
+    ctx.fillText(fitText(ctx, name, labelWidth - 8), 4, index * rowHeight + rowHeight / 2);
     ctx.fillStyle = colors.grid;
     ctx.fillRect(labelWidth, (index + 1) * rowHeight - 1, width - labelWidth, 1);
   });
@@ -605,18 +714,28 @@ function drawTimeline(links, nowMs) {
   const start = nowMs - TIMELINE_SPAN_MS;
   const plot = width - labelWidth - 8;
   const x = (t) => labelWidth + ((t - start) / TIMELINE_SPAN_MS) * plot;
-  const axisY = rows.length * rowHeight + axisHeight / 2;
+  const tickY = rows.length * rowHeight + axisHeight / 4;
+  const eventY = rows.length * rowHeight + (axisHeight * 3) / 4;
+  // Seconds, centred on their line, skipping one that would touch the last drawn.
+  ctx.textAlign = "center";
+  let lastRight = -Infinity;
   for (let second = Math.ceil(start / 1000); second * 1000 <= nowMs; second++) {
     if (second < 0) continue;
     const sx = x(second * 1000);
     ctx.fillStyle = colors.grid;
     ctx.fillRect(sx, 0, 1, rows.length * rowHeight);
+    const text = `${second} s`;
+    const w = ctx.measureText(text).width;
+    const cx = Math.min(sx, width - w / 2 - 1);
+    if (cx - w / 2 < lastRight + 4) continue;
     ctx.fillStyle = colors.text;
-    ctx.fillText(`${second} s`, sx - 8, axisY);
+    ctx.fillText(text, cx, tickY);
+    lastRight = cx + w / 2;
   }
   const rowOf = new Map(rows.map((row, index) => [row, index]));
   let delivered = 0;
   let lost = 0;
+  const events = [];
   for (const entry of view.entries) {
     if (entry.t_ms < start) continue;
     const sx = x(entry.t_ms);
@@ -647,7 +766,19 @@ function drawTimeline(links, nowMs) {
       : `${entry.from}→${entry.to} ${entry.extra_loss_pct}%`;
     ctx.fillStyle = color;
     ctx.fillRect(sx, 0, 1.5, rows.length * rowHeight);
-    ctx.fillText(label, sx + 4, axisY);
+    events.push({ sx, color, label });
+  }
+  // The newest event names itself first; an older one whose name would cover it keeps only its line.
+  const spans = [];
+  for (const { sx, color, label } of events.reverse()) {
+    const w = ctx.measureText(label).width;
+    const fitsRight = sx + 4 + w <= width - 2;
+    const left = fitsRight ? sx + 4 : Math.max(sx - 4 - w, 2);
+    if (spans.some((span) => left < span.right + 4 && span.left < left + w + 4)) continue;
+    spans.push({ left, right: left + w });
+    ctx.textAlign = "left";
+    ctx.fillStyle = color;
+    ctx.fillText(label, left, eventY);
   }
   canvas.setAttribute(
     "aria-label",

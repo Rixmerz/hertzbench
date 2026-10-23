@@ -123,6 +123,8 @@ async function expected<T>(body: () => Promise<T> | T): Promise<T> {
     if (error instanceof ScenarioError || error instanceof BoardError) {
       throw new ToolError(error.message);
     }
+    // The file mode of a path the caller chose. Deno's own permission flags throw NotCapable instead.
+    if (error instanceof Deno.errors.PermissionDenied) throw new ToolError(error.message);
     throw error;
   }
 }
@@ -186,6 +188,22 @@ function optionalObject(args: Args, key: string): Record<string, unknown> | unde
 
 const EDIT_NOTE = "the file was rewritten from its data: comments and the original layout are gone";
 
+/** A scenario file's text. A path that names no readable file is the caller's to fix. */
+async function readScenarioFile(file: string, missing: string): Promise<string> {
+  try {
+    return await Deno.readTextFile(file);
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) throw new ToolError(missing);
+    if (error instanceof Deno.errors.IsADirectory) {
+      throw new ToolError(`${file} is a directory, not a scenario file`);
+    }
+    if (error instanceof Deno.errors.PermissionDenied) {
+      throw new ToolError(`${file} cannot be read: permission denied`);
+    }
+    throw error;
+  }
+}
+
 /** Starts the view of the session on a loopback port, or returns the one already serving it. */
 export type ViewOpener = (port: number) => { url: string; already_open: boolean };
 
@@ -194,15 +212,10 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
   const editFile = async (path: string, edit: ScenarioEdit) => {
     if (!/\.ya?ml$/.test(path)) throw new ToolError("path must end in .yaml or .yml");
     const file = await session.writablePath(path, "path", "file");
-    let text: string;
-    try {
-      text = await Deno.readTextFile(file);
-    } catch (error) {
-      if (error instanceof Deno.errors.NotFound) {
-        throw new ToolError(`${file} does not exist; create_scenario writes a new one`);
-      }
-      throw error;
-    }
+    const text = await readScenarioFile(
+      file,
+      `${file} does not exist; create_scenario writes a new one`,
+    );
     const edited = editScenarioText(text, file, edit);
     await session.replaceFile(file, edited.text);
     const missing = await checkFirmwareFiles(withFirmwareFrom(edited.scenario, dirname(file)));
@@ -340,13 +353,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
       call: async (args) => {
         known(args, ["path"]);
         const file = session.resolvePath(requiredText(args, "path"));
-        let yaml: string;
-        try {
-          yaml = await Deno.readTextFile(file);
-        } catch (error) {
-          if (error instanceof Deno.errors.NotFound) throw new ToolError(`${file} does not exist`);
-          throw error;
-        }
+        const yaml = await readScenarioFile(file, `${file} does not exist`);
         try {
           return { file, yaml, valid: true, scenario: summary(parseScenario(yaml)) };
         } catch (error) {
@@ -520,7 +527,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "move_node",
       description:
-        "Move a node now, while the run is in progress. The channel model uses the new position for every later frame. Returns the new distance, RSSI and SNR to each other node on a Wi-Fi run; on LoRa, nRF24 and BLE runs that list is empty.",
+        "Move a node, or the mobile bridge's station, now, while the run is in progress. The channel model uses the new position for every later frame. Returns the new distance, RSSI and SNR from it to each other station on the medium, on every PHY.",
       inputSchema: {
         type: "object",
         properties: { node: { type: "string" }, position: POSITION_SCHEMA, phase: PHASE_SCHEMA },
