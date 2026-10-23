@@ -1,7 +1,17 @@
 // What the runner sees of a mobile bridge, whichever kind: started at time
 // zero, closed with the run, and described in the report.
 
-import type { BridgeEndpoint } from "./ip/proxy.ts";
+import type { BleBridgeSpec, IpBridgeSpec } from "../orchestrator/scenario.ts";
+import type { GattPeripheral } from "./ble/peripheral.ts";
+import type { BridgeEndpoint, EndpointPublisher } from "./ip/proxy.ts";
+
+/** Replace the parts of a bridge that touch the host's network or radio (tests). */
+export interface BridgeHooks {
+  /** Announces the IP bridge's endpoints; default: mDNS when the scenario asks for it. */
+  publisher?: (spec: IpBridgeSpec) => EndpointPublisher | null;
+  /** The BLE bridge's host side; default: BlueZ on the scenario's adapter. */
+  peripheral?: (spec: BleBridgeSpec) => GattPeripheral;
+}
 
 /** One characteristic the BLE bridge mirrors, as the report lists it. */
 export interface MirroredCharacteristic {

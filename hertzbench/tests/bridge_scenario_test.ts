@@ -190,6 +190,28 @@ bridge:
     intervalMs: 30,
     timeoutMs: 1000,
   });
+  const notifying = parseScenario(
+    `${
+      BLE.replace(
+        "{ advertise: true }",
+        "{ advertise: true, send: [{ to: phone, every: 1s, count: 2 }] }",
+      )
+    }
+bridge: { position: [2, 0], mirror: sensor }
+`,
+  );
+  assertEquals(notifying.bridge?.kind, "ble", "the mirrored node may notify the bridge");
+  refuses(
+    `${
+      BLE.replace(
+        "{ connect: { peers: [sensor] } }",
+        "{ connect: { peers: [sensor] }, send: [{ to: phone, every: 1s, count: 2 }] }",
+      )
+    }
+bridge: { position: [2, 0], mirror: sensor }
+`,
+    'nodes[1].firmware.send[0].to: no node named "phone" on the medium',
+  );
   const bridge = (body: string) => `${BLE}\nbridge:\n  position: [1, 0]\n${body}`;
   refuses(bridge("  mirror: gw"), "bridge.mirror: gw is a scripted central");
   refuses(bridge("  mirror: ghost"), 'bridge.mirror: no node named "ghost"');
@@ -220,4 +242,28 @@ bridge: { position: [1, 0] }
 `,
     "bridge: bridges a phone over Wi-Fi/IP or BLE; this scenario's radios are lora",
   );
+});
+
+const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+
+Deno.test("bridge: the four bridge examples are valid scenarios", async () => {
+  const { loadScenario } = await import("../orchestrator/mod.ts");
+  const kinds: Record<string, string> = {};
+  for (
+    const file of [
+      "bridge-web-scripted",
+      "bridge-web-esp32",
+      "bridge-ble-scripted",
+      "bridge-ble-esp32",
+    ]
+  ) {
+    const { scenario } = await loadScenario(`${EXAMPLES}${file}.yaml`);
+    kinds[file] = `${scenario.phy}:${scenario.bridge?.kind}`;
+  }
+  assertEquals(kinds, {
+    "bridge-web-scripted": "wifi:ip",
+    "bridge-web-esp32": "wifi:ip",
+    "bridge-ble-scripted": "ble:ble",
+    "bridge-ble-esp32": "ble:ble",
+  });
 });

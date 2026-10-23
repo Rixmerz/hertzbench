@@ -6,6 +6,7 @@
 import { QemuWifiL2Adapter } from "../adapters/qemu-wifi-l2/mod.ts";
 import {
   BRIDGE_FIDELITY,
+  type BridgeHooks,
   bridgeLines,
   type BridgeReport,
   BridgeStartError,
@@ -74,11 +75,6 @@ export interface RunOptions {
   onUnderway?: (run: LiveRun) => void;
   /** Replace the parts of the mobile bridge that touch the host's network or radio (tests). */
   bridge?: BridgeHooks;
-}
-
-export interface BridgeHooks {
-  /** Announces the IP bridge's endpoints; default: mDNS when the scenario asks for it. */
-  publisher?: (spec: Extract<BridgeSpec, { kind: "ip" }>) => EndpointPublisher | null;
 }
 
 /**
@@ -205,17 +201,28 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   };
   const network = scenario.phy === "wifi"
     ? wifiNetwork(scenario, gatewayIp, { ...networkContext, hooks: options.bridge ?? {} })
-    : createAirNetwork(scenario, networkContext);
+    : createAirNetwork(scenario, { ...networkContext, hooks: options.bridge ?? {} });
   const { medium, ports } = network;
 
   const indexOf = (id: string) => scenario.nodes.findIndex((n) => n.id === id) + 1;
-  const peersOf = (id: string): PeerInfo[] =>
-    onMedium.filter((n) => n.id !== id).map((n) => ({
+  const bridgePeer: PeerInfo[] = scenario.bridge
+    ? [{
+      id: scenario.bridge.id,
+      index: scenario.nodes.length + 1,
+      ip: scenario.bridge.kind === "ip" ? scenario.bridge.ip : "",
+      mac: scenario.bridge.mac,
+    }]
+    : [];
+  // The bridge is a peer too, so a board's log names it instead of printing its address.
+  const peersOf = (id: string): PeerInfo[] => [
+    ...onMedium.filter((n) => n.id !== id).map((n) => ({
       id: n.id,
       index: indexOf(n.id),
       ip: n.ip,
       mac: n.mac,
-    }));
+    })),
+    ...bridgePeer,
+  ];
   const running: RunningBoard[] = [];
   const clocks = new Map<string, string>();
   const stopAll = async () => {

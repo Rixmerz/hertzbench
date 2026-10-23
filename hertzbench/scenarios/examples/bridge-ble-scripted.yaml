@@ -1,0 +1,57 @@
+# Phase 5b with scripted boards: a phone connects to this host over real BLE
+# and sees sensor-1's GATT server, mirrored by BlueZ. Every read, write and
+# subscription the phone makes is replayed from the bridge's node, which
+# stands 3 m from sensor-1 on the simulated air; the sensor's notifications
+# come back the same way. At 60 s the bridge's node walks 150 m away: the
+# simulated connection ends on its supervision timeout, the phone's reads
+# fail with org.bluez.Error.Failed, and the bridge keeps trying to reconnect.
+#
+#   cd hertzbench && deno task hertzbench run scenarios/examples/bridge-ble-scripted.yaml
+#
+# then, in a BLE app on the phone (nRF Connect, LightBlue), connect to
+# "hzb sensor-1", open service 0xFF00 and subscribe to characteristic 0xFF01.
+# Needs Linux, a running bluetoothd, PyGObject and an adapter (hci0); see
+# docs/mobile-bridge.md. The engine side runs anywhere; tests/bridge_ble_test.ts
+# exercises it with a stand-in for BlueZ.
+name: bridge-ble-scripted
+seed: 11
+duration: 120s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: sensor-1
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 50ms }
+      send: [{ to: phone, every: 500ms, count: 240, payload: reading }]
+  - id: sensor-2
+    board: scripted
+    position: [0, 20]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 100ms }
+      send: [{ to: gw, every: 500ms, count: 240, payload: reading }]
+  - id: gw
+    board: scripted
+    position: [5, 20]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      connect: { peers: [sensor-2], interval: 30ms, timeout: 1s }
+bridge:
+  id: phone
+  position: [3, 0]
+  mirror: sensor-1
+  name: hzb sensor-1
+  adapter: hci0
+  interval: 30ms
+  timeout: 1s
+timeline:
+  - at: 60s
+    label: walked-away
+    move: { node: phone, to: [150, 0] }
+assertions:
+  - serial: { node: phone, contains: "bridge connected to sensor-1", within: 5s }
+  - serial: { node: phone, contains: "bridge disconnected from sensor-1 reason=0x08" }

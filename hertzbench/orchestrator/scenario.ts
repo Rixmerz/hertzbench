@@ -1062,8 +1062,12 @@ function checkReferences(scenario: Scenario): void {
       if (!boards.includes(peer)) fail(p, `no node named ${JSON.stringify(peer)} on the medium`);
       if (peer === node.id) fail(p, "a node cannot connect to itself");
     });
+    // A BLE bridge connects to the node it mirrors, so that node may notify it.
+    const bridge = scenario.bridge;
+    const mirroredBy = bridge?.kind === "ble" && bridge.mirror === node.id ? bridge.id : null;
     node.firmware.send.forEach((send, j) => {
       if (send.to === null || send.to === BROADCAST_TARGET) return;
+      if (send.to === mirroredBy && send.via === "gatt") return;
       if (!boards.includes(send.to)) {
         fail(
           `nodes[${i}].firmware.send[${j}].to`,
