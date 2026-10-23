@@ -2,7 +2,7 @@
 // `hertzbench mcp` process: link chaos, the channel and radios of a live run,
 // serial input, the event stream, captures, scenario edits and the view.
 
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { EXAMPLES, type Json, pollMetrics, pollStatus, withServer } from "./mcp_client.ts";
 
 const LIVE = `${EXAMPLES}live-3-scripted.yaml`;
@@ -42,4 +42,177 @@ Deno.test("mcp drive: inject_fault adds jitter and interference; interference co
     );
     await client.ok("stop");
   });
+});
+
+Deno.test("mcp drive: get_events follows the stream by sequence number, filtered by type and node", async () => {
+  await withServer(async (client) => {
+    await client.ok("run_scenario", { path: LIVE });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    await client.ok("move_node", { node: "c", position: [30, 0], phase: "moved" });
+
+    const moves = await client.ok("get_events", { types: ["move", "phase"] });
+    assertEquals(moves.state, "running");
+    assertEquals(
+      moves.events.map((e: Json) => e.type === "move" ? `move ${e.node}` : `phase ${e.label}`),
+      // The phase opens at the instant of the move, just before it.
+      ["phase moved", "move c"],
+    );
+    // Nothing new of those types since: the cursor moved past every event read.
+    const again = await client.ok("get_events", {
+      types: ["move"],
+      since_seq: moves.next_since_seq,
+    });
+    assertEquals(again.events, []);
+
+    // A small limit cuts the stream; the cursor then resumes right after the last one returned.
+    const first = await client.ok("get_events", { node: "a", limit: 2 });
+    assertEquals([first.events.length, first.truncated], [2, true]);
+    assert(first.events.every((e: Json) => e.node === "a" || e.from === "a" || e.to === "a"));
+    const next = await client.ok("get_events", {
+      node: "a",
+      limit: 1,
+      since_seq: first.next_since_seq,
+    });
+    assert(next.events[0].seq > first.events[1].seq);
+
+    assertStringIncludes(
+      await client.refused("get_events", { types: ["nope"] }),
+      "unknown event type",
+    );
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: export_capture writes the air mid-run and after stop, inside the workspace", async () => {
+  await withServer(async (client, workspace) => {
+    assertStringIncludes(await client.refused("export_capture", { kind: "pcap" }), "no run yet");
+    await client.ok("run_scenario", { path: LIVE, out: "runs/live" });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    await pollMetrics(client, (m) => (link(m, "start", "a", "b")?.sent ?? 0) >= 2);
+
+    const live = await client.ok("export_capture", { kind: "pcap" });
+    assertEquals(live.file, `${workspace}/runs/live/air-live.pcap`);
+    assert(live.packets > 0);
+    const bytes = await Deno.readFile(live.file);
+    assertEquals(bytes.length, live.bytes);
+    assertEquals(new DataView(bytes.buffer).getUint32(0, true), 0xa1b2c3d4, "pcap magic");
+
+    await client.ok("stop");
+    // A stopped run writes no files of its own; the capture is still there to take.
+    const after = await client.ok("export_capture", { kind: "pcap", path: "kept/air.pcap" });
+    assertEquals([after.file, after.state], [`${workspace}/kept/air.pcap`, "stopped"]);
+    assert(after.packets >= live.packets);
+
+    assertStringIncludes(
+      await client.refused("export_capture", { kind: "btsnoop", node: "a" }),
+      "BLE",
+    );
+    assertStringIncludes(
+      await client.refused("export_capture", { kind: "pcap", path: "../escape.pcap" }),
+      "inside the workspace",
+    );
+    assertStringIncludes(await client.refused("export_capture", { kind: "zip" }), "kind must be");
+  });
+});
+
+Deno.test("mcp drive: export_capture takes one BLE node's HCI as btsnoop", async () => {
+  await withServer(async (client) => {
+    await client.ok("run_scenario", { path: `${EXAMPLES}ble-sensors-scripted.yaml` });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    await pollMetrics(client, (m) => m.links?.some((l: Json) => l.delivered > 0) ?? false);
+    const snoop = await client.ok("export_capture", { kind: "btsnoop", node: "gw" });
+    assert(snoop.packets > 0);
+    const bytes = await Deno.readFile(snoop.file);
+    assertEquals(new TextDecoder().decode(bytes.subarray(0, 8)), "btsnoop\0");
+    assertStringIncludes(
+      await client.refused("export_capture", { kind: "btsnoop" }),
+      "needs the node",
+    );
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: send_serial is refused by a scripted board, which has no console", async () => {
+  await withServer(async (client) => {
+    assertStringIncludes(
+      await client.refused("send_serial", { node: "a", text: "hi" }),
+      "no run",
+    );
+    await client.ok("run_scenario", { path: LIVE });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    assertStringIncludes(
+      await client.refused("send_serial", { node: "a", text: "hi" }),
+      "scripted board: it has no serial console",
+    );
+    assertStringIncludes(
+      await client.refused("send_serial", { node: "a", text: "hi", data_base64: "aGk=" }),
+      "exactly one",
+    );
+    assertStringIncludes(
+      await client.refused("send_serial", { node: "zz", text: "hi" }),
+      "no node named",
+    );
+    await client.ok("stop");
+  });
+});
+
+// A stand-in for backend/app/services/esp32_worker.py that speaks only its
+// stdin/stdout protocol: the firmware's HCI UART sends HCI Reset as `uart_tx`
+// on UART1 (so the BLE node connects), and its console echoes every byte that
+// `uart_send` puts into UART0 back out of UART0.
+const FAKE_CONSOLE_WORKER = `
+import base64, json, sys
+config = json.loads(sys.stdin.readline())
+def emit(event):
+    print(json.dumps(event), flush=True)
+for byte in (0x01, 0x03, 0x0c, 0x00):
+    emit({"type": "uart_tx", "uart": 1, "byte": byte})
+for line in sys.stdin:
+    command = json.loads(line)
+    if command.get("cmd") == "stop":
+        break
+    if command.get("cmd") == "uart_send" and command.get("uart") == 0:
+        for byte in b"echo:" + base64.b64decode(command["data"]):
+            emit({"type": "uart_tx", "uart": 0, "byte": byte})
+`;
+
+Deno.test("mcp drive: send_serial types into an ESP32's UART0 through the worker, and the answer is in get_serial", async () => {
+  const fake = await Deno.makeTempDir({ prefix: "hzb-fake-worker-" });
+  try {
+    await Deno.writeFile(`${fake}/libqemu-xtensa.so`, new Uint8Array(0));
+    await Deno.writeTextFile(`${fake}/fake_worker.py`, FAKE_CONSOLE_WORKER);
+    // HERTZBENCH_PYTHON runs the worker script; this one ignores it and runs the fake.
+    await Deno.writeTextFile(`${fake}/python`, `#!/bin/sh\nexec python3 ${fake}/fake_worker.py\n`);
+    await Deno.chmod(`${fake}/python`, 0o755);
+    const env = {
+      QEMU_ESP32_LIB: `${fake}/libqemu-xtensa.so`,
+      HERTZBENCH_PYTHON: `${fake}/python`,
+    };
+    await withServer(async (client, workspace) => {
+      await Deno.writeFile(`${workspace}/fw.bin`, new Uint8Array(16));
+      await client.ok("create_scenario", {
+        path: "console.yaml",
+        yaml: `name: console\nduration: 60s\nnodes:\n` +
+          `  - { id: a, board: esp32, firmware: ./fw.bin, position: [0, 0], radios: [{ phy: ble }] }\n` +
+          `  - { id: b, board: esp32, firmware: ./fw.bin, position: [5, 0], radios: [{ phy: ble }] }\n`,
+      });
+      await client.ok("run_scenario", { path: "console.yaml" });
+      await pollStatus(client, (s) => s.state === "running", "the fake boards to connect");
+
+      const sent = await client.ok("send_serial", { node: "a", text: "status" });
+      assertEquals([sent.node, sent.bytes], ["a", 7]);
+      await client.ok("send_serial", { node: "a", data_base64: btoa("raw\n") });
+      const deadline = performance.now() + 10_000;
+      let lines: string[] = [];
+      while (lines.length < 2 && performance.now() < deadline) {
+        lines = (await client.ok("get_serial", { node: "a" })).lines.map((l: Json) => l.text);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assertEquals(lines, ["echo:status", "echo:raw"]);
+      assertEquals((await client.ok("get_serial", { node: "b" })).total, 0, "only a was typed to");
+      await client.ok("stop");
+    }, env);
+  } finally {
+    await Deno.remove(fake, { recursive: true });
+  }
 });

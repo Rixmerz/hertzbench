@@ -15,6 +15,7 @@ import { resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { checkFirmwareFiles, type LoadedScenario, loadScenario } from "../orchestrator/load.ts";
 import { linkJson, metricsDocument } from "../orchestrator/report.ts";
 import {
+  type CaptureKind,
   type LiveRun,
   RunInterrupted,
   type RunResult,
@@ -367,6 +368,101 @@ export class Session {
     };
   }
 
+  /** Bytes into a board's serial console while the run plays. */
+  async sendSerial(node: string, bytes: Uint8Array) {
+    const run = this.#underway("send_serial");
+    if (run.loaded.scenario.bridge?.id === node) {
+      throw new ToolError(`${node} is the mobile bridge: it has no serial console`);
+    }
+    this.#node(run.loaded.scenario, node);
+    const at = run.live!.elapsedMs();
+    try {
+      await run.live!.writeSerial(node, bytes);
+    } catch (error) {
+      if (error instanceof BoardError) throw new ToolError(error.message);
+      throw error;
+    }
+    return { node, bytes: bytes.length, at_ms: round(at) };
+  }
+
+  /**
+   * The run's events after sequence number `sinceSeq`, oldest first, at most
+   * `limit` of them; pass `next_since_seq` back to read on from there.
+   */
+  eventsSince(
+    sinceSeq: number,
+    filter: { types: readonly string[] | null; node: string | null },
+    limit: number,
+  ) {
+    const run = this.#any();
+    const all = this.events(run);
+    const matching = all.filter((e) =>
+      e.seq > sinceSeq &&
+      (filter.types === null || filter.types.includes(e.type)) &&
+      (filter.node === null || namesNode(e, filter.node))
+    );
+    const shown = matching.slice(0, limit);
+    const last = all[all.length - 1];
+    return {
+      state: run.state,
+      events: shown,
+      truncated: matching.length > shown.length,
+      // Past every event read so far, or only past the ones returned when cut short.
+      next_since_seq: matching.length > shown.length
+        ? shown[shown.length - 1]!.seq
+        : Math.max(sinceSeq, last?.seq ?? -1),
+    };
+  }
+
+  /**
+   * Write a capture of the current or last run, as it stands now, to a file
+   * inside the workspace: by default next to the run's other outputs.
+   */
+  async exportCapture(kind: CaptureKind, node: string | null, path: string | null) {
+    const run = this.#any();
+    if (!run.live) {
+      throw new ToolError(
+        run.state === "starting"
+          ? 'the boards are still starting; poll get_status until state is "running"'
+          : "the run never reached time zero: nothing was captured",
+      );
+    }
+    if (kind === "btsnoop") {
+      if (node === null) throw new ToolError("btsnoop needs the node whose HCI to export");
+      if (run.loaded.scenario.bridge?.id !== node) this.#node(run.loaded.scenario, node);
+    } else if (node !== null) {
+      throw new ToolError(`${kind} is the whole air; node applies to btsnoop only`);
+    }
+    const capture = run.live.capture(kind, node ?? undefined);
+    if (!capture) {
+      throw new ToolError(
+        kind === "btsnoop"
+          ? `this run has no HCI capture of ${node}: btsnoop is for BLE nodes`
+          : `this run has no ${kind} capture: pcap-80211 is for Wi-Fi runs`,
+      );
+    }
+    const defaultName = kind === "pcap"
+      ? "air-live.pcap"
+      : kind === "pcap-80211"
+      ? "air-live-80211.pcap"
+      : `hci-${node}-live.btsnoop`;
+    const file = await this.writablePath(
+      path ?? `${run.loaded.outDir}/${defaultName}`,
+      "path",
+      "file",
+    );
+    await Deno.writeFile(file, capture.bytes);
+    return {
+      file,
+      kind,
+      node,
+      packets: capture.packets,
+      bytes: capture.bytes.length,
+      state: run.state,
+      elapsed_ms: this.elapsedMs(run),
+    };
+  }
+
   #freeze(run: Run): void {
     if (run.live && run.finalEvents === null) {
       run.finalElapsedMs = Math.min(run.live.elapsedMs(), run.loaded.scenario.durationMs);
@@ -408,6 +504,12 @@ export class Session {
     }
     return node;
   }
+}
+
+/** Whether an event is about this node: it sent, received, moved or printed. */
+function namesNode(event: EngineEvent, node: string): boolean {
+  if ("node" in event && event.node === node) return true;
+  return "from" in event && (event.from === node || event.to === node);
 }
 
 /** Every station on the medium: the boards but the internet gateway, and the bridge. */

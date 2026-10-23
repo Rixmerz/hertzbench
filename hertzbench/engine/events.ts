@@ -117,6 +117,24 @@ export type EngineEvent =
   | (Stamped & { type: "phase"; label: string })
   | (Stamped & { type: "serial"; node: string; text: string });
 
+// A record, not a list, so adding an event type without naming it here fails the type check.
+const EVENT_TYPE_SET: Record<EngineEvent["type"], true> = {
+  tx: true,
+  deliver: true,
+  drop: true,
+  service: true,
+  move: true,
+  "link-override": true,
+  "espnow-send": true,
+  "ble-link": true,
+  warning: true,
+  phase: true,
+  serial: true,
+};
+
+/** Every event type, for callers that filter the log by name. */
+export const EVENT_TYPES = Object.keys(EVENT_TYPE_SET) as EngineEvent["type"][];
+
 /** Event without the fields the log fills in. Distributes over the union so each variant keeps its own shape. */
 export type NewEvent = EngineEvent extends infer E ? E extends EngineEvent ? Omit<E, "seq">
   : never

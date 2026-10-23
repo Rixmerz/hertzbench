@@ -9,6 +9,8 @@ import { BoardError } from "../orchestrator/boards/board.ts";
 import { ESP32_FIDELITY, resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { scriptedLauncher } from "../orchestrator/boards/scripted.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
+import { CAPTURE_KINDS, type CaptureKind } from "../orchestrator/runner.ts";
+import { EVENT_TYPES } from "../engine/mod.ts";
 import {
   BOARD_NAMES,
   parseLinkRule,
@@ -49,6 +51,54 @@ function optionalInt(args: Args, key: string, min: number, max: number): number 
     throw new ToolError(`${key} must be an integer from ${min} to ${max}`);
   }
   return value;
+}
+
+function optionalBoolean(args: Args, key: string): boolean | null {
+  const value = args[key];
+  if (value === undefined) return null;
+  if (typeof value !== "boolean") throw new ToolError(`${key} must be true or false`);
+  return value;
+}
+
+function oneOf<T extends string>(args: Args, key: string, allowed: readonly T[]): T {
+  const value = args[key];
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw new ToolError(`${key} must be one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+/** Most bytes one send_serial call carries: a few console lines, not a firmware image. */
+const MAX_SERIAL_BYTES = 4096;
+
+/** The bytes of send_serial: `text` (with a newline unless told not to) or `data_base64`. */
+function serialBytes(args: Args): Uint8Array {
+  const text = args.text;
+  const data = args.data_base64;
+  if ((text === undefined) === (data === undefined)) {
+    throw new ToolError("give exactly one of text or data_base64");
+  }
+  let bytes: Uint8Array;
+  if (text !== undefined) {
+    if (typeof text !== "string") throw new ToolError("text must be a string");
+    const newline = optionalBoolean(args, "newline") ?? true;
+    bytes = new TextEncoder().encode(newline ? `${text}\n` : text);
+  } else {
+    if (args.newline !== undefined) throw new ToolError("newline applies to text only");
+    if (typeof data !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+      throw new ToolError("data_base64 must be base64");
+    }
+    try {
+      bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    } catch {
+      throw new ToolError("data_base64 must be base64");
+    }
+  }
+  if (bytes.length === 0) throw new ToolError("nothing to send");
+  if (bytes.length > MAX_SERIAL_BYTES) {
+    throw new ToolError(`at most ${MAX_SERIAL_BYTES} bytes per call, got ${bytes.length}`);
+  }
+  return bytes;
 }
 
 /** Scenario and board errors are the caller's to fix: report them, do not crash. */
@@ -388,6 +438,110 @@ export function tools(session: Session): ToolDefinition[] {
             interference_db: args.interference_db,
           }, "inject_fault");
           return session.fault(rule, optionalText(args, "phase"));
+        }),
+    },
+    {
+      name: "send_serial",
+      description:
+        "Type into a board's serial console (UART0) while the run plays, as a person at a terminal would. ESP32 boards receive the bytes through QEMU's UART, with its RX interrupt; their answer shows in get_serial. Scripted boards have no console and refuse. Give `text` (a newline is added unless newline is false) or `data_base64` for raw bytes; at most 4096 bytes per call.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node: { type: "string" },
+          text: { type: "string" },
+          newline: { type: "boolean", description: "Append \\n to text. Default true" },
+          data_base64: { type: "string", description: "Raw bytes, base64" },
+        },
+        required: ["node"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["node", "text", "newline", "data_base64"]);
+          const node = requiredText(args, "node");
+          return session.sendSerial(node, serialBytes(args));
+        }),
+    },
+    {
+      name: "get_events",
+      description:
+        "The engine's event stream of the current or last run, oldest first: every transmission (tx), delivery and drop with its reason, RSSI and SNR, moves, link overrides, phases, serial lines, BLE link changes and warnings, timed in ms since time zero. The same records as events.jsonl. Pass the returned next_since_seq back as since_seq to follow the stream.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          since_seq: {
+            type: "integer",
+            minimum: -1,
+            description: "Only events with a larger sequence number. Default -1: from the start",
+          },
+          types: {
+            type: "array",
+            items: { type: "string", enum: EVENT_TYPES },
+            description: "Only these event types",
+          },
+          node: {
+            type: "string",
+            description: "Only events about this node: sent, received, moved or printed",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 5000,
+            description: "Most events to return. Default 500",
+          },
+        },
+        additionalProperties: false,
+      },
+      call: (args) => {
+        known(args, ["since_seq", "types", "node", "limit"]);
+        const since = optionalInt(args, "since_seq", -1, Number.MAX_SAFE_INTEGER) ?? -1;
+        let types: string[] | null = null;
+        if (args.types !== undefined) {
+          if (!Array.isArray(args.types) || args.types.length === 0) {
+            throw new ToolError("types must be a non-empty array of event types");
+          }
+          types = args.types.map((type) => {
+            if (typeof type !== "string" || !(EVENT_TYPES as string[]).includes(type)) {
+              throw new ToolError(
+                `unknown event type ${JSON.stringify(type)} (types: ${EVENT_TYPES.join(", ")})`,
+              );
+            }
+            return type;
+          });
+        }
+        const limit = optionalInt(args, "limit", 1, 5000) ?? 500;
+        return Promise.resolve(
+          session.eventsSince(since, { types, node: optionalText(args, "node") }, limit),
+        );
+      },
+    },
+    {
+      name: "export_capture",
+      description:
+        "Write a packet capture of the current or last run as it stands now, also mid-run and after stop (which writes no files of its own): `pcap` the whole air (Wi-Fi Ethernet frames, LoRaTap, the nRF24 record, or BLE link-layer packets, by the run's PHY), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi runs), `btsnoop` one BLE node's HCI traffic. Opens in Wireshark. Written inside the workspace, by default into the run's out_dir.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: CAPTURE_KINDS },
+          node: { type: "string", description: "btsnoop only: the BLE node" },
+          path: {
+            type: "string",
+            description:
+              "Where to write it, inside the workspace. Default <out_dir>/air-live.pcap, air-live-80211.pcap or hci-<node>-live.btsnoop",
+          },
+        },
+        required: ["kind"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["kind", "node", "path"]);
+          const kind: CaptureKind = oneOf(args, "kind", CAPTURE_KINDS);
+          return session.exportCapture(
+            kind,
+            optionalText(args, "node"),
+            optionalText(args, "path"),
+          );
         }),
     },
     {

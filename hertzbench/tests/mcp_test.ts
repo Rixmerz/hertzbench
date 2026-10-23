@@ -13,6 +13,8 @@ import {
 
 const TOOLS = [
   "create_scenario",
+  "export_capture",
+  "get_events",
   "get_metrics",
   "get_serial",
   "get_status",
@@ -20,6 +22,7 @@ const TOOLS = [
   "list_boards",
   "move_node",
   "run_scenario",
+  "send_serial",
   "stop",
   "validate_scenario",
 ];
@@ -39,7 +42,7 @@ assertions:
   - metric: { link: "a->b", kind: udp, delivered: { eq: 10 } }
 `;
 
-Deno.test("mcp: handshake, the ten tools, resources and protocol errors", async () => {
+Deno.test("mcp: handshake, every tool, resources and protocol errors", async () => {
   await withServer(async (client) => {
     const fresh = new McpClient(Deno.cwd());
     const init = await fresh.request("initialize", { protocolVersion: "1999-01-01" });

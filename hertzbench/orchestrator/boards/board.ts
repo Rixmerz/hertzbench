@@ -38,6 +38,8 @@ export interface BoardContext {
 export interface RunningBoard {
   /** Which clock the board's time follows, for the report. */
   readonly clockDescription: string;
+  /** Bytes into the board's serial console (UART0). Absent where the board has none. */
+  writeSerial?(bytes: Uint8Array): Promise<void>;
   stop(): Promise<void>;
 }
 

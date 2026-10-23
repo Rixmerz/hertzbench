@@ -254,6 +254,14 @@ class Esp32Board implements RunningBoard {
     return next;
   }
 
+  /** Bytes into UART0, the console, as the worker injects them: its RX interrupt fires as on hardware. */
+  writeSerial(bytes: Uint8Array): Promise<void> {
+    if (this.#stopping) return Promise.reject(new BoardError("the board is stopping"));
+    return this.#toWorker(
+      JSON.stringify({ cmd: "uart_send", uart: 0, data: toBase64(bytes) }) + "\n",
+    );
+  }
+
   async stop(): Promise<void> {
     this.#stopping = true;
     try {

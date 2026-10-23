@@ -102,7 +102,18 @@ export interface LiveRun {
   startPhase(label: string): void;
   /** The mobile bridge, with its host endpoints once started; null when the scenario has none. */
   bridge(): BridgeReport | null;
+  /** Bytes into a board's serial console. Throws BoardError when the board has none. */
+  writeSerial(id: string, bytes: Uint8Array): Promise<void>;
+  /**
+   * A capture of the run so far, as the run writes it at the end: `pcap` the
+   * air (air.pcap), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi only),
+   * `btsnoop` one BLE node's HCI. Null when this run has no such capture.
+   */
+  capture(kind: CaptureKind, node?: string): { bytes: Uint8Array; packets: number } | null;
 }
+
+export const CAPTURE_KINDS = ["pcap", "pcap-80211", "btsnoop"] as const;
+export type CaptureKind = (typeof CAPTURE_KINDS)[number];
 
 export class RunInterrupted extends Error {
   override name = "RunInterrupted";
@@ -224,6 +235,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     ...bridgePeer,
   ];
   const running: RunningBoard[] = [];
+  const boards = new Map<string, RunningBoard>();
   const clocks = new Map<string, string>();
   const stopAll = async () => {
     await Promise.allSettled(running.map((board) => board.stop()));
@@ -264,6 +276,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         );
       }
       running.push(board);
+      boards.set(node.id, board);
       clocks.set(node.id, board.clockDescription);
     }));
     const started = await Promise.race([startAll, interrupted, startupFailed]);
@@ -320,6 +333,29 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
           medium.startPhase(label);
         },
         bridge: () => network.bridge?.report() ?? null,
+        writeSerial: (id, bytes) => {
+          whileActive();
+          const board = boards.get(id);
+          if (!board) throw new BoardError(`${id} is not a board of this run`);
+          if (!board.writeSerial) {
+            throw new BoardError(
+              `${id} is a ${
+                scenario.nodes.find((n) => n.id === id)?.board
+              } board: it has no serial console to write to`,
+            );
+          }
+          return board.writeSerial(bytes);
+        },
+        capture: (kind, node) => {
+          const writer = kind === "pcap"
+            ? network.pcap
+            : kind === "pcap-80211"
+            ? network.dot11Pcap
+            : node === undefined
+            ? undefined
+            : network.hciCaptures?.get(node);
+          return writer ? { bytes: writer.toBytes(), packets: writer.packetCount } : null;
+        },
       };
       endLive = () => {
         live.active = false;
