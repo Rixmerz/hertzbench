@@ -23,8 +23,13 @@ export class ScenarioError extends Error {
 export type BoardKind = "esp32" | "scripted";
 
 export interface ScriptedSend {
-  /** The receiving node; null on LoRa, whose PHY has no addresses (every listener hears it). */
+  /**
+   * The receiving node; "broadcast" for an ESP-NOW frame to every station on
+   * the channel; null on LoRa, whose PHY has no addresses (every listener hears it).
+   */
   to: string | null;
+  /** Wi-Fi only: a UDP datagram, or an ESP-NOW frame through the fork's MAC model. */
+  via: "udp" | "espnow";
   everyMs: number;
   count: number;
   startMs: number;
@@ -83,6 +88,8 @@ export const METRIC_FIELDS = [
   "rssi_dbm",
   "snr_db",
   "mean_attempts",
+  "acked_pct",
+  "ack_rtt_p95_ms",
 ] as const;
 export type MetricField = (typeof METRIC_FIELDS)[number];
 
@@ -321,23 +328,42 @@ function parseBoard(value: unknown, path: string): BoardKind {
 
 const READERS = { fail, record, num, int, known };
 
+/** The `to` of a scripted ESP-NOW send that goes to every station on the channel. */
+export const BROADCAST_TARGET = "broadcast";
+
 function parseScript(value: unknown, path: string, phy: Phy): FirmwareSpec {
   const obj = record(value, path);
   known(obj, ["send", "listen"], path);
   const send = list(obj.send ?? [], `${path}.send`).map((raw, i): ScriptedSend => {
     const p = `${path}.send[${i}]`;
     const entry = record(raw, p);
-    known(entry, ["to", "every", "count", "start", "port", "payload"], p);
+    known(entry, ["to", "via", "every", "count", "start", "port", "payload"], p);
     if (phy === "lora" && entry.to !== undefined) {
       fail(`${p}.to`, "LoRa has no addresses: every listening node hears a send; leave `to` out");
     }
+    const via = entry.via === undefined ? "udp" : text(entry.via, `${p}.via`);
+    if (via !== "udp" && via !== "espnow") fail(`${p}.via`, 'expected "udp" or "espnow"');
+    if (via === "espnow" && phy !== "wifi") fail(`${p}.via`, "ESP-NOW needs a wifi radio");
+    const to = phy === "lora" ? null : text(entry.to, `${p}.to`);
+    if (to === BROADCAST_TARGET && via !== "espnow") {
+      fail(`${p}.to`, `"${BROADCAST_TARGET}" needs via: espnow`);
+    }
+    if (via === "espnow" && entry.port !== undefined) {
+      fail(`${p}.port`, "ESP-NOW has no ports");
+    }
+    const payload = entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`);
+    // Room for ":<sequence>" inside ESP-NOW's 250-byte payload.
+    if (via === "espnow" && new TextEncoder().encode(payload).length > 200) {
+      fail(`${p}.payload`, "an ESP-NOW payload must stay within 200 bytes");
+    }
     return {
-      to: phy === "lora" ? null : text(entry.to, `${p}.to`),
+      to,
+      via,
       everyMs: parseDuration(entry.every, `${p}.every`),
       count: int(entry.count, `${p}.count`, 1, 100_000),
       startMs: entry.start === undefined ? 0 : parseDuration(entry.start, `${p}.start`),
       port: int(entry.port ?? 5000, `${p}.port`, 1, 65535),
-      payload: entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`),
+      payload,
     };
   });
   if (obj.listen !== undefined && typeof obj.listen !== "boolean") {
@@ -515,7 +541,8 @@ const FRAME_KINDS: readonly FrameKind[] = [
   "tcp",
   "icmp",
   "ipv4",
-  "espnow-pseudo-ethernet",
+  "espnow",
+  "espnow-ack",
   "lora",
   "nrf24",
   "nrf24-ack",
@@ -637,7 +664,7 @@ function checkReferences(scenario: Scenario): void {
   scenario.nodes.forEach((node, i) => {
     if (node.firmware.kind !== "script") return;
     node.firmware.send.forEach((send, j) => {
-      if (send.to === null) return;
+      if (send.to === null || send.to === BROADCAST_TARGET) return;
       if (!medium.includes(send.to)) {
         fail(
           `nodes[${i}].firmware.send[${j}].to`,

@@ -7,15 +7,17 @@ Every protocol and board declares how faithful it is (PLAN.md D10). `hertzbench 
 - **F3**: firmware built with a simulation-only shim in place of the radio driver.
 - **none**: not firmware at all.
 
-## What Phase 1 ships
+## What ships
 
 | Component | Level | What it means |
 |---|---|---|
 | `qemu-wifi-l2` adapter, Wi-Fi/IP | **F2** | The board runs the production Wi-Fi driver. Its QEMU network device is a `stream` netdev to the engine. The engine sees Ethernet frames after the guest's embedded access point has converted 802.11 to Ethernet. It does not see the 802.11 exchange. |
-| `esp32` board | F2 for Wi-Fi/IP | The classic ESP32 only, machine `esp32-picsimlab`. The C3 asserts in eFuse reload when a NIC is attached, and the S3 machine models no radio (`esp32_worker.py`, `wifi_nic_arg`). |
-| `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings. It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
+| `qemu-wifi-l2` adapter, ESP-NOW (Phase 4) | **F1** | The same adapter and netdev. The fork's Wi-Fi MAC model turns each 802.11 action frame into pseudo-Ethernet; the engine carries it as bytes and applies the channel model. See [ESP-NOW](#esp-now) below. |
+| `esp32` board | F2 for Wi-Fi/IP, F1 for ESP-NOW | The classic ESP32 only, machine `esp32-picsimlab`. The C3 asserts in eFuse reload when a NIC is attached, and the S3 machine models no radio (`esp32_worker.py`, `wifi_nic_arg`). |
+| `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings, and sends ESP-NOW through a model of the fork's MAC (`orchestrator/boards/espnow-fork-model.ts`). It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
 | Internet gateway node (`internet_gateway: true`) | n/a | The one board that keeps SLIRP. See below. |
-| ESP-NOW, BLE, LoRa, nRF24 | not in Phase 1 | ADRs [0001](adr/0001-espnow-approach.md) (F1) and [0002](adr/0002-ble-approach.md) (F3). |
+| LoRa (SX127x) and nRF24L01+ (Phase 3) | **F1** | The same firmware binary; the radio chip is modelled at its SPI interface (`adapters/lora-sx127x/`, `adapters/nrf24/`, over `adapters/spi-link/`). |
+| BLE | not yet | ADR [0002](adr/0002-ble-approach.md) (F3). |
 
 ## Clock and latency
 
@@ -80,6 +82,60 @@ Each board gets a distinct locally-administered station MAC (`02:68:7a:62:01:NN`
 
 A board has exactly one Wi-Fi NIC, so a board cannot be on the medium and on SLIRP at once. `internet_gateway: true` marks the one ESP32 that keeps SLIRP (and its `hostfwd`). It is **not on the medium**: it cannot exchange frames with the other boards and gives them no internet access. Use it to run a board that talks to an MQTT broker or a web server on the host. Routing between the medium and the internet needs a second QEMU or a user-space NAT in the engine and is not part of Phase 1.
 
-## ESP-NOW ACK budget
+## ESP-NOW
 
-The fork waits 10 ms of virtual time for the ACK of a unicast ESP-NOW frame; that is a round trip (`esp32_wifi_ap.c:45`). The engine carries the fork's pseudo-Ethernet ESP-NOW frames as opaque bytes and flags them (`espnow-pseudo-ethernet`). If a link's p95 one-way delay for such frames passes 5 ms, `metrics.json` and the report carry a warning. Phase 4 owns the rest (ADR 0001).
+**Status: built from the fork's code, never run against QEMU.** The host this was written on has no libqemu. The ADR 0001 gate, two boards with distinct station MACs exchanging one ESP-NOW frame through the switch and an ACK coming back, has not been run; [e2e-esp32.md](e2e-esp32.md) makes it the first check. Everything below about the fork is read from `lcgamboa/qemu`, branch `picsimlab-esp32`, commit `9c29898`, which may differ from the library Velxio ships. The tests run the engine against a model of that code.
+
+**Level F1.** The firmware is the production binary and calls the real `esp_now_*` API. Its Wi-Fi driver hands 802.11 action frames to the fork's MAC model, which writes them to the netdev as pseudo-Ethernet (`hw/misc/esp32_wifi_ap.c:608-645`):
+
+| Bytes | Action frame | ACK |
+|---|---|---|
+| 0-5 | destination MAC (a peer, or `ff:ff:ff:ff:ff:ff`) | the sender of the frame it answers |
+| 6-11 | the board's station MAC | the board's station MAC |
+| 12 | `0xA0` \| channel, or `0xB0` \| channel when protected | `0xA0` \| channel |
+| 13 | `0x0d` | `0x1d` |
+| 14- | the 802.11 frame body (the ESP-NOW vendor-specific action) | nothing |
+
+The engine classifies them as frame kinds `espnow` and `espnow-ack`, with the fork's own checks.
+
+**Station MACs.** Every board gets `02:68:7a:62:01:NN` from a per-board eFuse image (NN is the board's place in the scenario). The fork drops any frame whose source is its own MAC (`:405`, `:471`), so two boards with the default MAC could not hear each other. Sketches that need a peer's MAC can compute it from that scheme; the example sketches do.
+
+**Channel.** An ESP-NOW frame is on the channel the guest wrote into byte 12, not the one the scenario gives its sender: the receiving fork drops any other (`:403`). A node hears it when its scenario `channel` matches. When a node transmits on a channel its scenario does not say, `metrics.json` and the report carry a warning. Set each node's `channel` to the channel its sketch selects.
+
+**Action frames** take the channel model of any frame: rate from SNR, backoff, up to `retry_limit` attempts, loss, jitter, overrides. A unicast frame stands for the whole 802.11 exchange including its ACK, as for Wi-Fi/IP. A broadcast frame gets one attempt at the basic rate and no ACK.
+
+**ACKs** are not frames of their own on the channel model; the action frame's MAC outcome already counted the ACK. The receiving fork sends one for every unicast frame it accepts, at once (`:425-462`). The engine delays it by SIFS, its airtime at 6 Mbit/s and propagation, plus the reverse link's `extra_latency_ms`. No loss, no retries, no `base_latency_ms` and no jitter.
+
+**The 10 ms ACK wait.** A unicast sender waits `WAIT_ACK_TIMEOUT` = 10 ms of guest time for the ACK, then reports the frame as failed (`:45`, `:640-643`). The **round trip** is the time from the action frame going on the air to its ACK reaching the sender: the frame's modelled delay, then the receiver's processing, then the ACK's delay. When it passes 10 ms the engine **drops the ACK** (`ack_timeout`) instead of delivering it late:
+
+- the fork does not check which frame an ACK answers (`:465-476`). A late ACK for one frame would complete the sender's *next* frame, which then reports success it never earned;
+- it calls `timer_mod_anticipate` on the ACK timer. On a timer that already fired, upstream QEMU arms it again, so a late ACK would also give the guest a second completion [inferred from upstream QEMU; `util/qemu-timer.c` is not in the checkout read];
+- no real radio sends an ACK 10 ms late.
+
+An ACK for which no frame is waiting (already answered, or lost on the way) is dropped as `ack_unmatched`.
+
+**Outcomes.** Every unicast ESP-NOW frame ends in one of four outcomes, in `events.jsonl` (`"type":"espnow-send"`, with `roundTripMs`), per link in `metrics.json` (`espnow`) and in the report's ESP-NOW table:
+
+| Outcome | Meaning | The sender's firmware sees |
+|---|---|---|
+| `acked` | the ACK came back within 10 ms | success |
+| `frame_lost` | the channel model, a loss override, a channel mismatch or a disconnected peer lost the frame | failure, after 10 ms |
+| `ack_timeout` | the frame arrived, the ACK would have come too late | failure, after 10 ms; **the receiver still got the data** |
+| `no_ack` | the frame arrived and the receiver never answered (its fork filtered it, for example on another channel) | failure, after 10 ms |
+
+`acked_pct` and `ack_rtt_p95_ms` can be asserted. A link with any `ack_timeout` gets a warning that names its slowest round trip.
+
+**Retries count against the wait.** At the edge of range a frame takes several attempts, each with a backoff from a doubling window. Their time is part of the round trip, so a frame that the channel model delivers on its sixth attempt may still fail at the sender. `espnow-mesh-5-nodes.yaml` shows it when sensor-4 walks away.
+
+**Clock.** On the manual clock of the tests the round trip is exact. In a real run the engine judges it on its own wall clock. That clock sees the receiver's processing and the loopback hop from the receiver, but not the hop from the sender's QEMU to the engine. On loopback that hop is well under a millisecond, but within it of 10 ms the engine and the guest's timer can disagree. If the engine forwards an ACK the guest has already given up on, the guest gets the spurious completion described above. The scripted board logs it as `espnow tx done (...) with nothing in flight`. The Xtensa guest runs without `-icount`, so its virtual clock follows host time; the report says so per node.
+
+**Not known without running the fork.** The fork's DMA path raises a tx-done interrupt as soon as the guest hands it a frame, and a second one when the ACK timer fires (`hw/misc/esp32_wifi.c:296-309`, `esp32_wifi_ap.c:121-126`). Which of the two the binary Wi-Fi driver turns into the ESP-NOW send callback, and with which status, depends on the closed driver. The model, the scripted board and this page assume the second. If the first wins, every unicast send would report its status at once.
+
+**Captures.** `air.pcap` keeps every frame as the netdev carries it, so ESP-NOW frames there are the fork's pseudo-Ethernet, which Wireshark shows as an unknown EtherType. A run that carried ESP-NOW also writes `air-80211.pcap` (link type 127) with each action frame and ACK rebuilt as 802.11 behind a radiotap header that holds the channel. The fork does not carry the BSSID or the sequence number, so the BSSID is `ff:ff:ff:ff:ff:ff` and the sequence is 0. Whether the guest's frame body ends in an FCS is not known, so the radiotap header does not claim one. The byte layout is pinned by a test; the file has not been opened in Wireshark on this host.
+
+**Not modelled.**
+
+- ESP-NOW's default rate is 1 Mbit/s (802.11b DSSS); the model uses the OFDM rates of Wi-Fi/IP. A real 1 Mbit/s frame spends longer on the air, so the model's round trips are a little shorter than a real radio's.
+- Encryption: the protected flag passes through, nothing is ciphered or checked.
+- The RSSI the firmware reads in its receive callback is the fork's random number (`esp32_wifi.c:327`); the report's RSSI comes from the engine.
+- Long-range mode, per-peer channels and channel changes while running. The engine reads each frame's channel, but the warning only flags a sender that disagrees with the scenario.

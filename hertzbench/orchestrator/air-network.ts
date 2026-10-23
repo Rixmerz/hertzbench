@@ -26,6 +26,8 @@ export interface NetworkSetup {
   waitConnected(nodeId: string, timeoutMs: number): Promise<void>;
   close(): Promise<void>;
   pcap: PcapWriter;
+  /** Wi-Fi only: the ESP-NOW frames again, as 802.11 behind radiotap; written when not empty. */
+  dot11Pcap?: PcapWriter;
   /** Features the firmware used that the chip model does not model, once each. */
   warnings: string[];
 }

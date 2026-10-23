@@ -1,5 +1,6 @@
 import {
   buildDhcpClientMessage,
+  buildEspNowBody,
   buildEthernet,
   buildUdp,
   type Clock,
@@ -13,7 +14,8 @@ import {
   type MediumOptions,
   type VirtualGateway,
 } from "../engine/mod.ts";
-import type { Scenario } from "../orchestrator/mod.ts";
+import { expandLinkRule, type LinkRule, type Scenario } from "../orchestrator/mod.ts";
+import { EspNowForkModel } from "../orchestrator/boards/espnow-fork-model.ts";
 
 export const GATEWAY_MAC = "02:68:7a:62:00:01";
 export const GATEWAY_IP = "192.168.4.1";
@@ -206,4 +208,78 @@ export function simulateScenarioTraffic(
   clock.advanceTo(scenario.durationMs);
   clock.runAll();
   return { clock, log, medium, sinks, nodes: [] };
+}
+
+/** One stream of ESP-NOW frames: a node id to a node id or "broadcast", one frame per period. */
+export interface EspNowTraffic {
+  from: string;
+  to: string;
+  everyMs: number;
+}
+
+/**
+ * Plays a scenario's geometry, link rules and timeline on a manual clock with
+ * ESP-NOW traffic between fork models (the scripted board's model of the QEMU
+ * fork's MAC), so a scenario's ESP-NOW metric assertions can be checked
+ * without any board and without wall-clock timing. Serial assertions cannot be.
+ */
+export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic[]): EventLog {
+  const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
+  const clock = new ManualClock();
+  const log = new EventLog();
+  const medium = new Medium({
+    seed: scenario.seed,
+    environment: scenario.environment,
+    clock,
+    log,
+    retryLimit: scenario.retryLimit,
+  });
+  const models = new Map<string, EspNowForkModel>();
+  for (const node of onMedium) {
+    if (node.radio.phy !== "wifi") throw new Error(`${node.id}: ESP-NOW needs a Wi-Fi node`);
+    const model = new EspNowForkModel({
+      mac: node.mac,
+      channel: node.radio.channel,
+      clock,
+      output: (frame) => medium.transmit(node.id, frame),
+      onReceive: () => {},
+      onTxDone: () => {},
+    });
+    models.set(node.id, model);
+    medium.addNode(
+      { id: node.id, mac: node.mac, position: node.position, radio: node.radio },
+      { ready: () => true, deliver: (frame) => model.receive(frame) },
+    );
+  }
+  const ids = onMedium.map((n) => n.id);
+  const applyRule = (rule: LinkRule) => {
+    for (const [from, to] of expandLinkRule(rule, ids)) {
+      medium.setLinkOverride(from, to, {
+        extraLossPct: rule.extraLossPct,
+        extraLatencyMs: rule.extraLatencyMs,
+      });
+    }
+  };
+  for (const rule of scenario.links) applyRule(rule);
+  for (const event of scenario.timeline) {
+    clock.schedule(event.atMs, () => {
+      if (event.label !== null) medium.startPhase(event.label);
+      for (const action of event.actions) {
+        if (action.kind === "move") medium.moveNode(action.node, action.to);
+        else applyRule(action.rule);
+      }
+    });
+  }
+  const payload = buildEspNowBody(new TextEncoder().encode("reading:0"));
+  for (const stream of traffic) {
+    const dst = stream.to === "broadcast"
+      ? "ff:ff:ff:ff:ff:ff"
+      : onMedium.find((n) => n.id === stream.to)!.mac;
+    for (let t = 0; t < scenario.durationMs; t += stream.everyMs) {
+      clock.schedule(t, () => models.get(stream.from)!.send(dst, payload));
+    }
+  }
+  clock.advanceTo(scenario.durationMs);
+  medium.close();
+  return log;
 }

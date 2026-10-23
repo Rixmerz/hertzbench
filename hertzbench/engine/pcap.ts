@@ -1,15 +1,18 @@
 // Classic libpcap writer, one link type per file: Ethernet for Wi-Fi/IP,
-// LoRaTap for LoRa, a private one for nRF24. One record per frame put on the
-// air, stamped with engine time. Losses are not in the capture (pcap has no way
-// to say "dropped"); they are in the event log and metrics.json.
+// LoRaTap for LoRa, a private one for nRF24, radiotap for ESP-NOW as 802.11.
+// One record per frame put on the air, stamped with engine time. Losses are not
+// in the capture (pcap has no way to say "dropped"); they are in the event log
+// and metrics.json.
 //
-// ESP-NOW action frames cross the netdev as the fork's pseudo-Ethernet (ADR
-// 0001), so Wireshark shows them as unknown Ethernet until an 802.11 + radiotap
-// converter exists. That is Phase 4.
+// The runner writes every Wi-Fi frame as the netdev carries it to the Ethernet
+// capture, and ESP-NOW frames a second time, converted to 802.11
+// (espnowToRadiotap), to a radiotap capture: in the first they are the fork's
+// pseudo-Ethernet, which Wireshark cannot decode.
 
 const GLOBAL_HEADER_BYTES = 24;
 const RECORD_HEADER_BYTES = 16;
 export const LINKTYPE_ETHERNET = 1;
+export const LINKTYPE_IEEE802_11_RADIOTAP = 127;
 /** LoRaTap pseudo-header followed by the LoRa payload (tcpdump.org link-layer header types). */
 export const LINKTYPE_LORATAP = 270;
 /** Reserved for private use; hertzbench puts nRF24 frames here (docs/fidelity.md says how). */

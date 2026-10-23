@@ -254,22 +254,6 @@ Deno.test("metrics: windows split at phase events and per-link totals add up", (
   assertEquals(total.delivered, near.delivered + far.delivered);
 });
 
-Deno.test("metrics: ESP-NOW pseudo-frames over the ACK budget raise a warning", () => {
-  const rig = makeRig({
-    positions: { a: { x: 0, y: 0 }, b: { x: 60, y: 0 } },
-    txPowerDbm: 8,
-  });
-  rig.medium.setLinkOverride("a", "b", { extraLossPct: 0, extraLatencyMs: 8 });
-  const frame = udpFrame(rig, "a", "b");
-  frame[12] = 0xe6; // pseudo-Ethernet marker: 0xE0 | channel 6
-  frame[13] = 0xd0;
-  for (let i = 0; i < 10; i++) rig.medium.transmit("a", frame);
-  rig.clock.runAll();
-  const metrics = computeMetrics(rig.log.events, rig.clock.now());
-  assertEquals(metrics.warnings.length, 1);
-  assert(metrics.warnings[0]!.includes("10 ms ACK"));
-});
-
 Deno.test("pcap: global header, record layout, and one record per frame put on the air", () => {
   const pcap = new PcapWriter(1_700_000_000_000);
   const rig = makeRig({

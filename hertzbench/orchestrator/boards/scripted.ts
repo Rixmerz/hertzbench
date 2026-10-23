@@ -1,21 +1,28 @@
 // A scripted board: NOT firmware and NOT an emulator. It plays the network side
-// of a board (DHCP, then UDP datagrams on a schedule, a pong for every ping)
-// over the same QEMU-stream framing a real board uses, so the adapter, engine,
+// of a board (DHCP, then UDP datagrams or ESP-NOW frames on a schedule, a pong
+// for every ping) over the same QEMU-stream framing a real board uses. Its
+// ESP-NOW goes through a model of the QEMU fork's MAC (espnow-fork-model.ts),
+// so the frames and ACKs on the wire are the fork's. The adapter, engine,
 // metrics, pcap and assertions can run end to end on a machine without libqemu.
 // Fidelity: none. Use it to develop scenarios and to test the engine; use the
 // esp32 board for anything that claims to be about firmware.
 
 import {
+  BROADCAST_MAC,
   buildDhcpClientMessage,
+  buildEspNowBody,
   buildUdp,
   DHCPDISCOVER,
   DHCPREQUEST,
   ipToString,
+  parseEspNowBody,
   parseIpv4,
   parseUdp,
 } from "../../engine/mod.ts";
 import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2/mod.ts";
+import { BROADCAST_TARGET } from "../scenario.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
+import { EspNowForkModel, type EspNowTxStatus } from "./espnow-fork-model.ts";
 import { startScriptedRadioBoard } from "./scripted-radio.ts";
 
 const DHCP_RETRY_MS = 1000;
@@ -48,17 +55,34 @@ class ScriptedBoard implements RunningBoard {
   #ip: string | null = null;
   #stopped = false;
   #dhcpTries = 0;
+  readonly #espnow: EspNowForkModel;
+  /** ESP-NOW frames go one at a time, as the driver sends them: the fork has one ACK timer. */
+  readonly #espnowQueue: { dst: string; label: string; body: Uint8Array }[] = [];
+  #espnowInFlight: string | null = null;
 
-  constructor(ctx: BoardContext, conn: Deno.TcpConn) {
+  constructor(ctx: BoardContext, conn: Deno.TcpConn, channel: number) {
     this.#ctx = ctx;
     this.#conn = conn;
     this.#xid = Number.parseInt(ctx.node.mac.slice(-2), 16) * 0x10001 + 0xc0de0000;
+    this.#espnow = new EspNowForkModel({
+      mac: ctx.node.mac,
+      channel,
+      clock: ctx.clock,
+      output: (frame) => this.#send(frame),
+      onReceive: (src, _dst, body) => {
+        const payload = parseEspNowBody(body);
+        const text = payload ? new TextDecoder().decode(payload) : "(not ESP-NOW)";
+        ctx.onSerial(`espnow rx ${text} from ${this.#peerName(src)}`);
+      },
+      onTxDone: (status) => this.#espnowDone(status),
+    });
     this.#reading = this.#readLoop();
     this.#discover();
   }
 
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#espnow.stop();
     for (const cancel of this.#cancels) cancel();
     this.#cancels.clear();
     try {
@@ -113,7 +137,36 @@ class ScriptedBoard implements RunningBoard {
     }
   }
 
+  #peerName(mac: string): string {
+    return this.#ctx.peers.find((p) => p.mac === mac)?.id ?? mac;
+  }
+
+  #espnowSend(dst: string, label: string, body: Uint8Array): void {
+    this.#espnowQueue.push({ dst, label, body });
+    if (this.#espnowInFlight === null) this.#espnowNext();
+  }
+
+  #espnowNext(): void {
+    const next = this.#espnowQueue.shift();
+    if (!next || this.#stopped) return;
+    this.#espnowInFlight = next.label;
+    this.#espnow.send(next.dst, next.body);
+  }
+
+  #espnowDone(status: EspNowTxStatus): void {
+    if (this.#stopped) return;
+    if (this.#espnowInFlight === null) {
+      // A completion with nothing sent: the fork re-armed its ACK timer for an ACK that came late.
+      this.#ctx.onSerial(`espnow tx done (${status}) with nothing in flight`);
+      return;
+    }
+    this.#ctx.onSerial(`espnow tx ${status === "ack" ? "ok" : "fail"} to ${this.#espnowInFlight}`);
+    this.#espnowInFlight = null;
+    this.#espnowNext();
+  }
+
   #receive(frame: Uint8Array): void {
+    if (this.#espnow.receive(frame)) return;
     const ip = parseIpv4(frame);
     if (!ip) return;
     const udp = parseUdp(frame, ip);
@@ -158,23 +211,36 @@ class ScriptedBoard implements RunningBoard {
     if (node.firmware.kind !== "script") return;
     const bound = clock.now();
     for (const send of node.firmware.send) {
-      const peer = peers.find((p) => p.id === send.to);
-      if (!peer) {
+      const peer = send.to === BROADCAST_TARGET ? null : peers.find((p) => p.id === send.to);
+      if (peer === undefined) {
         this.#ctx.onProblem(`${node.id}: scripted send to unknown peer ${send.to}`);
         continue;
       }
-      // One timer at a time: the next datagram is scheduled when this one goes.
+      const transmit = (seq: number) => {
+        const payload = new TextEncoder().encode(`${send.payload}:${seq}`);
+        if (send.via === "espnow") {
+          // The random field of the ESP-NOW header, made from the node and sequence for a stable capture.
+          const random = Number.parseInt(node.mac.slice(-2), 16) << 24 | seq;
+          this.#espnowSend(
+            peer?.mac ?? BROADCAST_MAC,
+            peer?.id ?? BROADCAST_TARGET,
+            buildEspNowBody(payload, random),
+          );
+        } else if (peer && this.#ip !== null) {
+          this.#send(buildUdp({
+            srcMac: node.mac,
+            dstMac: peer.mac,
+            srcIp: this.#ip,
+            dstIp: peer.ip,
+            srcPort: send.port,
+            dstPort: send.port,
+            payload,
+          }));
+        }
+      };
+      // One timer at a time: the next one is scheduled when this one goes.
       const sendNext = (seq: number) => {
-        if (this.#ip === null) return;
-        this.#send(buildUdp({
-          srcMac: node.mac,
-          dstMac: peer.mac,
-          srcIp: this.#ip,
-          dstIp: peer.ip,
-          srcPort: send.port,
-          dstPort: send.port,
-          payload: new TextEncoder().encode(`${send.payload}:${seq}`),
-        }));
+        transmit(seq);
         if (seq + 1 < send.count) {
           this.#schedule(bound + send.startMs + (seq + 1) * send.everyMs, () => sendNext(seq + 1));
         }
@@ -193,6 +259,6 @@ export const scriptedLauncher: BoardLauncher = {
     if (ctx.node.radio.phy !== "wifi") return await startScriptedRadioBoard(ctx, ctx.netPort);
     const conn = await Deno.connect({ hostname: LOOPBACK, port: ctx.netPort });
     conn.setNoDelay(true);
-    return new ScriptedBoard(ctx, conn);
+    return new ScriptedBoard(ctx, conn, ctx.node.radio.channel);
   },
 };
