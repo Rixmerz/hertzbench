@@ -47,6 +47,8 @@ export class Session {
   readonly workspace: string;
   readonly #options: SessionOptions;
   #run: Run | null = null;
+  /** Set from the check to the moment the run exists, so two calls in flight cannot both start one. */
+  #preparing = false;
 
   constructor(options: SessionOptions) {
     this.workspace = resolve(options.workspace);
@@ -68,32 +70,58 @@ export class Session {
     if (!inside(this.workspace, target)) {
       throw new ToolError(`${what} must be inside the workspace ${this.workspace}, got ${path}`);
     }
+    const escapes = () =>
+      new ToolError(`${what} resolves outside the workspace through a symlink: ${path}`);
+    const root = await Deno.realPath(this.workspace);
     const dir = kind === "dir" ? target : dirname(target);
+    // Check the part that exists before mkdir, or mkdir would follow a symlink
+    // and create directories outside before the check below refused them.
+    if (!inside(root, await Deno.realPath(await nearestExisting(dir)))) throw escapes();
     await Deno.mkdir(dir, { recursive: true });
-    if (!inside(await Deno.realPath(this.workspace), await Deno.realPath(dir))) {
-      throw new ToolError(`${what} resolves outside the workspace through a symlink: ${path}`);
+    if (!inside(root, await Deno.realPath(dir))) throw escapes();
+    if (kind === "file") {
+      // Writing through a symlink would land wherever it points.
+      const existing = await Deno.lstat(target).catch((error) => {
+        if (error instanceof Deno.errors.NotFound) return null;
+        throw error;
+      });
+      if (existing?.isSymlink) throw escapes();
     }
     return target;
   }
 
   /** Load, check and start a run in the background. Fails at once on anything known before boot. */
   async start(path: string, options: { seed?: number; out?: string }): Promise<Run> {
+    if (this.#preparing) {
+      throw new ToolError("another run_scenario call is preparing a run; wait for its answer");
+    }
     if (this.#run && (this.#run.state === "starting" || this.#run.state === "running")) {
       throw new ToolError(
         `run ${this.#run.id} (${this.#run.loaded.scenario.name}) is still ${this.#run.state}; ` +
           "call stop first",
       );
     }
+    this.#preparing = true;
+    try {
+      return await this.#launch(path, options);
+    } finally {
+      this.#preparing = false;
+    }
+  }
+
+  async #launch(path: string, options: { seed?: number; out?: string }): Promise<Run> {
     const file = this.resolvePath(path);
     const id = new Date().toISOString().replace(/[:.]/g, "-");
     const stem = file.replace(/^.*[\\/]/, "").replace(/\.ya?ml$/, "");
-    const outDir = await this.writablePath(options.out ?? `out/${stem}/${id}`, "out", "dir");
+    const outDir = this.resolvePath(options.out ?? `out/${stem}/${id}`);
     const loaded = await loadScenario(file, outDir);
     if (options.seed !== undefined) loaded.scenario = { ...loaded.scenario, seed: options.seed };
     const missing = await checkFirmwareFiles(loaded.scenario);
     if (missing.length > 0) throw new ToolError(`firmware not found\n  ${missing.join("\n  ")}`);
     const usesEsp32 = loaded.scenario.nodes.some((n) => n.board === "esp32");
     if (usesEsp32 && !this.#options.launchers?.esp32) resolveQemuLibrary();
+    // Only now, with nothing left to refuse, create the output directory.
+    await this.writablePath(outDir, "out", "dir");
 
     const abort = new AbortController();
     const run: Run = {
@@ -347,6 +375,17 @@ export class Session {
       );
     }
     return node;
+  }
+}
+
+async function nearestExisting(path: string): Promise<string> {
+  for (let current = path;; current = dirname(current)) {
+    try {
+      await Deno.lstat(current);
+      return current;
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound) || dirname(current) === current) throw error;
+    }
   }
 }
 

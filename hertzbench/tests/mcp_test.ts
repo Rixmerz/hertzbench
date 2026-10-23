@@ -133,6 +133,15 @@ class McpClient {
     return { code: status.code, stderr: await this.#stderr };
   }
 
+  /** Signal the server, as a terminal or a supervisor would, and wait for it to exit. */
+  async interrupt(signal: Deno.Signal): Promise<{ code: number; stderr: string }> {
+    this.#child.kill(signal);
+    const status = await this.#child.status;
+    await this.#reading;
+    await this.#writer.close().catch(() => {/* the server exited and closed its end */});
+    return { code: status.code, stderr: await this.#stderr };
+  }
+
   async initialize(): Promise<RpcResponse> {
     const response = await this.request("initialize", {
       protocolVersion: "2025-06-18",
@@ -424,6 +433,50 @@ Deno.test("mcp: move_node and inject_fault act on a live run; stop keeps what ha
   });
 });
 
+Deno.test("mcp: two run_scenario calls sent together start one run, not two", async () => {
+  await withServer(async (client) => {
+    const path = `${EXAMPLES}live-3-scripted.yaml`;
+    const outcomes = await Promise.all([
+      client.call("run_scenario", { path }),
+      client.call("run_scenario", { path }),
+    ]);
+    assertEquals(outcomes.map((o) => o.isError).sort(), [false, true], outcomes[1]!.text);
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    assertEquals((await client.ok("stop")).state, "stopped");
+  });
+});
+
+Deno.test("mcp: a symlink cannot carry a write out of the workspace", async () => {
+  const outside = await Deno.makeTempDir({ prefix: "hzb-outside-" });
+  try {
+    await withServer(async (client, workspace) => {
+      await Deno.writeTextFile(`${outside}/victim.yaml`, "keep me\n");
+      await Deno.symlink(`${outside}/victim.yaml`, `${workspace}/link.yaml`);
+      assertStringIncludes(
+        await client.refused("create_scenario", {
+          path: "link.yaml",
+          yaml: SHORT,
+          overwrite: true,
+        }),
+        "symlink",
+      );
+      assertEquals(await Deno.readTextFile(`${outside}/victim.yaml`), "keep me\n");
+
+      await Deno.symlink(outside, `${workspace}/escape`);
+      await client.ok("create_scenario", { path: "s.yaml", yaml: SHORT });
+      assertStringIncludes(
+        await client.refused("run_scenario", { path: "s.yaml", out: "escape/run1" }),
+        "symlink",
+      );
+      const created = [];
+      for await (const entry of Deno.readDir(outside)) created.push(entry.name);
+      assertEquals(created, ["victim.yaml"], "nothing was created outside");
+    });
+  } finally {
+    await Deno.remove(outside, { recursive: true });
+  }
+});
+
 Deno.test("mcp: closing stdin during a run stops it and the server exits cleanly", async () => {
   const workspace = await Deno.makeTempDir({ prefix: "hzb-mcp-" });
   try {
@@ -437,6 +490,27 @@ Deno.test("mcp: closing stdin during a run stops it and the server exits cleanly
     assert(performance.now() - started < 10_000, "the 120 s run did not hold the server open");
   } finally {
     await Deno.remove(workspace, { recursive: true });
+  }
+});
+
+Deno.test("mcp: SIGINT and SIGTERM stop the run in progress and end the server", async () => {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const workspace = await Deno.makeTempDir({ prefix: "hzb-mcp-" });
+    try {
+      const client = new McpClient(workspace);
+      await client.initialize();
+      await client.ok("run_scenario", { path: `${EXAMPLES}live-3-scripted.yaml` });
+      await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+      const started = performance.now();
+      const { code, stderr } = await client.interrupt(signal);
+      assertEquals(code, 0, stderr);
+      assert(
+        performance.now() - started < 10_000,
+        `${signal}: the run did not hold the server open`,
+      );
+    } finally {
+      await Deno.remove(workspace, { recursive: true });
+    }
   }
 });
 

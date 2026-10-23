@@ -192,7 +192,7 @@ export function tools(session: Session): ToolDefinition[] {
     {
       name: "create_scenario",
       description:
-        "Write a scenario YAML file inside the workspace after validating it. Invalid text is refused and nothing is written. Read the resource hertzbench://docs/scenario-format.md for the format and hertzbench://examples/* for examples. Firmware paths in the file resolve from the file's own directory; missing firmware is reported, not refused, so the scenario can come first.",
+        `Write a scenario YAML file inside the workspace after validating it. Invalid text is refused and nothing is written. Read the resource ${PRODUCT.slug}://docs/scenario-format.md for the format and ${PRODUCT.slug}://examples/* for examples. Firmware paths in the file resolve from the file's own directory; missing firmware is reported, not refused, so the scenario can come first.`,
       inputSchema: {
         type: "object",
         properties: {
