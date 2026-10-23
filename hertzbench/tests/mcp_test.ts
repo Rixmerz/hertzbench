@@ -526,3 +526,36 @@ async function pollMetrics(client: McpClient, done: (metrics: Json) => boolean) 
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+Deno.test("mcp: a run's mobile bridge shows in get_status, moves with move_node and logs to get_serial", async () => {
+  await withServer(async (client, workspace) => {
+    await Deno.writeTextFile(
+      `${workspace}/bridge.yaml`,
+      `name: mcp-bridge
+duration: 4s
+environment: { shadowing_sigma_db: 0 }
+nodes:
+  - { id: web, board: scripted, position: [0, 0], firmware: { serve: [{ port: 80, protocol: http }] } }
+  - { id: other, board: scripted, position: [5, 0] }
+bridge:
+  position: [2, 0]
+  expose: [{ node: web, port: 80, service: http }]
+`,
+    );
+    await client.ok("run_scenario", { path: "bridge.yaml" });
+    const running = await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    const endpoint = running.bridge.endpoints[0];
+    assertEquals([running.bridge.kind, endpoint.node, endpoint.port], ["ip", "web", 80]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const response = await fetch(`http://127.0.0.1:${endpoint.hostPort}/hi`);
+    assertEquals(await response.text(), "web: GET /hi\n");
+
+    const moved = await client.ok("move_node", { node: "phone", position: [30, 0] });
+    assertEquals(moved.links.map((l: Json) => l.link), ["phone->web", "phone->other"]);
+    const status = await client.ok("get_status");
+    assertEquals(status.bridge.position, { x: 30, y: 0 });
+    const log = await client.ok("get_serial", { node: "phone" });
+    assert(log.lines.some((l: Json) => /-> web:80 connected$/.test(l.text)), JSON.stringify(log));
+    await pollStatus(client, (s) => s.state === "finished", "the run to finish");
+  });
+});

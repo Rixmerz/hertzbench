@@ -228,6 +228,13 @@ export class Session {
         position: !node.internetGateway && run.live ? run.live.position(node.id) : node.position,
       })),
       problems: run.result?.problems ?? run.live?.problems() ?? [],
+      // The mobile bridge: where a phone connects, and where its station is on the medium.
+      bridge: scenario.bridge
+        ? {
+          ...(run.result?.bridge ?? run.live?.bridge() ?? { kind: scenario.bridge.kind }),
+          position: run.live ? run.live.position(scenario.bridge.id) : scenario.bridge.position,
+        }
+        : null,
     };
     if (run.state === "finished" && run.result) {
       return {
@@ -246,7 +253,8 @@ export class Session {
 
   serial(node: string, sinceMs: number | null, tail: number) {
     const run = this.#any();
-    this.#node(run.loaded.scenario, node);
+    // The bridge's log is its serial: the connections it relayed, the operations it replayed.
+    if (run.loaded.scenario.bridge?.id !== node) this.#node(run.loaded.scenario, node);
     const lines = this.events(run).filter((e): e is Extract<EngineEvent, { type: "serial" }> =>
       e.type === "serial" && e.node === node && (sinceMs === null || e.t > sinceMs)
     );
@@ -290,15 +298,19 @@ export class Session {
 
   move(node: string, to: Position, phase: string | null) {
     const run = this.#underway("move_node");
-    const scenarioNode = this.#node(run.loaded.scenario, node);
-    if (scenarioNode.internetGateway) {
+    const bridge = run.loaded.scenario.bridge;
+    // The bridge's station is on the medium like a board: moving it moves the phone, as the channel model sees it.
+    if (bridge?.id !== node && this.#node(run.loaded.scenario, node).internetGateway) {
       throw new ToolError(`${node} is the internet gateway: it is not on the medium`);
     }
     const live = run.live!;
     const from = live.position(node);
     if (phase !== null) live.startPhase(phase);
     live.moveNode(node, to);
-    const peers = run.loaded.scenario.nodes.filter((n) => !n.internetGateway && n.id !== node);
+    const peers = [
+      ...run.loaded.scenario.nodes.filter((n) => !n.internetGateway),
+      ...(bridge ? [{ id: bridge.id }] : []),
+    ].filter((n) => n.id !== node);
     return {
       node,
       from,
@@ -368,11 +380,11 @@ export class Session {
   #node(scenario: Scenario, id: string) {
     const node = scenario.nodes.find((n) => n.id === id);
     if (!node) {
-      throw new ToolError(
-        `no node named ${JSON.stringify(id)} (nodes: ${
-          scenario.nodes.map((n) => n.id).join(", ")
-        })`,
-      );
+      const names = [
+        ...scenario.nodes.map((n) => n.id),
+        ...(scenario.bridge ? [scenario.bridge.id] : []),
+      ];
+      throw new ToolError(`no node named ${JSON.stringify(id)} (nodes: ${names.join(", ")})`);
     }
     return node;
   }
