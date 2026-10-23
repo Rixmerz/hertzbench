@@ -1,0 +1,59 @@
+# Three ESP32 boards exchange UDP over Wi-Fi/IP. At 40 s board c walks behind a
+# wall: its link to a degrades (rate falls back, retries pile up, frames are
+# lost) while the closer link to b holds. Run it with:
+#
+#   hertzbench run hertzbench/scenarios/examples/udp-3-nodes.yaml
+#
+# Needs libqemu-xtensa and the ESP-IDF toolchain; see docs/e2e-esp32.md.
+# scenarios/examples/udp-3-scripted.yaml is the same experiment with scripted
+# boards, which runs anywhere.
+name: udp-3-nodes
+seed: 42
+duration: 90s
+environment:
+  preset: indoor_office
+  # No random shadowing, so the distances below mean the same thing for every seed.
+  shadowing_sigma_db: 0
+  obstacles:
+    - { polygon: [[30, -20], [30, 20]], attenuation_db: 12 }
+nodes:
+  - id: a
+    board: esp32
+    firmware: ./fw/udp-node
+    position: [0, 0]
+    # Velxio's compile step forces channel 5 on every sketch (espidf_compiler.py).
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+  - id: b
+    board: esp32
+    firmware: ./fw/udp-node
+    position: [8, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+  - id: c
+    board: esp32
+    firmware: ./fw/udp-node
+    position: [12, 4]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+timeline:
+  - { at: 40s, label: behind-wall, move: { node: c, to: [42, 0] } }
+assertions:
+  # The firmware joined Wi-Fi, got the lease the engine's DHCP server holds for
+  # it, and heard its peers. Boot time counts: time zero is when the netdevs connect.
+  - serial: { node: a, contains: "wifi up ip=192.168.4.11", within: 30s }
+  - serial: { node: c, contains: "rx pong", within: 40s }
+  # Before the move every link is clean and fast.
+  - metric: {
+      link: "*->*",
+      phase: start,
+      kind: udp,
+      loss_pct: { lt: 5 },
+      latency_p95_ms: { lt: 2 },
+    }
+  # Behind the wall c's link to a loses frames and slows down; its link to b holds.
+  - metric: {
+      link: "c->a",
+      phase: behind-wall,
+      kind: udp,
+      loss_pct: { gt: 20 },
+      latency_p95_ms: { gt: 4 },
+    }
+  - metric: { link: "c->b", phase: behind-wall, kind: udp, loss_pct: { lt: 10 } }

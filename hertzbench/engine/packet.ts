@@ -218,3 +218,39 @@ export function buildUdp(spec: UdpSpec): Uint8Array {
   packet.set(spec.payload, u + UDP_HEADER_BYTES);
   return buildEthernet(spec.dstMac, spec.srcMac, ETHERTYPE_IPV4, packet);
 }
+
+export const DHCPDISCOVER = 1;
+export const DHCPREQUEST = 3;
+
+/**
+ * A DHCPDISCOVER or DHCPREQUEST the way a client with no address sends it
+ * (RFC 2131): broadcast, source 0.0.0.0, the broadcast flag set.
+ */
+export function buildDhcpClientMessage(
+  clientMac: string,
+  type: typeof DHCPDISCOVER | typeof DHCPREQUEST,
+  xid: number,
+  requestedIp?: string,
+): Uint8Array {
+  const body = new Uint8Array(300);
+  body[0] = 1; // BOOTREQUEST
+  body[1] = 1; // Ethernet
+  body[2] = 6;
+  new DataView(body.buffer).setUint32(4, xid >>> 0);
+  body[10] = 0x80; // broadcast flag
+  body.set(macToBytes(clientMac), 28);
+  body.set([99, 130, 83, 99], 236); // magic cookie
+  const options = [53, 1, type];
+  if (requestedIp) options.push(50, 4, ...ipToBytes(requestedIp));
+  options.push(255);
+  body.set(options, 240);
+  return buildUdp({
+    srcMac: clientMac,
+    dstMac: BROADCAST_MAC,
+    srcIp: "0.0.0.0",
+    dstIp: "255.255.255.255",
+    srcPort: 68,
+    dstPort: 67,
+    payload: body,
+  });
+}

@@ -14,11 +14,16 @@ export interface Clock {
 /** Real time. Delays shorter than the timer resolution round up to one tick. */
 export class WallClock implements Clock {
   readonly kind = "wall";
-  readonly #origin = performance.now();
+  #origin = performance.now();
   readonly #timers = new Set<ReturnType<typeof setTimeout>>();
 
   now(): number {
     return performance.now() - this.#origin;
+  }
+
+  /** Make "now" time zero again, e.g. once every board has connected. Call before scheduling anything. */
+  restart(): void {
+    this.#origin = performance.now();
   }
 
   schedule(atMs: number, fn: () => void): () => void {

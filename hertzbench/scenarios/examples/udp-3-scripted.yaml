@@ -1,0 +1,56 @@
+# The udp-3-nodes experiment with scripted boards instead of ESP32 firmware.
+# Scripted boards are a network-side stand-in, not an emulator, so this runs
+# without libqemu and finishes in seconds. Same geometry, same wall, same seed.
+name: udp-3-scripted
+seed: 42
+duration: 6s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+  obstacles:
+    - { polygon: [[30, -20], [30, 20]], attenuation_db: 12 }
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: b, every: 50ms, count: 100, payload: ping }
+        - { to: c, every: 50ms, count: 100, payload: ping }
+  - id: b
+    board: scripted
+    position: [8, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: a, every: 50ms, count: 100, payload: ping }
+        - { to: c, every: 50ms, count: 100, payload: ping }
+  - id: c
+    board: scripted
+    position: [12, 4]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: a, every: 50ms, count: 100, payload: ping }
+        - { to: b, every: 50ms, count: 100, payload: ping }
+timeline:
+  - { at: 2500ms, label: behind-wall, move: { node: c, to: [42, 0] } }
+assertions:
+  - serial: { node: a, contains: "dhcp bound ip=192.168.4.11", within: 1s }
+  - serial: { node: c, contains: "rx pong", within: 2s }
+  - metric: {
+      link: "*->*",
+      phase: start,
+      kind: udp,
+      loss_pct: { lt: 5 },
+      latency_p95_ms: { lt: 2 },
+    }
+  - metric: {
+      link: "c->a",
+      phase: behind-wall,
+      kind: udp,
+      loss_pct: { gt: 20 },
+      latency_p95_ms: { gt: 4 },
+    }
+  - metric: { link: "c->b", phase: behind-wall, kind: udp, loss_pct: { lt: 10 } }

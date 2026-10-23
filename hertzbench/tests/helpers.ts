@@ -1,4 +1,5 @@
 import {
+  buildDhcpClientMessage,
   buildEthernet,
   buildUdp,
   type Clock,
@@ -12,6 +13,7 @@ import {
   type MediumOptions,
   type VirtualGateway,
 } from "../engine/mod.ts";
+import type { Scenario } from "../orchestrator/mod.ts";
 
 export const GATEWAY_MAC = "02:68:7a:62:00:01";
 export const GATEWAY_IP = "192.168.4.1";
@@ -120,34 +122,14 @@ export function broadcastFrame(srcMac: string): Uint8Array {
   return buildEthernet("ff:ff:ff:ff:ff:ff", srcMac, 0x0842, new Uint8Array(40));
 }
 
-/** A hand-built DHCPDISCOVER or DHCPREQUEST (RFC 2131), the way a client with no address sends it. */
+/** A DHCPDISCOVER (1) or DHCPREQUEST (3), built by the same code the scripted board uses. */
 export function dhcpClientMessage(
   clientMac: string,
   type: 1 | 3,
   xid: number,
   requestedIp?: string,
 ): Uint8Array {
-  const body = new Uint8Array(300);
-  body[0] = 1; // BOOTREQUEST
-  body[1] = 1; // Ethernet
-  body[2] = 6;
-  new DataView(body.buffer).setUint32(4, xid);
-  body[10] = 0x80; // broadcast flag
-  clientMac.split(":").forEach((b, i) => body[28 + i] = Number.parseInt(b, 16));
-  body.set([99, 130, 83, 99], 236);
-  const options = [53, 1, type];
-  if (requestedIp) options.push(50, 4, ...requestedIp.split(".").map(Number));
-  options.push(255);
-  body.set(options, 240);
-  return buildUdp({
-    srcMac: clientMac,
-    dstMac: "ff:ff:ff:ff:ff:ff",
-    srcIp: "0.0.0.0",
-    dstIp: "255.255.255.255",
-    srcPort: 68,
-    dstPort: 67,
-    payload: body,
-  });
+  return buildDhcpClientMessage(clientMac, type, xid, requestedIp);
 }
 
 /** Poll until `condition` holds. Fails the test after `timeoutMs` instead of hanging it. */
@@ -161,4 +143,66 @@ export async function until(
     if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
+}
+
+/**
+ * Plays a scenario's geometry and timeline on a manual clock with synthetic UDP
+ * traffic (every node pings every other node), so a scenario's metric
+ * assertions can be checked without any board. Serial assertions cannot be.
+ */
+export function simulateScenarioTraffic(
+  scenario: Scenario,
+  options: { everyMs: number; payloadBytes: number },
+): Rig {
+  const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
+  const clock = new ManualClock();
+  const log = new EventLog();
+  const medium = new Medium({
+    seed: scenario.seed,
+    environment: scenario.environment,
+    clock,
+    log,
+    retryLimit: scenario.retryLimit,
+  });
+  const sinks = new Map<string, RecordingSink>();
+  for (const node of onMedium) {
+    const sink = new RecordingSink(clock);
+    sinks.set(node.id, sink);
+    medium.addNode(
+      { id: node.id, mac: node.mac, position: node.position, radio: node.radio },
+      sink,
+    );
+  }
+  const payload = new Uint8Array(options.payloadBytes).fill(0x61);
+  for (const event of scenario.timeline) {
+    clock.schedule(event.atMs, () => {
+      if (event.label !== null) medium.startPhase(event.label);
+      for (const action of event.actions) {
+        if (action.kind === "move") medium.moveNode(action.node, action.to);
+      }
+    });
+  }
+  for (let t = 0; t < scenario.durationMs; t += options.everyMs) {
+    clock.advanceTo(t);
+    for (const from of onMedium) {
+      for (const to of onMedium) {
+        if (from === to) continue;
+        medium.transmit(
+          from.id,
+          buildUdp({
+            srcMac: from.mac,
+            dstMac: to.mac,
+            srcIp: from.ip,
+            dstIp: to.ip,
+            srcPort: 5000,
+            dstPort: 5000,
+            payload,
+          }),
+        );
+      }
+    }
+  }
+  clock.advanceTo(scenario.durationMs);
+  clock.runAll();
+  return { clock, log, medium, sinks, nodes: [] };
 }

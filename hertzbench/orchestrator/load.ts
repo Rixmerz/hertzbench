@@ -1,0 +1,82 @@
+// Reads a scenario file and turns the paths in it into absolute ones, so the
+// rest of the orchestrator never depends on the working directory.
+
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import type { OutputPaths } from "./runner.ts";
+import { parseScenario, type Scenario, ScenarioError } from "./scenario.ts";
+
+export interface LoadedScenario {
+  scenario: Scenario;
+  file: string;
+  outDir: string;
+  outputs: OutputPaths;
+}
+
+function resolveFrom(baseDir: string, path: string): string {
+  return isAbsolute(path) ? path : resolve(baseDir, path);
+}
+
+/**
+ * `outDirOverride` (the CLI's --out) wins over the scenario's `outputs`, so one
+ * flag redirects everything a run writes.
+ */
+export async function loadScenario(file: string, outDirOverride?: string): Promise<LoadedScenario> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(file);
+  } catch (error) {
+    throw new ScenarioError(
+      `cannot read ${file}: ${error instanceof Error ? error.message : error}`,
+    );
+  }
+  const parsed = parseScenario(text);
+  const baseDir = dirname(resolve(file));
+
+  const scenario: Scenario = {
+    ...parsed,
+    nodes: parsed.nodes.map((node) => ({
+      ...node,
+      firmware: node.firmware.kind === "script"
+        ? node.firmware
+        : { ...node.firmware, path: resolveFrom(baseDir, node.firmware.path) },
+    })),
+  };
+
+  const outDir = outDirOverride !== undefined ? resolve(outDirOverride) : join(baseDir, "out");
+  const pick = (configured: string | null, fallback: string) =>
+    outDirOverride === undefined && configured !== null
+      ? resolveFrom(baseDir, configured)
+      : join(outDir, fallback);
+  return {
+    scenario,
+    file: resolve(file),
+    outDir,
+    outputs: {
+      metrics: pick(parsed.outputs.metrics, "metrics.json"),
+      pcap: pick(parsed.outputs.pcap, "air.pcap"),
+      events: pick(parsed.outputs.events, "events.jsonl"),
+    },
+  };
+}
+
+/** Check that the firmware a scenario names exists, so `validate` and `run` fail before any board starts. */
+export async function checkFirmwareFiles(scenario: Scenario): Promise<string[]> {
+  const missing: string[] = [];
+  for (const node of scenario.nodes) {
+    if (node.firmware.kind === "script") continue;
+    try {
+      const info = await Deno.stat(node.firmware.path);
+      const wantDir = node.firmware.kind === "sketch";
+      if (info.isDirectory !== wantDir) {
+        missing.push(
+          `${node.id}: ${node.firmware.path} should be a ${
+            wantDir ? "sketch directory" : ".bin file"
+          }`,
+        );
+      }
+    } catch {
+      missing.push(`${node.id}: ${node.firmware.path} does not exist`);
+    }
+  }
+  return missing;
+}
