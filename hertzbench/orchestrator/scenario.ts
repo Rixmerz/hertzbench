@@ -373,6 +373,19 @@ export function macForIndex(index: number): string {
 
 const FIRST_HOST = 11;
 
+/** A board address the DHCP server may hand out: inside the /24, and not the network, gateway or broadcast address. */
+function checkHostAddress(ip: string, subnetPrefix: string, path: string): void {
+  const match = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!match || match[1] !== subnetPrefix) fail(path, `${ip} is not inside ${subnetPrefix}.0/24`);
+  const host = Number(match[2]);
+  if (host < 2 || host > 254) {
+    fail(
+      path,
+      `${ip} cannot be used: .0 is the network, .1 the gateway and .255 the broadcast address`,
+    );
+  }
+}
+
 /** The virtual gateway sits at .1 of the subnet with a MAC no board is given. */
 export const GATEWAY_MAC = "02:68:7a:62:00:01";
 export const GATEWAY_HOST = 1;
@@ -404,6 +417,7 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
       if (explicitIp !== null && count > 1) {
         fail(`${path}.ip`, "cannot be set on a node with count > 1");
       }
+      if (explicitIp !== null) checkHostAddress(explicitIp, subnetPrefix, `${path}.ip`);
       nodes.push({
         id: count === 1 ? baseId : `${baseId}-${k + 1}`,
         board,

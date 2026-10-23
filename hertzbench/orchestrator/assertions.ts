@@ -90,7 +90,8 @@ export function evaluateAssertions(
         : { description, passed: false, detail: "never seen" };
     }
 
-    let window: { fromMs?: number; toMs?: number } = {};
+    // Events logged before time zero (boards still starting) are not measured.
+    let window: { fromMs?: number; toMs?: number } = { fromMs: 0 };
     if (assertion.phase !== null) {
       const index = phases.findIndex((p) => p.label === assertion.phase);
       const phase = phases[index];

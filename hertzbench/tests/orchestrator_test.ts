@@ -245,14 +245,18 @@ Deno.test("runner: a board that cannot start aborts the run and releases everyth
   await assertRejects(() => runFrom(TWO_NODES, { scripted: failing }), BoardError, "boom");
 });
 
-Deno.test("runner: an early board problem is reported and fails the run", async () => {
-  let contexts: BoardContext[] = [];
+Deno.test("runner: a problem during the run is reported and fails the run", async () => {
   const noisy: BoardLauncher = {
     fidelity: "test",
     async start(ctx) {
-      contexts = [...contexts, ctx];
       const inner = await scriptedLauncher.start(ctx);
-      if (ctx.node.id === "b") ctx.onProblem("b: worker exited early (code 1)");
+      // Once the run is underway, as a worker that dies mid-run would.
+      if (ctx.node.id === "b") {
+        ctx.clock.schedule(
+          ctx.clock.now() + 300,
+          () => ctx.onProblem("b: worker exited early (code 1)"),
+        );
+      }
       return inner;
     },
   };
@@ -260,10 +264,28 @@ Deno.test("runner: an early board problem is reported and fails the run", async 
   try {
     assertEquals(result.passed, false);
     assertEquals(result.problems, ["b: worker exited early (code 1)"]);
-    assertEquals(contexts.length, 2);
+    assertEquals(result.metrics.total.find((l) => l.from === "a")?.delivered, 10);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("runner: a board that reports a problem while starting ends the run at once, listing it", async () => {
+  const dying: BoardLauncher = {
+    fidelity: "test",
+    start(ctx) {
+      if (ctx.node.id === "b") ctx.onProblem("b: worker exited early (code 1); see /tmp/x.log");
+      // It never connects, so only fail-fast can end the wait before the 30 s timeout.
+      return Promise.resolve({ clockDescription: "test", stop: () => Promise.resolve() });
+    },
+  };
+  const started = performance.now();
+  const error = await assertRejects(() => runFrom(TWO_NODES, { scripted: dying }), BoardError);
+  assert(
+    performance.now() - started < 5000,
+    "start-up failure must not wait for the connect timeout",
+  );
+  assert(error.message.includes("b: worker exited early (code 1); see /tmp/x.log"), error.message);
 });
 
 Deno.test("runner: the internet gateway gets no medium port and no lease; others do", async () => {

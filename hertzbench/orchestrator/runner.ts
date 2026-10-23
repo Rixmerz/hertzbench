@@ -16,7 +16,12 @@ import {
   WallClock,
 } from "../engine/mod.ts";
 import { type AssertionResult, evaluateAssertions } from "./assertions.ts";
-import { type BoardLauncher, type PeerInfo, type RunningBoard } from "./boards/board.ts";
+import {
+  BoardError,
+  type BoardLauncher,
+  type PeerInfo,
+  type RunningBoard,
+} from "./boards/board.ts";
 import { esp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
 import { metricsDocument } from "./report.ts";
@@ -125,9 +130,29 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     retryLimit: scenario.retryLimit,
     tap: (tMs, _node, frame) => pcap.addFrame(tMs, frame),
   });
+  const interrupted = new Promise<never>((_, reject) => {
+    const stop = () => reject(new RunInterrupted("run interrupted"));
+    if (options.signal?.aborted) stop();
+    else options.signal?.addEventListener("abort", stop, { once: true });
+  });
+  // A board that reports a problem before the run is underway (it crashed, or
+  // its worker exited) will never connect: end startup at once instead of
+  // waiting out the connect timeout.
+  let startupOver = false;
+  let failStartup: (error: BoardError) => void = () => {};
+  const startupFailed = new Promise<never>((_, reject) => {
+    failStartup = reject;
+  });
+  // Nobody awaits these when the run ends normally.
+  interrupted.catch(() => {});
+  startupFailed.catch(() => {});
+  const reportProblem = (message: string) => {
+    problems.push(message);
+    if (!startupOver) failStartup(new BoardError(startupMessage(problems)));
+  };
   const adapter = new QemuWifiL2Adapter(
     (id, frame) => medium.transmit(id, frame),
-    (id, message) => problems.push(`${id}: ${message}`),
+    (id, message) => reportProblem(`${id}: ${message}`),
   );
 
   const ports = new Map<string, number>();
@@ -148,21 +173,23 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     await Promise.allSettled(running.map((board) => board.stop()));
   };
 
-  const interrupted = new Promise<never>((_, reject) => {
-    const stop = () => reject(new RunInterrupted("run interrupted"));
-    if (options.signal?.aborted) stop();
-    else options.signal?.addEventListener("abort", stop, { once: true });
-  });
-  // Nobody may be awaiting `interrupted` when the run ends normally.
-  interrupted.catch(() => {});
+  // Logged times are raw clock readings, so the log never steps backwards.
+  // Time zero of the scenario is the instant every netdev has connected;
+  // everything the scenario measures (timeline, duration, phases, `within`)
+  // is relative to it, and the log is shifted by it at the end.
+  let zeroMs = 0;
+  // Boards still starting when the run is cut short must be waited for, or they
+  // would come up after the cleanup below and nobody would stop them.
+  let startAll: Promise<PromiseSettledResult<void>[]> = Promise.resolve([]);
 
   try {
     progress(`starting ${scenario.nodes.length} board(s)`);
     // allSettled, not all: a board that fails must not leave its siblings
     // half-started and unowned while the first rejection unwinds the run.
-    const started = await Promise.race([
-      Promise.allSettled(scenario.nodes.map(async (node) => {
-        const board = await launchers[node.board].start({
+    startAll = Promise.allSettled(scenario.nodes.map(async (node) => {
+      let board: RunningBoard;
+      try {
+        board = await launchers[node.board].start({
           node,
           netPort: ports.get(node.id) ?? null,
           peers: peersOf(node.id),
@@ -170,26 +197,40 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
           clock,
           outDir: options.outDir,
           onSerial: (text) => log.append({ type: "serial", t: clock.now(), node: node.id, text }),
-          onProblem: (message) => problems.push(message),
+          onProblem: reportProblem,
         });
-        running.push(board);
-        clocks.set(node.id, board.clockDescription);
-      })),
-      interrupted,
-    ]);
+      } catch (error) {
+        if (error instanceof BoardError) throw error;
+        throw new BoardError(
+          `${node.id}: could not start: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+      running.push(board);
+      clocks.set(node.id, board.clockDescription);
+    }));
+    const started = await Promise.race([startAll, interrupted, startupFailed]);
     for (const outcome of started) if (outcome.status === "rejected") throw outcome.reason;
 
     const startupTimeout = options.startupTimeoutMs ?? 30_000;
-    await Promise.race([
-      Promise.all(mediumIds.map((id) => adapter.waitConnected(id, startupTimeout))),
-      interrupted,
-    ]);
+    try {
+      await Promise.race([
+        Promise.all(mediumIds.map((id) => adapter.waitConnected(id, startupTimeout))),
+        interrupted,
+        startupFailed,
+      ]);
+    } catch (error) {
+      if (error instanceof RunInterrupted || error instanceof BoardError) throw error;
+      throw new BoardError(
+        startupMessage(problems, error instanceof Error ? error.message : String(error)),
+      );
+    }
+    startupOver = true;
+    zeroMs = clock.now();
     progress(`all boards connected; running for ${scenario.durationMs} ms`);
 
-    clock.restart();
     for (const rule of scenario.links) applyLinkRule(medium, rule, mediumIds);
     for (const event of scenario.timeline) {
-      clock.schedule(event.atMs, () => {
+      clock.schedule(zeroMs + event.atMs, () => {
         if (event.label !== null) medium.startPhase(event.label);
         for (const action of event.actions) {
           if (action.kind === "move") medium.moveNode(action.node, action.to);
@@ -198,18 +239,21 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       });
     }
     await Promise.race([
-      new Promise<void>((resolve) => clock.schedule(scenario.durationMs, resolve)),
+      new Promise<void>((resolve) => clock.schedule(zeroMs + scenario.durationMs, resolve)),
       interrupted,
     ]);
   } finally {
+    startupOver = true;
+    await startAll;
     await stopAll();
     await adapter.close();
     medium.close();
     clock.cancelAll();
   }
 
-  const metrics = computeMetrics(log.events, scenario.durationMs);
-  const assertions = evaluateAssertions(scenario.assertions, log.events, metrics.phases);
+  const events = log.events.map((event) => ({ ...event, t: event.t - zeroMs }));
+  const metrics = computeMetrics(events, scenario.durationMs);
+  const assertions = evaluateAssertions(scenario.assertions, events, metrics.phases);
   const nodes = scenario.nodes.map((node): NodeReport => ({
     id: node.id,
     board: node.board,
@@ -224,15 +268,21 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   const result: RunResult = {
     scenario,
     nodes,
-    events: log.events,
+    events,
     metrics,
     assertions,
     problems,
     passed: problems.length === 0 && assertions.every((a) => a.passed),
     files: [],
   };
-  result.files = await writeOutputs(result, options, log, pcap);
+  result.files = await writeOutputs(result, options, pcap);
   return result;
+}
+
+/** What went wrong before the run began, for the person who has to fix it. */
+function startupMessage(problems: readonly string[], cause?: string): string {
+  const lines = [cause ?? "a board failed during start-up", ...problems.map((p) => `  ${p}`)];
+  return `${lines.join("\n")}\n  (worker logs are in the output directory)`;
 }
 
 function applyLinkRule(medium: Medium, rule: LinkRule, mediumIds: readonly string[]): void {
@@ -247,7 +297,6 @@ function applyLinkRule(medium: Medium, rule: LinkRule, mediumIds: readonly strin
 async function writeOutputs(
   result: RunResult,
   options: RunOptions,
-  log: EventLog,
   pcap: PcapWriter,
 ): Promise<string[]> {
   const files: string[] = [];
@@ -259,9 +308,12 @@ async function writeOutputs(
   };
   await write(options.outputs.metrics, JSON.stringify(metricsDocument(result), null, 2) + "\n");
   await write(options.outputs.pcap, pcap.toBytes());
-  await write(options.outputs.events, log.toJsonl());
+  await write(
+    options.outputs.events,
+    result.events.map((e) => JSON.stringify(e)).join("\n") + (result.events.length ? "\n" : ""),
+  );
   const serialByNode = new Map<string, string[]>();
-  for (const event of log.events) {
+  for (const event of result.events) {
     if (event.type !== "serial") continue;
     const lines = serialByNode.get(event.node) ?? [];
     lines.push(`[${(event.t / 1000).toFixed(3)}s] ${event.text}`);

@@ -154,7 +154,7 @@ export function computeMetrics(events: readonly EngineEvent[], endMs: number): M
   });
 
   const warnings: string[] = [];
-  for (const link of linkStats(events, { kind: "espnow-pseudo-ethernet" })) {
+  for (const link of linkStats(events, { fromMs: 0, kind: "espnow-pseudo-ethernet" })) {
     if (link.latencyMs && link.latencyMs.p95 > ACK_ONE_WAY_BUDGET_MS) {
       warnings.push(
         `link ${link.from}->${link.to}: ESP-NOW p95 one-way delay ${
@@ -164,5 +164,5 @@ export function computeMetrics(events: readonly EngineEvent[], endMs: number): M
       );
     }
   }
-  return { total: linkStats(events), phases, warnings };
+  return { total: linkStats(events, { fromMs: 0 }), phases, warnings };
 }

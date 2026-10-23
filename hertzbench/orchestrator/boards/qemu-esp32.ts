@@ -117,7 +117,12 @@ class Esp32Board implements RunningBoard {
   readonly #pumps: Promise<void>[];
   #stopping = false;
 
-  constructor(ctx: BoardContext, child: Deno.ChildProcess, stderrLog: Deno.FsFile) {
+  constructor(
+    ctx: BoardContext,
+    child: Deno.ChildProcess,
+    stderrLog: Deno.FsFile,
+    stderrLogPath: string,
+  ) {
     this.#child = child;
     this.#writer = child.stdin.getWriter();
     const lines = new LineAssembler(ctx.onSerial);
@@ -129,7 +134,9 @@ class Esp32Board implements RunningBoard {
       child.status.then((status) => {
         lines.flush();
         if (!this.#stopping) {
-          ctx.onProblem(`${ctx.node.id}: worker exited early (code ${status.code})`);
+          ctx.onProblem(
+            `${ctx.node.id}: worker exited early (code ${status.code}); see ${stderrLogPath}`,
+          );
         }
       }),
     ];
@@ -234,7 +241,8 @@ export const esp32Launcher: BoardLauncher = {
       stdout: "piped",
       stderr: "piped",
     }).spawn();
-    const stderrLog = await Deno.open(`${ctx.outDir}/worker-${node.id}.stderr.log`, {
+    const stderrLogPath = `${ctx.outDir}/worker-${node.id}.stderr.log`;
+    const stderrLog = await Deno.open(stderrLogPath, {
       write: true,
       create: true,
       truncate: true,
@@ -242,6 +250,6 @@ export const esp32Launcher: BoardLauncher = {
     const writer = child.stdin.getWriter();
     await writer.write(new TextEncoder().encode(JSON.stringify(config) + "\n"));
     writer.releaseLock();
-    return new Esp32Board(ctx, child, stderrLog);
+    return new Esp32Board(ctx, child, stderrLog, stderrLogPath);
   },
 };
