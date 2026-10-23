@@ -66,6 +66,10 @@ export class Session {
 
   /** A path the caller gave, relative to the workspace. Reads may go anywhere, like the CLI. */
   resolvePath(path: string): string {
+    // The OS ends a file name at NUL, so it would open another file than the one named (CWE-158).
+    if (path.includes("\0")) {
+      throw new ToolError(`path contains a NUL byte: ${JSON.stringify(path)}`);
+    }
     return isAbsolute(path) ? path : resolve(this.workspace, path);
   }
 
@@ -81,12 +85,38 @@ export class Session {
     }
     const escapes = () =>
       new ToolError(`${what} resolves outside the workspace through a symlink: ${path}`);
+    // A file sits where the path needs a directory: the caller's to fix, not a server fault.
+    const blocked = (error: unknown) => {
+      if (
+        error instanceof Deno.errors.AlreadyExists || error instanceof Deno.errors.NotADirectory
+      ) {
+        return new ToolError(
+          `${what} ${path}: a part of it that must be a directory is not a directory`,
+        );
+      }
+      return error;
+    };
     const root = await Deno.realPath(this.workspace);
     const dir = kind === "dir" ? target : dirname(target);
     // Check the part that exists before mkdir, or mkdir would follow a symlink
     // and create directories outside before the check below refused them.
-    if (!inside(root, await Deno.realPath(await nearestExisting(dir)))) throw escapes();
-    await Deno.mkdir(dir, { recursive: true });
+    let existingPart: string;
+    try {
+      existingPart = await nearestExisting(dir);
+    } catch (error) {
+      throw blocked(error);
+    }
+    // A dangling symlink exists to lstat but resolves nowhere: refuse it like any other link out.
+    const resolvedPart = await Deno.realPath(existingPart).catch((error) => {
+      if (error instanceof Deno.errors.NotFound) throw escapes();
+      throw error;
+    });
+    if (!inside(root, resolvedPart)) throw escapes();
+    try {
+      await Deno.mkdir(dir, { recursive: true });
+    } catch (error) {
+      throw blocked(error);
+    }
     if (!inside(root, await Deno.realPath(dir))) throw escapes();
     if (kind === "file") {
       // Writing through a symlink would land wherever it points.
@@ -95,6 +125,7 @@ export class Session {
         throw error;
       });
       if (existing?.isSymlink) throw escapes();
+      if (existing?.isDirectory) throw new ToolError(`${what} ${path} is a directory, not a file`);
     }
     return target;
   }
