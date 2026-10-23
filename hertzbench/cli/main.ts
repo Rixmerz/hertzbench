@@ -1,9 +1,10 @@
-// `hertzbench run scenario.yaml` and `hertzbench validate scenario.yaml`.
-// Exit status: 0 the run passed, 1 an assertion failed or a board reported a
-// problem, 2 the scenario was invalid or the environment cannot run it, 130
-// interrupted.
+// `hertzbench run scenario.yaml`, `hertzbench validate scenario.yaml` and
+// `hertzbench mcp`. Exit status: 0 the run passed, 1 an assertion failed or a
+// board reported a problem, 2 the scenario was invalid or the environment
+// cannot run it, 130 interrupted.
 
 import { PRODUCT } from "../brand.ts";
+import { runMcpServer } from "../mcp/mod.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
 import { renderReport } from "../orchestrator/report.ts";
@@ -15,17 +16,23 @@ const USAGE = `${PRODUCT.displayName}: simulate the radio network between boards
 Usage:
   ${PRODUCT.cli} run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
   ${PRODUCT.cli} validate <scenario.yaml>
+  ${PRODUCT.cli} mcp [--workspace DIR]
 
   (${PRODUCT.cliAlias} is a short alias for ${PRODUCT.cli})
 
 run        Run the scenario headless, print a report, write metrics.json,
            air.pcap and events.jsonl, and exit non-zero if an assertion fails.
 validate   Check the scenario file and the firmware paths it names.
+mcp        Serve the Model Context Protocol on stdin and stdout, for an AI
+           agent such as Claude Code (see docs/mcp.md).
 
 Options:
   --out DIR   Write every output file into DIR instead of the scenario's own.
   --seed N    Override the scenario seed.
   --quiet     Print only the result line.
+  --workspace DIR
+              mcp: the directory scenario paths are relative to and the only
+              place the server writes. Default: the current directory.
 `;
 
 interface Args {
@@ -34,6 +41,7 @@ interface Args {
   out: string | undefined;
   seed: number | undefined;
   quiet: boolean;
+  workspace: string | undefined;
 }
 
 function parseArgs(argv: string[]): Args | string {
@@ -43,6 +51,7 @@ function parseArgs(argv: string[]): Args | string {
     out: undefined,
     seed: undefined,
     quiet: false,
+    workspace: undefined,
   };
   const rest = [...argv];
   const command = rest.shift();
@@ -59,6 +68,9 @@ function parseArgs(argv: string[]): Args | string {
         return "--seed needs an integer from 0 to 4294967295";
       }
       args.seed = value;
+    } else if (arg === "--workspace") {
+      args.workspace = rest.shift();
+      if (args.workspace === undefined) return "--workspace needs a directory";
     } else if (arg === "--quiet") {
       args.quiet = true;
     } else if (arg === "--help" || arg === "-h") {
@@ -79,6 +91,14 @@ async function main(argv: string[]): Promise<number> {
   if (typeof args === "string") {
     console.error(args === USAGE ? args : `${args}\n\n${USAGE}`);
     return args === USAGE ? 0 : 2;
+  }
+  if (args.command === "mcp") {
+    if (args.file !== undefined) {
+      console.error(`mcp takes no scenario file\n\n${USAGE}`);
+      return 2;
+    }
+    await runMcpServer({ workspace: args.workspace ?? Deno.cwd() });
+    return 0;
   }
   if (args.command !== "run" && args.command !== "validate") {
     console.error(`unknown command ${JSON.stringify(args.command)}\n\n${USAGE}`);

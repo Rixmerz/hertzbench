@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { computeMetrics, type EngineEvent } from "../engine/mod.ts";
 import {
   type BoardContext,
@@ -6,6 +6,7 @@ import {
   type BoardLauncher,
   evaluateAssertions,
   expandLinkRule,
+  type LiveRun,
   loadScenario,
   metricsDocument,
   parseScenario,
@@ -217,6 +218,43 @@ Deno.test("runner: a scenario link rule forces loss on that direction only", asy
     assertEquals([ab.delivered, ab.dropped.extra_loss], [0, 10]);
     const pongs = result.metrics.total.find((l) => l.from === "b" && l.to === "a");
     assertEquals(pongs, undefined, "no ping arrived, so no pong went back");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runner: live control at time zero lands in the log like the timeline, then closes", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "hzb-run-" });
+  try {
+    const file = `${dir}/s.yaml`;
+    await Deno.writeTextFile(file, TWO_NODES);
+    const loaded = await loadScenario(file, `${dir}/out`);
+    let live: LiveRun | undefined;
+    let pairs: [string, string][] = [];
+    let rssiBefore = 0;
+    const result = await runScenario(loaded.scenario, {
+      outDir: loaded.outDir,
+      outputs: loaded.outputs,
+      onUnderway: (run) => {
+        live = run;
+        rssiBefore = run.budget("a", "b").rssiDbm;
+        run.startPhase("live");
+        run.moveNode("b", { x: 40, y: 0 });
+        pairs = run.setLink({ from: "a", to: "*", extraLossPct: 100, extraLatencyMs: 0 });
+      },
+    });
+    assert(live, "onUnderway was called");
+    assertEquals(pairs, [["a", "b"]]);
+    assert(live.budget("a", "b").rssiDbm < rssiBefore - 10, "moving b 35 m away costs signal");
+    assertEquals(live.position("b"), { x: 40, y: 0 });
+    const ab = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
+    assert((ab.dropped.extra_loss ?? 0) > 0, JSON.stringify(ab));
+    assertEquals(ab.delivered, 0);
+    assert(result.events.some((e) => e.type === "move" && e.node === "b"));
+    assert(result.metrics.phases.some((p) => p.label === "live"));
+    assertEquals(live.events().length, result.events.length, "readers work after the end");
+    assertEquals(live.active, false);
+    assertThrows(() => live!.moveNode("b", { x: 0, y: 0 }), Error, "the run has ended");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

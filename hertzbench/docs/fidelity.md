@@ -22,6 +22,7 @@ Every protocol and board declares how faithful it is (PLAN.md D10). `hertzbench 
 - Every ESP32 node runs on **wall-clock time**: the Xtensa QEMU machine runs without `-icount` when Wi-Fi is on (`icount_shift_for_run`). The report says so per node, in `clock`.
 - Latency is **modelled**: the delay the channel model assigned to a frame, which the engine then waits out in real time. It is not measured on a guest clock. `metrics.json` carries `"latency": "modelled"`.
 - Time zero of a run is the moment every board's netdev has connected. Guest boot time counts toward `duration`.
+- A move or fault made live through the MCP server (`move_node`, `inject_fault`) happens when the call arrives, on the wall clock. A run with live actions is not reproducible from its seed alone; put the same actions in the scenario `timeline` to replay it ([mcp.md](mcp.md)).
 
 ## Channel model v1
 

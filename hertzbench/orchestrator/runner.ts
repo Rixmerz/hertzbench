@@ -8,6 +8,7 @@ import {
   computeMetrics,
   type EngineEvent,
   EventLog,
+  type LinkBudget,
   Medium,
   type MetricsReport,
   PcapWriter,
@@ -22,7 +23,7 @@ import {
   type PeerInfo,
   type RunningBoard,
 } from "./boards/board.ts";
-import { esp32Launcher } from "./boards/qemu-esp32.ts";
+import { createEsp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
 import { metricsDocument } from "./report.ts";
 import {
@@ -51,6 +52,33 @@ export interface RunOptions {
   progress?: (line: string) => void;
   /** Abort to end the run early: boards are stopped and the run rejects with RunInterrupted. */
   signal?: AbortSignal;
+  /** Called once, at time zero, with live control over the run (the MCP server's live tools). */
+  onUnderway?: (run: LiveRun) => void;
+}
+
+/**
+ * A run that is underway. Moves, link rules and phases go through the same
+ * medium calls the timeline uses, so they land in the event log and the
+ * metrics exactly like scripted ones. Readers keep working after the run ends;
+ * the actions throw once it has.
+ */
+export interface LiveRun {
+  /** False from the moment the run starts winding down. */
+  readonly active: boolean;
+  /** Milliseconds since time zero. */
+  elapsedMs(): number;
+  /** Every event so far, timed from time zero as in the final result. */
+  events(): EngineEvent[];
+  /** Board and adapter problems reported so far. */
+  problems(): readonly string[];
+  /** Where a node on the medium is now. */
+  position(id: string): Position;
+  /** The current budget of a directed link. */
+  budget(from: string, to: string): LinkBudget;
+  moveNode(id: string, to: Position): void;
+  /** Applies the rule now; returns the directed pairs it set. */
+  setLink(rule: LinkRule): [string, string][];
+  startPhase(label: string): void;
 }
 
 export class RunInterrupted extends Error {
@@ -81,11 +109,6 @@ export interface RunResult {
   files: string[];
 }
 
-const DEFAULT_LAUNCHERS: Record<BoardKind, BoardLauncher> = {
-  esp32: esp32Launcher,
-  scripted: scriptedLauncher,
-};
-
 export function expandLinkRule(rule: LinkRule, mediumIds: readonly string[]): [string, string][] {
   const pairs: [string, string][] = [];
   for (const from of mediumIds) {
@@ -103,7 +126,11 @@ async function ensureParentDir(path: string): Promise<void> {
 }
 
 export async function runScenario(scenario: Scenario, options: RunOptions): Promise<RunResult> {
-  const launchers = { ...DEFAULT_LAUNCHERS, ...options.launchers };
+  const launchers: Record<BoardKind, BoardLauncher> = {
+    esp32: createEsp32Launcher(),
+    scripted: scriptedLauncher,
+    ...options.launchers,
+  };
   const progress = options.progress ?? (() => {});
   await Deno.mkdir(options.outDir, { recursive: true });
 
@@ -181,6 +208,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   // Boards still starting when the run is cut short must be waited for, or they
   // would come up after the cleanup below and nobody would stop them.
   let startAll: Promise<PromiseSettledResult<void>[]> = Promise.resolve([]);
+  let endLive = () => {};
 
   try {
     progress(`starting ${scenario.nodes.length} board(s)`);
@@ -229,6 +257,35 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     progress(`all boards connected; running for ${scenario.durationMs} ms`);
 
     for (const rule of scenario.links) applyLinkRule(medium, rule, mediumIds);
+    if (options.onUnderway) {
+      const whileActive = () => {
+        if (!live.active) throw new Error("the run has ended");
+      };
+      const live: { active: boolean } & LiveRun = {
+        active: true,
+        elapsedMs: () => clock.now() - zeroMs,
+        events: () => log.events.map((event) => ({ ...event, t: event.t - zeroMs })),
+        problems: () => problems,
+        position: (id) => medium.node(id).position,
+        budget: (from, to) => medium.budget(from, to),
+        moveNode: (id, to) => {
+          whileActive();
+          medium.moveNode(id, to);
+        },
+        setLink: (rule) => {
+          whileActive();
+          return applyLinkRule(medium, rule, mediumIds);
+        },
+        startPhase: (label) => {
+          whileActive();
+          medium.startPhase(label);
+        },
+      };
+      endLive = () => {
+        live.active = false;
+      };
+      options.onUnderway(live);
+    }
     for (const event of scenario.timeline) {
       clock.schedule(zeroMs + event.atMs, () => {
         if (event.label !== null) medium.startPhase(event.label);
@@ -243,6 +300,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       interrupted,
     ]);
   } finally {
+    endLive();
     startupOver = true;
     await startAll;
     await stopAll();
@@ -285,13 +343,19 @@ function startupMessage(problems: readonly string[], cause?: string): string {
   return `${lines.join("\n")}\n  (worker logs are in the output directory)`;
 }
 
-function applyLinkRule(medium: Medium, rule: LinkRule, mediumIds: readonly string[]): void {
-  for (const [from, to] of expandLinkRule(rule, mediumIds)) {
+function applyLinkRule(
+  medium: Medium,
+  rule: LinkRule,
+  mediumIds: readonly string[],
+): [string, string][] {
+  const pairs = expandLinkRule(rule, mediumIds);
+  for (const [from, to] of pairs) {
     medium.setLinkOverride(from, to, {
       extraLossPct: rule.extraLossPct,
       extraLatencyMs: rule.extraLatencyMs,
     });
   }
+  return pairs;
 }
 
 async function writeOutputs(

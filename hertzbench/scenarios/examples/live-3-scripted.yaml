@@ -1,0 +1,40 @@
+# A long, steady run to drive by hand through the MCP server: three scripted
+# boards ping each other ten times a second for two minutes and nothing is
+# scheduled, so every change comes from move_node and inject_fault. Stop it
+# with the stop tool once you have seen what you wanted.
+#
+# Try: move c to [42, 0] (behind the wall) with phase "behind-wall", then
+# compare the c->a link in the "start" and "behind-wall" phases of get_metrics.
+# Scripted boards are traffic generators, not firmware (fidelity: none).
+name: live-3-scripted
+seed: 7
+duration: 120s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+  obstacles:
+    - { polygon: [[30, -20], [30, 20]], attenuation_db: 12 }
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    firmware:
+      send:
+        - { to: b, every: 100ms, count: 1200, payload: ping }
+        - { to: c, every: 100ms, count: 1200, payload: ping }
+  - id: b
+    board: scripted
+    position: [8, 0]
+    firmware:
+      send:
+        - { to: a, every: 100ms, count: 1200, payload: ping }
+        - { to: c, every: 100ms, count: 1200, payload: ping }
+  - id: c
+    board: scripted
+    position: [12, 4]
+    firmware:
+      send:
+        - { to: a, every: 100ms, count: 1200, payload: ping }
+        - { to: b, every: 100ms, count: 1200, payload: ping }
+assertions:
+  - serial: { node: a, contains: "rx pong", within: 2s }
