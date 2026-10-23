@@ -125,7 +125,7 @@ Deno.test("run: scenario outputs land where the scenario says, relative to the s
 });
 
 Deno.test("validate: accepts the examples and the firmware they name", async () => {
-  for (const file of ["udp-3-nodes.yaml", "udp-3-scripted.yaml"]) {
+  for (const file of ["udp-3-nodes.yaml", "udp-3-scripted.yaml", "live-3-scripted.yaml"]) {
     const run = await hertzbench(["validate", `${EXAMPLES}${file}`]);
     assertEquals(run.code, 0, run.stdout + run.stderr);
     assertStringIncludes(run.stdout, "ok (3 nodes");

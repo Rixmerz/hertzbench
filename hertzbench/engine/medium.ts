@@ -49,6 +49,8 @@ export interface MediumControl {
   setLinkOverride(from: string, to: string, override: LinkOverride): void;
   startPhase(label: string): void;
   node(id: string): Readonly<{ position: Position }>;
+  /** The link budget between two nodes; only media with a fixed PHY answer it. */
+  budget?(from: string, to: string): LinkBudget;
   close(): void;
 }
 

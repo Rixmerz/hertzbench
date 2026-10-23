@@ -32,7 +32,7 @@ const ADAPTER_FIDELITY: Record<
   },
 };
 
-function linkJson(link: LinkStats) {
+export function linkJson(link: LinkStats) {
   return {
     from: link.from,
     to: link.to,

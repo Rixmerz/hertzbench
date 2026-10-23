@@ -42,14 +42,17 @@ export function resolveQemuLibrary(): string {
   return path;
 }
 
-const firmwareCache = new Map<string, Promise<Uint8Array>>();
+type FirmwareCache = Map<string, Promise<Uint8Array>>;
 
 /** Compile a sketch once per run, however many nodes share it. */
-function loadFirmware(spec: { kind: "sketch" | "binary"; path: string }): Promise<Uint8Array> {
-  let pending = firmwareCache.get(spec.path);
+function loadFirmware(
+  cache: FirmwareCache,
+  spec: { kind: "sketch" | "binary"; path: string },
+): Promise<Uint8Array> {
+  let pending = cache.get(spec.path);
   if (!pending) {
     pending = spec.kind === "binary" ? Deno.readFile(spec.path) : compileSketch(spec.path);
-    firmwareCache.set(spec.path, pending);
+    cache.set(spec.path, pending);
   }
   return pending;
 }
@@ -212,52 +215,62 @@ class Esp32Board implements RunningBoard {
   }
 }
 
-export const esp32Launcher: BoardLauncher = {
-  fidelity: "real firmware on QEMU (Velxio ESP32 worker)",
-  async start(ctx) {
-    const { node } = ctx;
-    if (node.firmware.kind === "script") {
-      throw new BoardError(
-        `${node.id}: an esp32 board needs a sketch directory or a .bin, not a script`,
-      );
-    }
-    const lib = resolveQemuLibrary();
-    const firmware = await loadFirmware(node.firmware);
+export const ESP32_FIDELITY =
+  "F2 for Wi-Fi/IP (same firmware binary, frames captured at the netdev)";
 
-    const config: Record<string, unknown> = {
-      lib_path: lib,
-      firmware_b64: toBase64(firmware),
-      machine: "esp32-picsimlab",
-      wifi_enabled: true,
-    };
-    const radio = node.radio;
-    if (ctx.netPort !== null && radio.phy === "lora") {
-      const { cs, reset } = radio.pins;
-      Object.assign(config, workerRadioSpiConfig(ctx.netPort, cs, reset === null ? [] : [reset]));
-    } else if (ctx.netPort !== null && radio.phy === "nrf24") {
-      Object.assign(config, workerRadioSpiConfig(ctx.netPort, radio.pins.csn, [radio.pins.ce]));
-    } else if (ctx.netPort !== null) {
-      // Distinct station MAC per board, and the NIC on the engine instead of SLIRP.
-      const efusePath = `${ctx.outDir}/efuse-${node.id}.bin`;
-      await Deno.writeFile(efusePath, buildEfuseImage(node.mac));
-      Object.assign(config, workerNetworkConfig(ctx.netPort, efusePath));
-    }
+/**
+ * One launcher per run. Its firmware cache lives as long as the run, so a
+ * long-lived process (the MCP server) recompiles a sketch edited between runs
+ * and retries a compile that failed.
+ */
+export function createEsp32Launcher(): BoardLauncher {
+  const firmwareCache: FirmwareCache = new Map();
+  return { fidelity: ESP32_FIDELITY, start: (ctx) => startEsp32(ctx, firmwareCache) };
+}
 
-    const child = new Deno.Command(pythonCommand(), {
-      args: [WORKER_SCRIPT],
-      stdin: "piped",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    const stderrLogPath = `${ctx.outDir}/worker-${node.id}.stderr.log`;
-    const stderrLog = await Deno.open(stderrLogPath, {
-      write: true,
-      create: true,
-      truncate: true,
-    });
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(JSON.stringify(config) + "\n"));
-    writer.releaseLock();
-    return new Esp32Board(ctx, child, stderrLog, stderrLogPath);
-  },
-};
+async function startEsp32(ctx: BoardContext, firmwareCache: FirmwareCache): Promise<RunningBoard> {
+  const { node } = ctx;
+  if (node.firmware.kind === "script") {
+    throw new BoardError(
+      `${node.id}: an esp32 board needs a sketch directory or a .bin, not a script`,
+    );
+  }
+  const lib = resolveQemuLibrary();
+  const firmware = await loadFirmware(firmwareCache, node.firmware);
+
+  const config: Record<string, unknown> = {
+    lib_path: lib,
+    firmware_b64: toBase64(firmware),
+    machine: "esp32-picsimlab",
+    wifi_enabled: true,
+  };
+  const radio = node.radio;
+  if (ctx.netPort !== null && radio.phy === "lora") {
+    const { cs, reset } = radio.pins;
+    Object.assign(config, workerRadioSpiConfig(ctx.netPort, cs, reset === null ? [] : [reset]));
+  } else if (ctx.netPort !== null && radio.phy === "nrf24") {
+    Object.assign(config, workerRadioSpiConfig(ctx.netPort, radio.pins.csn, [radio.pins.ce]));
+  } else if (ctx.netPort !== null) {
+    // Distinct station MAC per board, and the NIC on the engine instead of SLIRP.
+    const efusePath = `${ctx.outDir}/efuse-${node.id}.bin`;
+    await Deno.writeFile(efusePath, buildEfuseImage(node.mac));
+    Object.assign(config, workerNetworkConfig(ctx.netPort, efusePath));
+  }
+
+  const child = new Deno.Command(pythonCommand(), {
+    args: [WORKER_SCRIPT],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const stderrLogPath = `${ctx.outDir}/worker-${node.id}.stderr.log`;
+  const stderrLog = await Deno.open(stderrLogPath, {
+    write: true,
+    create: true,
+    truncate: true,
+  });
+  const writer = child.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(JSON.stringify(config) + "\n"));
+  writer.releaseLock();
+  return new Esp32Board(ctx, child, stderrLog, stderrLogPath);
+}

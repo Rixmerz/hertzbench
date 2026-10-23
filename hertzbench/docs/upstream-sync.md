@@ -17,7 +17,7 @@ git merge upstream/master   # or cherry-pick specific commits
 
 ## Patches
 
-Phase 1 touches **one** Velxio file.
+Phase 1 touches **one** Velxio file. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`).
 
 | # | File | Commit subject | Upstreamable |
 |---|---|---|---|
