@@ -177,8 +177,18 @@ class ScriptedBleBoard implements RunningBoard {
       this.#ctx.peers.filter((p) => p.id === id).map((p) => p.mac)
     );
     await this.#host.setAcceptList(addresses);
-    await this.#host.connectAcceptList(connect.intervalMs, connect.timeoutMs);
+    // Raised before the await: Command Status and LE Connection Complete can arrive in one
+    // read, so #onConnected may clear the flag before this await resumes, and raising it
+    // after would undo that clear and skip the re-initiate #onConnected queued. Not before
+    // setAcceptList: a cancelled initiator's late Connection Complete is read before those
+    // commands complete, and would clear a flag raised that early.
     this.#initiating = true;
+    try {
+      await this.#host.connectAcceptList(connect.intervalMs, connect.timeoutMs);
+    } catch (error) {
+      this.#initiating = false;
+      throw error;
+    }
   }
 
   #onConnected(
