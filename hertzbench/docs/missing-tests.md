@@ -5,13 +5,50 @@ check, why it did not run, and the command to run it. Items the community can ru
 [community-testing.md](community-testing.md). A test skipped on a system names the reason in
 its own name (`[skipped on Windows: ...]`), so a skip is never silent.
 
-The suite was run on Linux (674 passed, 0 failed) and on Windows 10 22H2 x64 in a VM with Deno 2.9.5
-and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
-(`.github/workflows/hertzbench-ci.yml`) runs on GitHub and **passes on `ubuntu-latest`, `windows-latest` and `macos-latest` (arm64)** (run
-40083042461). **arm64 Linux and Windows were not run.**
+The suite was last run on Linux with 680 passed, 0 failed, and earlier on Windows 10 22H2 x64 in a
+VM with Deno 2.9.5 and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
+(`.github/workflows/hertzbench-ci.yml`) runs on `ubuntu-latest`, `windows-latest` and `macos-latest`
+(arm64). Its last green run on all three was 40083042461; the master runs after it failed on Ubuntu
+(the browser test, below) and once on macOS (the scripted mesh, below). The changes below were
+checked locally and no CI run has seen them yet. **arm64 Linux and Windows were not run.**
 
-Known flaky: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed once and passed on
-the rerun.
+Fixed: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed on Ubuntu with `timed out
+waiting for /DevTools listening on .../` after 20 s, and Chromium's stderr held only `dbus` lines.
+The runner image was the same (`ubuntu-26.04` 20261012.163.1) in the run that passed in 19 s and in
+the ones that failed. The test is the first Chromium launch of the job and starts `hertzbench view`
+beside it on two cores: in run 40124661330 Chromium's first stderr line came 19 s after the spawn.
+The wait for that line and for the view's URL is now 90 s (`BROWSER_START_TIMEOUT_MS` in
+`tests/chromium.ts`, shared with `tests/view_ui_test.ts`), and a Chromium that exits still fails at
+once. With `HERTZBENCH_CHROMIUM` pointing at a script that sleeps 25 s before starting Chromium, the
+old limit failed with the CI message and the new one passes. The flags are unchanged.
+
+Fixed: the same test also failed on the drag itself, with the node at x = 16.8 m where the pointer
+was dropped at 18 m (run 40121322706, and a local full-suite run). The test took the nodes' screen
+positions in the first frame the page drew as `running`. That frame is drawn at the size the map's
+box had before the layout settled (`viewBox` 819 x 320 while the box was already 834 x 468), and the
+page redraws tens of ms later: the scale was 5.7 px/m in the first frame and 9.3 px/m after it
+(0.195 px/m in another run, where the press missed the node and it stayed at x = 12 m). The press
+and the drop were placed with one scale and read by the page with the other. The test now measures
+only when the `viewBox` equals the box, and takes a reading as true when a second one 300 ms later
+agrees. The page is unchanged (`view/` was not touched). The failure depends on how loaded the
+machine is: with the file pinned to 2 CPUs on a busy machine, copies of the old logic that logged
+the frames failed in 7 of 34 runs, each measured in a frame whose scale was not the final one; on a quieter machine the old
+test passed 55 of 55 and 24 of 25 with a 300 ms pause before the press, and the new one passed
+40 of 40, 25 of 25 and 25 of 25 in the same conditions.
+
+Fixed: `run: the scripted ESP-NOW mesh passes end to end ...` (`tests/cli_test.ts`) failed once on
+macOS with `ack_rtt_p95_ms lt 10` over the `start` phase: 3 of 30 ACKs per link took 12 to 17 ms.
+The engine judges an ACK from the wall clock between the frame reaching the medium and the ACK
+coming back, and the delivery to the receiver was a timer: the medium's 0.2 to 0.5 ms of airtime
+became a timer tick of about 2.5 ms of the 3 ms round trip, more when the machine is busy. The
+medium now runs delays below one timer tick right after the current task (`MediumClock` in
+`orchestrator/medium-clock.ts`, tested in `tests/medium_clock_test.ts`); the median round trip fell
+from 3.0 to 0.7 ms. The scenario and its assertions are unchanged. With 14 busy loops on 14 cores,
+20 alternating runs each: ACKs over 8 ms on sensors 1 to 3 in `start` fell from 49 to 12, the runs
+with one from 14 to 5, and the runs that failed from 3 to 1. A stall of the whole process still
+delays an ACK past 10 ms; ending that needs the engine to judge the ACK in modelled time, which is
+outside what the orchestrator can change. ESP32 Wi-Fi runs use the same medium clock and were not
+run here (no libqemu).
 
 Fixed: `runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics count both`
 (`tests/espnow_test.ts`) counted 19 `espnow tx ok to b` lines against 20 ACKs on macOS in the v0.1.0

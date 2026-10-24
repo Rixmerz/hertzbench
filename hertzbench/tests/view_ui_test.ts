@@ -27,6 +27,7 @@ import {
 import { ToolError } from "../mcp/protocol.ts";
 import { Session } from "../mcp/session.ts";
 import { serveView, type ViewServer } from "../view/server.ts";
+import { BROWSER_START_TIMEOUT_MS, chromiumArgs } from "./chromium.ts";
 
 // ── Chromium over the DevTools protocol ─────────────────────────────────────
 
@@ -458,27 +459,17 @@ class Page {
 async function withPage(fn: (page: Page) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "hzb-ui-" });
   const browser = new Deno.Command(CHROMIUM!, {
-    args: [
-      "--headless=new",
-      // Ubuntu 23.10+ (and its GitHub runners) forbid the unprivileged user namespaces
-      // Chromium's sandbox needs, and Chromium then exits with "No usable sandbox!".
-      // The page under test is the project's own, served on loopback.
-      "--no-sandbox",
-      "--remote-debugging-port=0",
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${dir}/profile`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--window-size=1280,900",
-      "about:blank",
-    ],
+    args: chromiumArgs(`${dir}/profile`),
     stdout: "null",
     stderr: "piped",
   }).spawn();
   const log = new StderrWatch(browser.stderr);
   let cdp: Cdp | null = null;
   try {
-    const [, devtools] = await log.waitFor(/DevTools listening on (ws:\/\/\S+)/);
+    const [, devtools] = await log.waitFor(
+      /DevTools listening on (ws:\/\/\S+)/,
+      BROWSER_START_TIMEOUT_MS,
+    );
     cdp = await Cdp.connect(devtools!);
     const page = await Page.open(cdp);
     try {

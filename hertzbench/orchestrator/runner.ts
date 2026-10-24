@@ -45,6 +45,7 @@ import {
 } from "./boards/board.ts";
 import { createEsp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
+import { MediumClock } from "./medium-clock.ts";
 import { describeRadio, type NodeRadio } from "./radios.ts";
 import { metricsDocument } from "./report.ts";
 import {
@@ -456,7 +457,7 @@ function wifiNetwork(
   const medium = new Medium({
     seed: scenario.seed,
     environment: scenario.environment,
-    clock: ctx.clock,
+    clock: new MediumClock(ctx.clock),
     log: ctx.log,
     gateway,
     retryLimit: scenario.retryLimit,
