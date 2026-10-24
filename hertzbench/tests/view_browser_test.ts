@@ -29,14 +29,26 @@ function findChromium(): string | null {
 
 const CHROMIUM = findChromium();
 
+/** SIGTERM a child that may have exited already, as a Chromium that failed to start has. */
+function terminate(child: Deno.ChildProcess): void {
+  try {
+    child.kill("SIGTERM");
+  } catch (error) {
+    // It exited already: the error that ended the test says why.
+    if (!(error instanceof TypeError)) throw error;
+  }
+}
+
 /** Reads a child's stderr as it comes, so a test can wait for a line on it. */
 class StderrWatch {
   text = "";
+  closed = false;
   readonly done: Promise<void>;
 
   constructor(stream: ReadableStream<Uint8Array>) {
     this.done = (async () => {
       for await (const chunk of stream.pipeThrough(new TextDecoderStream())) this.text += chunk;
+      this.closed = true;
     })();
   }
 
@@ -45,6 +57,8 @@ class StderrWatch {
     for (;;) {
       const match = this.text.match(pattern);
       if (match) return match;
+      // A process that exited before printing the line never will: say why at once.
+      if (this.closed) throw new Error(`exited before printing ${pattern}:\n${this.text}`);
       if (performance.now() > deadline) {
         throw new Error(`timed out waiting for ${pattern}:\n${this.text}`);
       }
@@ -126,6 +140,10 @@ Deno.test({
     const browser = new Deno.Command(CHROMIUM!, {
       args: [
         "--headless=new",
+        // Ubuntu 23.10+ (and its GitHub runners) forbid the unprivileged user namespaces
+        // Chromium's sandbox needs, and Chromium then exits with "No usable sandbox!".
+        // The page under test is the project's own, served on loopback.
+        "--no-sandbox",
         "--remote-debugging-port=0",
         "--remote-debugging-address=127.0.0.1",
         `--user-data-dir=${dir}/profile`,
@@ -216,7 +234,7 @@ Deno.test({
       assert(String(label).includes("at x 18.0 m, y 7.0 m"), String(label));
     } finally {
       await cdp?.close();
-      browser.kill("SIGTERM");
+      terminate(browser);
       await browser.status;
       await browserLog.done;
       view.kill("SIGINT");

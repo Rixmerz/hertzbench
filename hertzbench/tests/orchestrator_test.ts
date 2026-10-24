@@ -479,6 +479,8 @@ Deno.test("runner: ten boards, the top of the 2 to 10 range, all get their lease
 
 Deno.test("runner: traffic before time zero is kept, with negative times, and the log never steps back", async () => {
   // Board c connects 200 ms after a and b, which have already run DHCP by then.
+  // a sends for 450 ms from its lease, so its traffic spans time zero even when
+  // the 200 ms wait overshoots (Windows timers tick every 15.6 ms).
   const slowC: BoardLauncher = {
     fidelity: "test",
     async start(ctx) {
@@ -494,7 +496,7 @@ nodes:
   - id: a
     board: scripted
     position: [0, 0]
-    firmware: { send: [{ to: b, every: 50ms, count: 5 }] }
+    firmware: { send: [{ to: b, every: 50ms, count: 10 }] }
   - { id: b, board: scripted, position: [5, 0], firmware: {} }
   - { id: c, board: scripted, position: [9, 0], firmware: {} }
 assertions:
