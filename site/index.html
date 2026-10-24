@@ -893,21 +893,21 @@ Files
             <span class="frame-tag">published binary</span>
           </div>
           <pre tabindex="0" role="region"
-            aria-label="The published Linux binary, checked and run"><code>$ gh release download v0.1.0 --repo Rixmerz/hertzbench \
+            aria-label="The published Linux binary, checked and run"><code>$ cd hertzbench/hertzbench    # a checkout: the examples are read from disk
+$ gh release download v0.1.0 --repo Rixmerz/hertzbench \
     --pattern hertzbench-linux-x64 --pattern SHA256SUMS
 $ sha256sum -c --ignore-missing SHA256SUMS
 hertzbench-linux-x64: OK
 $ chmod +x hertzbench-linux-x64
-$ cd hertzbench/hertzbench    # a checkout: the examples are read from disk
 $ ./hertzbench-linux-x64 run scenarios/examples/udp-3-scripted.yaml --quiet --out /tmp/hzb-out
 RESULT: PASS</code></pre>
-          <figcaption>The Linux x64 file of the v0.1.0 release (107 MB), downloaded, checked and run on
+          <figcaption>The Linux x64 file of the v0.1.0 release (102.5 MB), downloaded, checked and run on
             Linux x86_64 on 2026-10-24. The macOS and Windows files were built by the same workflow;
             they were not run for this page.</figcaption>
         </figure>
         <p id="release-status" class="release-status" role="status" aria-live="polite"
           data-state="idle">
-          v0.1.0 is published. Open the releases page to see every file.</p>
+          Open the releases page to see the latest release.</p>
         <ul id="downloads" class="builds" aria-label="Builds by system" data-os="" data-arch="">
           <li data-key="windows-x64"><span class="build-name">Windows, x64</span>
             <span class="build-action"><a href="https://github.com/Rixmerz/hertzbench/releases">Releases page</a></span></li>
