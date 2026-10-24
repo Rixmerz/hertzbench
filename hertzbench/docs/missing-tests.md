@@ -10,7 +10,9 @@ and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
 40083042461). **arm64 Linux and Windows were not run.**
 
 Known flaky: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed once and passed on
-the rerun.
+the rerun. So did `runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics
+count both` (`tests/espnow_test.ts:445`) on macOS in the v0.1.0 release run (19 frames counted, 20
+expected); the rerun passed.
 
 ## Skipped on Windows (by design)
 

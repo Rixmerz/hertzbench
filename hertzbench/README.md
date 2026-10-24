@@ -268,6 +268,8 @@ agent can move a node or break a link while it runs and read the effect in the m
 writes stays inside its workspace. Registration without installing, the tool reference and the ESP32
 setup are in [docs/mcp.md](docs/mcp.md).
 
+![The live-3-scripted run steered over MCP: node c moved behind the wall and a forced 30% loss on a to b, both marked on the packet timeline.](../site/img/agent-light.png)
+
 ## Watch it live (optional)
 
 ```bash
@@ -279,6 +281,10 @@ each link by its signal or by its loss over the last 2 s, and plots every frame 
 a node, or focus it and use the arrow keys, to move it while the run plays: the move goes through
 the same `move_node` tool an agent uses. `hertzbench mcp --view-port 7480` draws the agent's run the
 same way. No build step and no Velxio patch; see [docs/view.md](docs/view.md).
+
+![Node c dragged behind the 12 dB wall, links colored by loss over the last 2 s: the a to c links turn poor at about 38% lost.](../site/img/drag-light.png)
+
+![The live view of the LoRa gateway scenario: six ESP32 boards with SX1276 radios on a map.](../site/img/lora-light.png)
 
 ![The packet timeline of the last 10 seconds: a row per directed link, green marks for delivered frames and red marks for lost ones on the links to the far sensor.](../site/img/timeline-light.png)
 
