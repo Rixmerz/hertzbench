@@ -5,6 +5,9 @@ over simulated wireless links with a distance, a path loss, a latency and a loss
 AGPLv3, based on [Velxio](https://github.com/davidmonterocrespo24/velxio) (which does the CPU
 emulation).
 
+Website and downloads: **<https://rixmerz.github.io/hertzbench/>** (the page's source is in
+[`site/`](../site/)).
+
 The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
 a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
 build, run and steer those scenarios, **Phase 3**, LoRa and nRF24 radio chips modelled at their SPI
