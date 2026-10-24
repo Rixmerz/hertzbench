@@ -8,12 +8,37 @@ emulation).
 Website and downloads: **<https://rixmerz.github.io/hertzbench/>** (the page's source is in
 [`site/`](../site/)).
 
+![The live view of a finished run: five ESP32 boards on real ESP-NOW firmware, a gateway and four sensors on a map with a wall, each link labelled with its signal, and a packet timeline below](../site/img/hero-light.png)
+
+_Live view of a finished run of
+[`espnow-mesh-5-nodes.yaml`](scenarios/examples/espnow-mesh-5-nodes.yaml): five ESP32 boards on real
+firmware, 60 s, seed 42._
+
 The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
 a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
 build, run and steer those scenarios, **Phase 3**, LoRa and nRF24 radio chips modelled at their SPI
 interface, **Phase 4**, ESP-NOW between the boards, **Phase 5**, a mobile bridge that lets a real
 phone reach a simulated board over Wi-Fi/IP or BLE, **Phase 6**, BLE between the boards through a
 virtual controller on an HCI UART, and **Phase 7**, an optional live view in the browser.
+
+## Quick start
+
+Hertzbench is one binary per system, with nothing else to install. Download the file for your system
+from the GitHub Release of a `v*` tag, with `SHA256SUMS`; the file names and the check commands are
+in [Install](#install). The example scenarios are read from disk, so run the binary from a checkout
+of this repository:
+
+```bash
+git clone https://github.com/Rixmerz/hertzbench.git
+cd hertzbench/hertzbench                  # the directory that holds scenarios/
+# put the downloaded binary here, then:
+chmod +x hertzbench-linux-x64
+./hertzbench-linux-x64 run scenarios/examples/udp-3-scripted.yaml --out /tmp/hzb-out
+./hertzbench-linux-x64 view scenarios/examples/live-3-scripted.yaml   # open http://127.0.0.1:7480/
+```
+
+On Windows, use `.\hertzbench-windows-x64.exe` in PowerShell, with the same arguments. The view
+serves until Ctrl-C, and its scenario runs for two minutes.
 
 ## Status
 
@@ -24,7 +49,7 @@ virtual controller on an HCI UART, and **Phase 7**, an optional live view in the
 | Orchestrator and CLI: `hertzbench run`, `validate`                                                     | done, tested through the real CLI                                                                                                                                                                                                                                                                                                             |
 | `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                                                                                                                                                                                                          |
 | ESP32 boards under QEMU                                                                                | **run on real firmware** (2026-10-23) with a libqemu built from the public QEMU fork, no root or Docker: UDP between three boards passes, and ESP-NOW between five passes with a patch to the fork (2026-10-24); see [docs/e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware) for every scenario, its result and the exact commands    |
-| MCP server: `hertzbench mcp`, 23 tools, examples and fidelity table as resources, live move and fault | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run (the ESP32 runs used the CLI)                                                                                                                                                                                                          |
+| MCP server: `hertzbench mcp`, 23 tools, examples and fidelity table as resources, live move and fault  | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run (the ESP32 runs used the CLI)                                                                                                                                                                                                          |
 | View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards; ESP32 not run in the view (the ESP32 runs used the CLI)                                                                                                                                                                                                                 |
 | `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                                                                                                                                                                                                   |
 | ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and with scripted boards; **`espnow-mesh-5-nodes.yaml` passes 7/7 on real firmware** (2026-10-24) with a small patch to the fork's Wi-Fi MAC (its 20-frame injection queue never resumed reading, [docs/upstream-sync.md](docs/upstream-sync.md) patch 3), see [ESP-NOW](#esp-now) |
@@ -89,7 +114,7 @@ What differs by system:
 - Tests that cannot run on a given system are listed in
   [docs/missing-tests.md](docs/missing-tests.md).
 
-## Quick start (no QEMU needed)
+## First run from source (no QEMU needed)
 
 Needs [Deno](https://deno.com) 2.x.
 
@@ -103,8 +128,35 @@ behind a wall at 2.5 s; the report shows its links to `a` slowing down and losin
 link to `b` holds. It prints per-link RSSI, loss and latency, a pass or fail per assertion, and
 writes `metrics.json`, `air.pcap` (open it in Wireshark) and `events.jsonl` to `/tmp/hzb-out`.
 
+Excerpt from one run, with the phase tables left out:
+
+```
+Links, whole run
+  link  sent  delivered  loss   p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+  ----  ----  ---------  -----  ------  ------  ------  --------  ------  --------
+  a->b  200   200        0.0%   0.29    0.46    0.51    -52.3     38.7    1.00
+  a->c  189   155        18.0%  0.38    4.89    7.13    -71.2     19.7    2.71
+  b->a  200   200        0.0%   0.30    0.47    0.50    -52.3     38.7    1.00
+  b->c  200   200        0.0%   0.38    0.64    0.72    -65.4     25.6    1.01
+  c->a  176   151        14.2%  0.40    6.03    15.51   -70.2     20.8    2.56
+  c->b  200   200        0.0%   0.35    0.64    0.71    -65.4     25.6    1.00
+
+Assertions
+  PASS  serial a contains "dhcp bound ip=192.168.4.11" within 1000 ms  (seen at 8.765 ms)
+  PASS  serial c contains "rx pong" within 2000 ms  (seen at 17.125 ms)
+  PASS  metric *->* (phase start, udp frames): loss_pct lt 5, latency_p95_ms lt 2  (6 link(s) satisfy it)
+  PASS  metric c->a (phase behind-wall, udp frames): loss_pct gt 20, latency_p95_ms gt 4  (1 link(s) satisfy it)
+  PASS  metric c->b (phase behind-wall, udp frames): loss_pct lt 10  (1 link(s) satisfy it)
+
+RESULT: PASS
+```
+
 The same experiment with three ESP32 boards is `scenarios/examples/udp-3-nodes.yaml`; it needs
 libqemu, see [docs/e2e-esp32.md](docs/e2e-esp32.md).
+
+![The live view of three ESP32 boards on a map with a wall, and the table of links with their RSSI and SNR.](../site/img/wifi-light.png)
+
+_Live view of `udp-3-nodes.yaml` on real firmware, 90 s: the wall stands between `b` and `c`._
 
 ```
 hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
@@ -176,6 +228,11 @@ engine plays. The binary differs from production by that build option and the UA
 2026-10-23, 6/6 assertions): see [docs/e2e-esp32.md](docs/e2e-esp32.md#the-ble-example). What the
 controller models and what it leaves out are in [docs/fidelity.md](docs/fidelity.md#ble).
 
+![The live view of a BLE central and three sensor peripherals on a map, with the table of links and the packet timeline.](../site/img/ble-light.png)
+
+_Live view of `ble-sensors-3-nodes.yaml`: ESP32 sensors on real firmware, the central a scripted
+host._
+
 ## Mobile bridge
 
 ```bash
@@ -222,6 +279,11 @@ each link by its signal or by its loss over the last 2 s, and plots every frame 
 a node, or focus it and use the arrow keys, to move it while the run plays: the move goes through
 the same `move_node` tool an agent uses. `hertzbench mcp --view-port 7480` draws the agent's run the
 same way. No build step and no Velxio patch; see [docs/view.md](docs/view.md).
+
+![The packet timeline of the last 10 seconds: a row per directed link, green marks for delivered frames and red marks for lost ones on the links to the far sensor.](../site/img/timeline-light.png)
+
+_The last 10 s of the `espnow-mesh-5-nodes.yaml` run in the first screenshot: red marks are frames
+lost on the links to `sensor-4`, the far sensor._
 
 ## How it works
 
