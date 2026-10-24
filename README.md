@@ -1,3 +1,24 @@
+# Hertzbench
+
+**This repository is Hertzbench**: a simulator of the radio network between microcontroller boards.
+N boards run real firmware and talk over simulated links (Wi-Fi/IP, ESP-NOW, LoRa, nRF24, BLE) with
+distance, path loss, latency and loss. It has a CLI, an MCP server for AI agents, a live view in the
+browser and a mobile bridge to a real phone. It is built on Velxio, which does the CPU emulation.
+
+![Live view of a finished run: five ESP32 boards on real ESP-NOW firmware](site/img/hero-light.png)
+
+- **Start here:** [hertzbench/README.md](hertzbench/README.md) (quick start, install, status,
+  limits, every radio, MCP, view, tests)
+- **Website and downloads:** <https://rixmerz.github.io/hertzbench/>
+- **Status:** community-maintained. What has not been tested or fixed yet is listed in
+  [hertzbench/docs/community-testing.md](hertzbench/docs/community-testing.md#known-problems-open-for-contributions).
+  Contributions welcome.
+- **License:** AGPLv3, like Velxio.
+
+Everything below this line is the upstream Velxio README, kept for the emulator itself.
+
+---
+
 # Velxio: Arduino & Embedded Board Emulator
 
 **Live at [velxio.dev](https://velxio.dev)**
