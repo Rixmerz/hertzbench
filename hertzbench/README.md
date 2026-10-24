@@ -134,6 +134,10 @@ What differs by system:
 - **Help test it.** What nobody has run yet (Intel Macs, arm64, real phones and adapters) is a
   checklist in [docs/community-testing.md](docs/community-testing.md). Run an item and open a
   [test report](https://github.com/Rixmerz/hertzbench/issues/new?template=test-report.yml).
+- **Known problems.** Hertzbench is community-maintained from here on. Open bugs and CI failures
+  nobody has fixed yet are listed in
+  [docs/community-testing.md](docs/community-testing.md#known-problems-open-for-contributions);
+  pull requests are welcome.
 
 ## First run from source (no QEMU needed)
 
