@@ -1,7 +1,8 @@
 # Tests that did not run
 
 What the suite does not cover on some system or on the host this was written on, what each would
-check, why it did not run, and the command to run it. A test skipped on a system names the reason in
+check, why it did not run, and the command to run it. Items the community can run are tracked in
+[community-testing.md](community-testing.md). A test skipped on a system names the reason in
 its own name (`[skipped on Windows: ...]`), so a skip is never silent.
 
 The suite was run on Linux (674 passed, 0 failed) and on Windows 10 22H2 x64 in a VM with Deno 2.9.5
@@ -47,7 +48,6 @@ busy, the old assertion failed 4 of 5 runs and the file now passes 29 of 30.
 | Linux arm64 suite | The suite on aarch64 | No aarch64 host | Same, on an arm64 Linux machine (CI: add `ubuntu-24.04-arm` to the matrix) |
 | Windows arm64 suite | The suite on Windows on ARM | No such VM | Same, on a Windows ARM machine |
 | Compiled binaries for macOS and Linux arm64 | `hertzbench-<target> run scenarios/examples/udp-3-scripted.yaml --quiet` prints `RESULT: PASS` | Cross-compiled but not run (no host). Linux x64 and Windows x64 binaries were run and passed | `deno task compile` then run the file on its system |
-| Release workflow | A `v*` tag builds six binaries and attaches them with `SHA256SUMS` | Needs a tag pushed to GitHub; the workflow was not run | `git tag v0.1.0 && git push origin v0.1.0` |
 | Compiled Windows binary, BLE bridge refusal | `hertzbench.exe run scenarios/examples/bridge-ble-scripted.yaml` exits 2 with the BlueZ message | The refusal was added after the VM run | On Windows: `hertzbench-windows-x64.exe run bridge-ble-scripted.yaml` |
 | Real phone, LAN mDNS, BlueZ on a real adapter | See [mobile-bridge.md](mobile-bridge.md) | No phone or adapter | See that file |
 | Windows firewall prompt for the IP bridge on `0.0.0.0` | The bridge is reachable from a phone | VM has no LAN peer | `deno task lan run ...` on Windows |
