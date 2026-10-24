@@ -245,8 +245,7 @@ RESULT: PASS</code></pre>
         <p
           class="note">Fidelity levels are the ones every report prints: F1 and F2 mean the same firmware
           binary; F3 means a host-only build. A scripted board is a traffic generator, not firmware, and
-          the page says so wherever one is shown. Snippets without a date were run for this page on
-          2026-10-24 with scripted boards.</p>
+          the page says so wherever one is shown. Frames marked scripted were run for this page on 2026-10-24.</p>
 
         <article class="radio" id="engine">
           <div class="radio-rail">
@@ -893,7 +892,8 @@ Files
             <span class="frame-tag">built locally</span>
           </div>
           <pre tabindex="0" role="region"
-            aria-label="A locally built binary"><code>$ deno task compile --list
+            aria-label="A locally built binary"><code>$ deno task compile linux-x64
+$ deno task compile --list
 linux-x64
 linux-arm64
 macos-x64
@@ -1025,9 +1025,15 @@ claude mcp add hertzbench -- hertzbench mcp --workspace C:\path\to\your\project<
           </li>
           <li>
             <div
-              class="row-head"><h3>MCP server and live view</h3><span class="chip" data-kind="part">Partly</span></div>
-            <p>Tested through the real <code>hertzbench mcp</code> process and in headless Chromium, with
-              scripted boards. ESP32 boards through MCP have not been run.</p>
+              class="row-head"><h3>MCP server</h3><span class="chip" data-kind="part">Partly</span></div>
+            <p>Tested through the real <code>hertzbench mcp</code> process with scripted boards. ESP32
+              boards through MCP have not been run.</p>
+          </li>
+          <li>
+            <div
+              class="row-head"><h3>Live view</h3><span class="chip" data-kind="pass">Tested</span></div>
+            <p>Tested over HTTP and in headless Chromium, dragging a node with real mouse events, with
+              scripted boards. The ESP32 screenshots on this page come from <code>hertzbench view</code>.</p>
           </li>
           <li>
             <div
