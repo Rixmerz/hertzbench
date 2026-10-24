@@ -1,11 +1,13 @@
 """
 Tests for the hertzbench additions to the ESP32 worker's launch arguments:
 the Wi-Fi NIC on a QEMU `stream` netdev (instead of SLIRP) and the per-board
-eFuse image. They call the SHIPPED `wifi_nic_arg`, `efuse_drive_args` and
+eFuse image. They call the SHIPPED `wifi_nic_argv`, `efuse_drive_args` and
 `valid_tcp_port`, and run the worker itself for the config boundary.
 
-Nothing here needs libqemu; whether QEMU accepts these arguments can only be
-settled on a host that has it (hertzbench/docs/e2e-esp32.md).
+Nothing here needs libqemu. That the fork's QEMU accepts these arguments was
+settled on real firmware (hertzbench/docs/e2e-esp32.md): it refuses
+`-nic stream,...`, sends nothing behind `-netdev stream`, and works behind the
+`-netdev socket` plus `-net nic` pair.
 """
 import json
 import pathlib
@@ -13,54 +15,67 @@ import subprocess
 import sys
 import unittest
 
-from app.services.esp32_worker import efuse_drive_args, valid_tcp_port, wifi_nic_arg
+from app.services.esp32_worker import efuse_drive_args, valid_tcp_port, wifi_nic_argv
 
 WORKER = pathlib.Path(__file__).resolve().parents[3] / 'backend' / 'app' / 'services' / 'esp32_worker.py'
 
 
-class TestL2NicArg(unittest.TestCase):
-    def test_classic_esp32_gets_a_stream_netdev_to_the_engine(self):
-        arg = wifi_nic_arg('esp32-picsimlab', wifi_enabled=True, l2_port=40123)
+class TestL2NicArgv(unittest.TestCase):
+    def test_classic_esp32_gets_a_socket_netdev_to_the_engine(self):
         self.assertEqual(
-            arg,
-            'stream,model=esp32_wifi,server=off,'
-            'addr.type=inet,addr.host=127.0.0.1,addr.port=40123',
+            wifi_nic_argv('esp32-picsimlab', wifi_enabled=True, l2_port=40123),
+            [
+                '-netdev', 'socket,id=hzb-l2,connect=127.0.0.1:40123',
+                '-net', 'nic,model=esp32_wifi,netdev=hzb-l2',
+            ],
         )
 
+    def test_never_uses_the_stream_netdev(self):
+        # `-nic stream,...` is refused by the fork's QEMU 9.2, and behind
+        # `-netdev stream` the guest sends no frame.
+        joined = ' '.join(wifi_nic_argv('esp32-picsimlab', wifi_enabled=True, l2_port=40123))
+        self.assertNotIn('-nic', joined)
+        self.assertNotIn('stream', joined)
+
+    def test_c3_with_wifi_gets_its_own_model(self):
+        argv = wifi_nic_argv('esp32c3-picsimlab', wifi_enabled=True, l2_port=40123)
+        self.assertEqual(argv[-1], 'nic,model=esp32c3_wifi,netdev=hzb-l2')
+
     def test_l2_replaces_slirp_entirely(self):
-        arg = wifi_nic_arg('esp32-picsimlab', wifi_enabled=True, hostfwd_port=8080, l2_port=40123)
-        self.assertNotIn('user', arg.split(',')[0])
-        self.assertNotIn('hostfwd', arg)
-        self.assertNotIn('net=192.168.4.0/24', arg)
+        joined = ' '.join(wifi_nic_argv('esp32-picsimlab', wifi_enabled=True,
+                                        hostfwd_port=8080, l2_port=40123))
+        self.assertNotIn('user', joined)
+        self.assertNotIn('hostfwd', joined)
+        self.assertNotIn('net=192.168.4.0/24', joined)
 
     def test_radio_is_attached_even_when_the_sketch_looks_wifi_less(self):
         # Same rule as SLIRP (issue #260): a real ESP32 always has a radio.
-        self.assertIsNotNone(wifi_nic_arg('esp32-picsimlab', wifi_enabled=False, l2_port=40123))
+        self.assertNotEqual(wifi_nic_argv('esp32-picsimlab', wifi_enabled=False, l2_port=40123), [])
 
-    def test_machines_without_a_radio_still_get_none(self):
-        self.assertIsNone(wifi_nic_arg('esp32s3-picsimlab', wifi_enabled=True, l2_port=40123))
-        self.assertIsNone(wifi_nic_arg('esp32c3-picsimlab', wifi_enabled=False, l2_port=40123))
+    def test_machines_without_a_radio_still_get_nothing(self):
+        self.assertEqual(wifi_nic_argv('esp32s3-picsimlab', wifi_enabled=True, l2_port=40123), [])
+        self.assertEqual(wifi_nic_argv('esp32c3-picsimlab', wifi_enabled=False, l2_port=40123), [])
 
-    def test_without_l2_port_nothing_changes(self):
+    def test_without_l2_port_it_is_velxios_slirp_nic(self):
         """The Velxio behaviour, byte for byte."""
         self.assertEqual(
-            wifi_nic_arg('esp32-picsimlab', wifi_enabled=True),
-            'user,model=esp32_wifi,net=192.168.4.0/24',
+            wifi_nic_argv('esp32-picsimlab', wifi_enabled=True),
+            ['-nic', 'user,model=esp32_wifi,net=192.168.4.0/24'],
         )
         self.assertEqual(
-            wifi_nic_arg('esp32-picsimlab', wifi_enabled=True, hostfwd_port=12345),
-            'user,model=esp32_wifi,net=192.168.4.0/24,hostfwd=tcp::12345-192.168.4.15:80',
+            wifi_nic_argv('esp32-picsimlab', wifi_enabled=True, hostfwd_port=12345),
+            ['-nic', 'user,model=esp32_wifi,net=192.168.4.0/24,hostfwd=tcp::12345-192.168.4.15:80'],
         )
         self.assertEqual(
-            wifi_nic_arg('esp32-picsimlab', wifi_enabled=True, l2_port=0),
-            'user,model=esp32_wifi,net=192.168.4.0/24',
+            wifi_nic_argv('esp32-picsimlab', wifi_enabled=True, l2_port=0),
+            ['-nic', 'user,model=esp32_wifi,net=192.168.4.0/24'],
         )
 
     def test_a_bad_port_is_an_error_not_an_argument(self):
         for bad in (-1, 65536, '40123', 1.5, True, '1,addr.host=evil'):
             with self.subTest(port=bad):
                 with self.assertRaises(ValueError):
-                    wifi_nic_arg('esp32-picsimlab', wifi_enabled=True, l2_port=bad)
+                    wifi_nic_argv('esp32-picsimlab', wifi_enabled=True, l2_port=bad)
 
 
 class TestValidTcpPort(unittest.TestCase):

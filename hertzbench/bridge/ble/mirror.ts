@@ -42,6 +42,22 @@ export interface BleBridgeOptions {
   onProblem(message: string): void;
 }
 
+/**
+ * GAP (0x1800) and GATT (0x1801): every GATT server has them, and the host's
+ * peripheral publishes its own. BlueZ refuses a second copy of either
+ * ("Failed to create entry in database"), which is what Bluedroid's table
+ * carries, so they are left out of what the phone is handed.
+ */
+const HOST_OWNED_SERVICES = new Set([
+  "00001800-0000-1000-8000-00805f9b34fb",
+  "00001801-0000-1000-8000-00805f9b34fb",
+]);
+
+/** The discovered services the host's peripheral should publish to the phone. */
+export function servicesToPublish(services: DiscoveredService[]): DiscoveredService[] {
+  return services.filter((s) => !HOST_OWNED_SERVICES.has(s.uuid.toLowerCase()));
+}
+
 export class BleBridge implements RunningBridge {
   readonly id: string;
   readonly controller: BleController;
@@ -149,7 +165,11 @@ export class BleBridge implements RunningBridge {
             `bridge discovered service ${s.uuid} with ${s.characteristics.length} characteristic(s)`,
           );
         }
-        await this.#opts.peripheral.start(this.#services, spec.name, this.#handlers);
+        await this.#opts.peripheral.start(
+          servicesToPublish(this.#services),
+          spec.name,
+          this.#handlers,
+        );
         this.#published = true;
         log(
           `bridge advertising "${spec.name}" to the phone (${this.#opts.peripheral.description})`,
