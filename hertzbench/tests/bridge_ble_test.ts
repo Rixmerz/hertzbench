@@ -51,10 +51,25 @@ Deno.test("bridge ble: GAP and GATT are left to the host's own peripheral, the r
 // D-Bus sessions and BlueZ are Linux only: elsewhere the helper test cannot run.
 const hasDbus = Deno.build.os === "linux" &&
   new Deno.Command("sh", { args: ["-c", "command -v dbus-run-session"] }).outputSync().success;
+// The helper and the fake bluetoothd talk D-Bus through PyGObject, in the python3 the test runs.
+// Through sh, so a missing python3 is a skip too rather than a throw that fails the whole file.
+const GI_PROBE = "import gi; gi.require_version('Gio', '2.0'); from gi.repository import Gio";
+const hasGi = hasDbus &&
+  new Deno.Command("sh", {
+    args: ["-c", `python3 -I -c "${GI_PROBE}"`],
+    stdout: "null",
+    stderr: "null",
+  }).outputSync().success;
+const BLUEZ_HELPER_TEST =
+  "bluez: the helper registers the mirrored table and relays a phone's operations";
 
 Deno.test({
-  name: "bluez: the helper registers the mirrored table and relays a phone's operations",
-  ignore: !hasDbus,
+  name: !hasDbus
+    ? `${BLUEZ_HELPER_TEST} [skipped: needs Linux with dbus-run-session]`
+    : !hasGi
+    ? `${BLUEZ_HELPER_TEST} [skipped: python3 has no PyGObject (gi)]`
+    : BLUEZ_HELPER_TEST,
+  ignore: !hasGi,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "hzb-bluez-" });
     const report = `${dir}/report.json`;
