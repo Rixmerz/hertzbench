@@ -2,8 +2,9 @@
 // Release asset for each platform. Without JavaScript, or when the API cannot
 // answer, the rows keep their static link to the releases page.
 //
-// Asset names are matched loosely (OS and arch tokens), because the project
-// publishes no release yet and has not fixed a naming scheme.
+// Asset names are matched loosely (OS and arch tokens) rather than by the exact
+// hertzbench-<os>-<arch> names the release workflow writes, so a renamed asset
+// still lands in its row.
 (() => {
   "use strict";
 
