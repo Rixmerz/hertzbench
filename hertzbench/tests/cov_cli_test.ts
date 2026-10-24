@@ -4,10 +4,12 @@
 // they are. The child inherits DENO_COVERAGE_DIR, so `deno test --coverage`
 // counts what it runs.
 
+import { forward, signalTest } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 
-const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
-const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
+const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 const PERMISSIONS = [
   "--allow-net=127.0.0.1",
   "--allow-read",
@@ -125,7 +127,10 @@ Deno.test("cli: validate reports nodes, duration and seed, with --seed applied",
     await Deno.writeTextFile(`${dir}/s.yaml`, SHORT);
     const plain = await cli(["validate", `${dir}/s.yaml`]);
     assertEquals(plain.code, 0, plain.stderr);
-    assertStringIncludes(plain.stdout, `${dir}/s.yaml: ok (2 nodes, 300 ms, seed 1)`);
+    assertStringIncludes(
+      forward(plain.stdout),
+      forward(`${dir}/s.yaml: ok (2 nodes, 300 ms, seed 1)`),
+    );
     const seeded = await cli(["validate", `${dir}/s.yaml`, "--seed", "0"]);
     assertStringIncludes(seeded.stdout, "seed 0)");
   });
@@ -135,7 +140,7 @@ Deno.test("cli: validate exits 2 on a missing file, an invalid field and missing
   await inTempDir(async (dir) => {
     const missing = await cli(["validate", `${dir}/nope.yaml`]);
     assertEquals(missing.code, 2);
-    assertStringIncludes(missing.stderr, `cannot read ${dir}/nope.yaml`);
+    assertStringIncludes(forward(missing.stderr), forward(`cannot read ${dir}/nope.yaml`));
     await Deno.writeTextFile(`${dir}/bad.yaml`, SHORT.replace("300ms", "300"));
     const bad = await cli(["validate", `${dir}/bad.yaml`]);
     assertEquals(bad.code, 2);
@@ -150,7 +155,7 @@ Deno.test("cli: validate exits 2 on a missing file, an invalid field and missing
     const fw = await cli(["validate", `${dir}/fw.yaml`]);
     assertEquals(fw.code, 2);
     assertStringIncludes(fw.stderr, "firmware not found");
-    assertStringIncludes(fw.stderr, `b: ${dir}/b.bin does not exist`);
+    assertStringIncludes(forward(fw.stderr), forward(`b: ${dir}/b.bin does not exist`));
   });
 });
 
@@ -168,7 +173,7 @@ Deno.test("cli: validate accepts every example; the only refusals are unbuilt ES
     assertEquals(outcome.code, 2, `${name}: ${outcome.stderr}`);
     assertStringIncludes(outcome.stderr, "firmware not found");
     for (const line of outcome.stderr.trim().split("\n").slice(1)) {
-      assert(/\/build\/[^/]+\.bin does not exist$/.test(line), `${name}: ${line}`);
+      assert(/[\\/]build[\\/][^\\/]+\.bin does not exist$/.test(line), `${name}: ${line}`);
     }
     refused.push(name);
   }
@@ -251,46 +256,49 @@ async function readUntil(
   return seen;
 }
 
-Deno.test("cli: view runs the scenario, serves it, prints the report and exits 0 on SIGINT", async () => {
-  await inTempDir(async (dir) => {
-    await Deno.writeTextFile(`${dir}/s.yaml`, SHORT);
-    const child = new Deno.Command(Deno.execPath(), {
-      args: [
-        "run",
-        ...PERMISSIONS,
-        MAIN,
-        "view",
-        `${dir}/s.yaml`,
-        "--out",
-        `${dir}/out`,
-        "--port",
-        "0",
-        "--seed",
-        "5",
-      ],
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    const stdout = new Response(child.stdout).text();
-    const reader = child.stderr.pipeThrough(new TextDecoderStream()).getReader();
-    let seen = await readUntil(reader, "the view stays up until Ctrl-C");
-    assertStringIncludes(seen, "view: http://127.0.0.1:");
-    assertStringIncludes(seen, "run finished");
-    const url = /view: (http:\/\/127\.0\.0\.1:\d+\/)/.exec(seen)?.[1];
-    assert(url, seen);
-    const page = await fetch(url);
-    assertEquals(page.status, 200);
-    await page.body?.cancel();
-    child.kill("SIGINT");
-    seen += await readUntil(reader, "\u0000");
-    const status = await child.status;
-    assertEquals(status.code, 0, seen);
-    const report = await stdout;
-    assertStringIncludes(report, "(seed 5, 300 ms)");
-    assertStringIncludes(report, "RESULT: PASS");
-  });
-});
+signalTest(
+  "cli: view runs the scenario, serves it, prints the report and exits 0 on SIGINT",
+  async () => {
+    await inTempDir(async (dir) => {
+      await Deno.writeTextFile(`${dir}/s.yaml`, SHORT);
+      const child = new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          ...PERMISSIONS,
+          MAIN,
+          "view",
+          `${dir}/s.yaml`,
+          "--out",
+          `${dir}/out`,
+          "--port",
+          "0",
+          "--seed",
+          "5",
+        ],
+        stdin: "null",
+        stdout: "piped",
+        stderr: "piped",
+      }).spawn();
+      const stdout = new Response(child.stdout).text();
+      const reader = child.stderr.pipeThrough(new TextDecoderStream()).getReader();
+      let seen = await readUntil(reader, "the view stays up until Ctrl-C");
+      assertStringIncludes(seen, "view: http://127.0.0.1:");
+      assertStringIncludes(seen, "run finished");
+      const url = /view: (http:\/\/127\.0\.0\.1:\d+\/)/.exec(seen)?.[1];
+      assert(url, seen);
+      const page = await fetch(url);
+      assertEquals(page.status, 200);
+      await page.body?.cancel();
+      child.kill("SIGINT");
+      seen += await readUntil(reader, "\u0000");
+      const status = await child.status;
+      assertEquals(status.code, 0, seen);
+      const report = await stdout;
+      assertStringIncludes(report, "(seed 5, 300 ms)");
+      assertStringIncludes(report, "RESULT: PASS");
+    });
+  },
+);
 
 Deno.test("cli: view exits 2 on an invalid scenario and on a port already in use", async () => {
   await inTempDir(async (dir) => {

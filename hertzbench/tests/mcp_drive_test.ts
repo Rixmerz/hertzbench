@@ -2,6 +2,8 @@
 // `hertzbench mcp` process: link chaos, the channel and radios of a live run,
 // serial input, the event stream, captures, scenario edits and the view.
 
+import { join } from "node:path";
+import { writeFakePython } from "./platform.ts";
 import { assert, assertAlmostEquals, assertEquals, assertStringIncludes } from "@std/assert";
 import { EXAMPLES, type Json, pollMetrics, pollStatus, withServer } from "./mcp_client.ts";
 
@@ -91,7 +93,7 @@ Deno.test("mcp drive: export_capture writes the air mid-run and after stop, insi
     await pollMetrics(client, (m) => (link(m, "start", "a", "b")?.sent ?? 0) >= 2);
 
     const live = await client.ok("export_capture", { kind: "pcap" });
-    assertEquals(live.file, `${workspace}/runs/live/air-live.pcap`);
+    assertEquals(live.file, join(workspace, "runs", "live", "air-live.pcap"));
     assert(live.packets > 0);
     const bytes = await Deno.readFile(live.file);
     assertEquals(bytes.length, live.bytes);
@@ -100,7 +102,7 @@ Deno.test("mcp drive: export_capture writes the air mid-run and after stop, insi
     await client.ok("stop");
     // A stopped run writes no files of its own; the capture is still there to take.
     const after = await client.ok("export_capture", { kind: "pcap", path: "kept/air.pcap" });
-    assertEquals([after.file, after.state], [`${workspace}/kept/air.pcap`, "stopped"]);
+    assertEquals([after.file, after.state], [join(workspace, "kept", "air.pcap"), "stopped"]);
     assert(after.packets >= live.packets);
 
     assertStringIncludes(
@@ -180,13 +182,11 @@ Deno.test("mcp drive: send_serial types into an ESP32's UART0 through the worker
   const fake = await Deno.makeTempDir({ prefix: "hzb-fake-worker-" });
   try {
     await Deno.writeFile(`${fake}/libqemu-xtensa.so`, new Uint8Array(0));
-    await Deno.writeTextFile(`${fake}/fake_worker.py`, FAKE_CONSOLE_WORKER);
     // HERTZBENCH_PYTHON runs the worker script; this one ignores it and runs the fake.
-    await Deno.writeTextFile(`${fake}/python`, `#!/bin/sh\nexec python3 ${fake}/fake_worker.py\n`);
-    await Deno.chmod(`${fake}/python`, 0o755);
+    const python = await writeFakePython(fake, FAKE_CONSOLE_WORKER);
     const env = {
       QEMU_ESP32_LIB: `${fake}/libqemu-xtensa.so`,
-      HERTZBENCH_PYTHON: `${fake}/python`,
+      HERTZBENCH_PYTHON: python,
     };
     await withServer(async (client, workspace) => {
       await Deno.writeFile(`${workspace}/fw.bin`, new Uint8Array(16));

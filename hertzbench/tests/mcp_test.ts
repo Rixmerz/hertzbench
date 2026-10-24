@@ -1,6 +1,8 @@
 // The MCP server through its real entrypoint: `hertzbench mcp` as a separate
 // process, spoken to over stdin and stdout the way Claude Code does.
 
+import { join, sep } from "node:path";
+import { signalTest } from "./platform.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   EXAMPLES,
@@ -118,7 +120,7 @@ Deno.test("mcp: handshake, every tool, resources and protocol errors", async () 
 Deno.test("mcp: create, validate and run a scenario to the end, outputs inside the workspace", async () => {
   await withServer(async (client, workspace) => {
     const created = await client.ok("create_scenario", { path: "s/two.yaml", yaml: SHORT });
-    assertEquals(created.file, `${workspace}/s/two.yaml`);
+    assertEquals(created.file, join(workspace, "s", "two.yaml"));
     assertEquals(created.scenario.nodes.map((n: { ip: string }) => n.ip), [
       "192.168.4.11",
       "192.168.4.12",
@@ -183,7 +185,7 @@ Deno.test("mcp: create, validate and run a scenario to the end, outputs inside t
     const started = await client.ok("run_scenario", { path: "s/two.yaml", seed: 9 });
     assert(["starting", "running"].includes(started.state), started.state);
     assertEquals(started.seed, 9);
-    assert(started.out_dir.startsWith(`${workspace}/out/two/`), started.out_dir);
+    assert(started.out_dir.startsWith(join(workspace, "out", "two") + sep), started.out_dir);
 
     const done = await pollStatus(client, (s) => s.state === "finished", "the run to finish");
     assertEquals(done.passed, true, JSON.stringify(done.assertions));
@@ -348,7 +350,7 @@ Deno.test("mcp: closing stdin during a run stops it and the server exits cleanly
   }
 });
 
-Deno.test("mcp: SIGINT and SIGTERM stop the run in progress and end the server", async () => {
+signalTest("mcp: SIGINT and SIGTERM stop the run in progress and end the server", async () => {
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const workspace = await Deno.makeTempDir({ prefix: "hzb-mcp-" });
     try {

@@ -4,11 +4,12 @@
 // phone operation through the bridge's handlers. Linux only, and only when a
 // scenario has a BLE bridge: nothing here runs otherwise.
 
+import { fileURLToPath } from "node:url";
 import type { DiscoveredService } from "../../orchestrator/boards/drivers/att.ts";
 import { propertyNames } from "../../orchestrator/boards/drivers/att.ts";
 import { GattOperationError, type GattPeripheral, type PeripheralHandlers } from "./peripheral.ts";
 
-export const BLUEZ_HELPER = new URL("./bluez_gatt.py", import.meta.url).pathname;
+export const BLUEZ_HELPER = fileURLToPath(new URL("./bluez_gatt.py", import.meta.url));
 /** How long BlueZ gets to accept the application and the advertisement. */
 const START_TIMEOUT_MS = 15_000;
 const STOP_TIMEOUT_MS = 3_000;
@@ -34,6 +35,17 @@ export class BluezStartError extends Error {
   override name = "BluezStartError";
 }
 
+/** Why the BlueZ bridge cannot run on this OS, or null on Linux. Windows and macOS have no BlueZ. */
+export function bluezUnsupportedReason(os: string = Deno.build.os): string | null {
+  if (os === "linux") return null;
+  const alternatives = os === "windows"
+    ? "run the BLE bridge from WSL2 with a USB Bluetooth adapter attached through usbipd-win, " +
+      "or on a Linux host (or a Raspberry Pi) and reach the simulator from there"
+    : "run the BLE bridge on a Linux host (or a Raspberry Pi) instead; the IP bridge works here";
+  return `the BLE bridge needs BlueZ, which only exists on Linux (this host is ${os}); ` +
+    `${alternatives}. See docs/mobile-bridge.md`;
+}
+
 export class BluezPeripheral implements GattPeripheral {
   readonly description: string;
   readonly #command: string[];
@@ -42,8 +54,12 @@ export class BluezPeripheral implements GattPeripheral {
   #writes: Promise<void> = Promise.resolve();
   #stderr = "";
   #reading: Promise<void> = Promise.resolve();
+  #unsupported: string | null = null;
 
   constructor(opts: BluezPeripheralOptions) {
+    // A custom command is how tests (and anyone with their own helper) bring their own host side.
+    const unsupported = opts.command ? null : bluezUnsupportedReason();
+    if (unsupported) this.#unsupported = unsupported;
     this.description = `BlueZ on ${opts.adapter}`;
     this.#command = opts.command ?? ["python3", "-I", BLUEZ_HELPER, "--adapter", opts.adapter];
   }
@@ -53,6 +69,7 @@ export class BluezPeripheral implements GattPeripheral {
     name: string,
     handlers: PeripheralHandlers,
   ): Promise<void> {
+    if (this.#unsupported) throw new BluezStartError(this.#unsupported);
     const [program, ...args] = this.#command as [string, ...string[]];
     try {
       this.#child = new Deno.Command(program, {
@@ -78,7 +95,7 @@ export class BluezPeripheral implements GattPeripheral {
         new BluezStartError(
           `the BlueZ helper exited with code ${status.code} before BlueZ accepted the GATT application` +
             (this.#stderr.trim()
-              ? `: ${this.#stderr.trim().split("\n").slice(-3).join(" | ")}`
+              ? `: ${this.#stderr.trim().split(/\r?\n/).slice(-3).join(" | ")}`
               : ""),
         ),
       )

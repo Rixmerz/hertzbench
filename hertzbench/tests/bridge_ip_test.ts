@@ -2,6 +2,7 @@
 // node through the IP bridge over HTTP, WebSocket and MQTT, and the bridge's
 // link to the node is the channel model's.
 
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   type LiveRun,
@@ -11,7 +12,7 @@ import {
   runScenario,
 } from "../orchestrator/mod.ts";
 
-const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 
 const SCENARIO = `
 name: bridge-ip

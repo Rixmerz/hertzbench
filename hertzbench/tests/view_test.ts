@@ -2,6 +2,8 @@
 // HTTP server through its real entrypoints, `hertzbench view` and
 // `hertzbench mcp --view-port`, each a separate process on a scripted run.
 
+import { IS_WINDOWS, signalTest } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import type { ChipSignal, EngineEvent, LinkBudget } from "../engine/mod.ts";
 import {
@@ -13,10 +15,11 @@ import {
   timelineSince,
 } from "../view/scene.ts";
 
-const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
-const LIVE = new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url).pathname;
-const LORA = new URL("../scenarios/examples/lora-gateway-6-scripted.yaml", import.meta.url)
-  .pathname;
+const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
+const LIVE = fileURLToPath(new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url));
+const LORA = fileURLToPath(
+  new URL("../scenarios/examples/lora-gateway-6-scripted.yaml", import.meta.url),
+);
 const PERMISSIONS = [
   "--allow-net=127.0.0.1",
   "--allow-read",
@@ -304,91 +307,99 @@ async function rawGet(port: number, path: string, host: string): Promise<string>
   }
 }
 
-Deno.test("view: serves the live map, moves a node through move_node, refuses foreign writes, stops on SIGINT", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "hzb-view-" });
-  const view = new Spawned(["view", LIVE, "--port", "0", "--out", `${dir}/out`]);
-  try {
-    const [, base, port] = await view.waitFor(/view: (http:\/\/127\.0\.0\.1:(\d+)\/)/);
-    const url = base!;
+signalTest(
+  "view: serves the live map, moves a node through move_node, refuses foreign writes, stops on SIGINT",
+  async () => {
+    const dir = await Deno.makeTempDir({ prefix: "hzb-view-" });
+    const view = new Spawned(["view", LIVE, "--port", "0", "--out", `${dir}/out`]);
+    try {
+      const [, base, port] = await view.waitFor(/view: (http:\/\/127\.0\.0\.1:(\d+)\/)/);
+      const url = base!;
 
-    const running = await pollView(
-      url,
-      (v) =>
-        v.status.state === "running" && v.scene.links.length === 6 && v.timeline.entries.length > 0,
-      "a running scene with traffic",
-    );
-    assertEquals(running.status.scenario, "live-3-scripted");
-    assertEquals(running.scene.obstacles, [{ from: [30, -20], to: [30, 20], attenuation_db: 12 }]);
-    const ca = running.scene.links.find((l: Json) => l.from === "c" && l.to === "a");
-    assertEquals(ca.signal, "good");
-    assert(running.timeline.entries.some((e: Json) => e.type === "deliver"));
+      const running = await pollView(
+        url,
+        (v) =>
+          v.status.state === "running" && v.scene.links.length === 6 &&
+          v.timeline.entries.length > 0,
+        "a running scene with traffic",
+      );
+      assertEquals(running.status.scenario, "live-3-scripted");
+      assertEquals(running.scene.obstacles, [{
+        from: [30, -20],
+        to: [30, 20],
+        attenuation_db: 12,
+      }]);
+      const ca = running.scene.links.find((l: Json) => l.from === "c" && l.to === "a");
+      assertEquals(ca.signal, "good");
+      assert(running.timeline.entries.some((e: Json) => e.type === "deliver"));
 
-    // The drag from the page: the same move_node tool an agent calls.
-    const moved = await postMove(url, { node: "c", position: [42, 0] });
-    assertEquals(moved.status, 200, moved.body);
-    assertEquals(JSON.parse(moved.body).to, { x: 42, y: 0 });
-    const after = await getView(url, running.timeline.next_since);
-    assertEquals(after.status.nodes.find((n: Json) => n.id === "c").position, { x: 42, y: 0 });
-    const farLink = after.scene.links.find((l: Json) => l.from === "c" && l.to === "a");
-    assertEquals(farLink.signal, "bad");
-    assertEquals(farLink.distance_m, 42);
-    assert(
-      after.timeline.entries.some((e: Json) => e.type === "move" && e.node === "c"),
-      "the move is on the timeline",
-    );
+      // The drag from the page: the same move_node tool an agent calls.
+      const moved = await postMove(url, { node: "c", position: [42, 0] });
+      assertEquals(moved.status, 200, moved.body);
+      assertEquals(JSON.parse(moved.body).to, { x: 42, y: 0 });
+      const after = await getView(url, running.timeline.next_since);
+      assertEquals(after.status.nodes.find((n: Json) => n.id === "c").position, { x: 42, y: 0 });
+      const farLink = after.scene.links.find((l: Json) => l.from === "c" && l.to === "a");
+      assertEquals(farLink.signal, "bad");
+      assertEquals(farLink.distance_m, 42);
+      assert(
+        after.timeline.entries.some((e: Json) => e.type === "move" && e.node === "c"),
+        "the move is on the timeline",
+      );
 
-    // Tool errors come back as 400 with the tool's message.
-    const unknown = await postMove(url, { node: "zz", position: [1, 1] });
-    assertEquals(unknown.status, 400);
-    assertStringIncludes(unknown.body, "no node named");
+      // Tool errors come back as 400 with the tool's message.
+      const unknown = await postMove(url, { node: "zz", position: [1, 1] });
+      assertEquals(unknown.status, 400);
+      assertStringIncludes(unknown.body, "no node named");
 
-    // Writes another web page could send are refused (CWE-352).
-    assertEquals(
-      (await postMove(url, { node: "c", position: [1, 1] }, { "content-type": "text/plain" }))
-        .status,
-      415,
-    );
-    const foreign = await postMove(url, { node: "c", position: [1, 1] }, {
-      "content-type": "application/json",
-      origin: "http://example.com",
-    });
-    assertEquals(foreign.status, 403);
-    const stayed = await getView(url);
-    assertEquals(stayed.status.nodes.find((n: Json) => n.id === "c").position, { x: 42, y: 0 });
+      // Writes another web page could send are refused (CWE-352).
+      assertEquals(
+        (await postMove(url, { node: "c", position: [1, 1] }, { "content-type": "text/plain" }))
+          .status,
+        415,
+      );
+      const foreign = await postMove(url, { node: "c", position: [1, 1] }, {
+        "content-type": "application/json",
+        origin: "http://example.com",
+      });
+      assertEquals(foreign.status, 403);
+      const stayed = await getView(url);
+      assertEquals(stayed.status.nodes.find((n: Json) => n.id === "c").position, { x: 42, y: 0 });
 
-    // A name that is not this server is refused, even on loopback (DNS rebinding, CWE-350).
-    const rebound = await rawGet(Number(port), "/api/view", `attacker.example:${port}`);
-    assertStringIncludes(rebound, "403");
-    assertStringIncludes(await rawGet(Number(port), "/api/view", `localhost:${port}`), "200 OK");
+      // A name that is not this server is refused, even on loopback (DNS rebinding, CWE-350).
+      const rebound = await rawGet(Number(port), "/api/view", `attacker.example:${port}`);
+      assertStringIncludes(rebound, "403");
+      assertStringIncludes(await rawGet(Number(port), "/api/view", `localhost:${port}`), "200 OK");
 
-    // The page, its assets with a strict CSP, and Velxio's tokens read from frontend/.
-    const page = await fetch(url);
-    assertStringIncludes(page.headers.get("content-security-policy") ?? "", "script-src 'self'");
-    assertStringIncludes(await page.text(), '<script src="/app.js"');
-    for (const asset of ["app.js", "style.css"]) {
-      const response = await fetch(`${url}${asset}`);
-      assertEquals(response.status, 200, asset);
-      await response.body?.cancel();
+      // The page, its assets with a strict CSP, and Velxio's tokens read from frontend/.
+      const page = await fetch(url);
+      assertStringIncludes(page.headers.get("content-security-policy") ?? "", "script-src 'self'");
+      assertStringIncludes(await page.text(), '<script src="/app.js"');
+      for (const asset of ["app.js", "style.css"]) {
+        const response = await fetch(`${url}${asset}`);
+        assertEquals(response.status, 200, asset);
+        await response.body?.cancel();
+      }
+      const tokens = await fetch(`${url}velxio/tokens/colors.css`);
+      assertStringIncludes(await tokens.text(), "--color-bg-canvas");
+      const board = await fetch(`${url}velxio/boards/esp32-devkit-v1.svg`);
+      assertEquals(board.headers.get("content-type"), "image/svg+xml");
+      await board.body?.cancel();
+      for (
+        const path of ["velxio/tokens/../../../deno.json", "velxio/boards/arduino-uno.svg", "nope"]
+      ) {
+        const response = await fetch(`${url}${path}`);
+        assertEquals(response.status, 404, path);
+        await response.body?.cancel();
+      }
+    } finally {
+      const { code, stderr } = await view.interrupt();
+      await Deno.remove(dir, { recursive: true });
+      assertEquals(code, 0, stderr);
+      assert(!stderr.includes("stays up"), stderr);
     }
-    const tokens = await fetch(`${url}velxio/tokens/colors.css`);
-    assertStringIncludes(await tokens.text(), "--color-bg-canvas");
-    const board = await fetch(`${url}velxio/boards/esp32-devkit-v1.svg`);
-    assertEquals(board.headers.get("content-type"), "image/svg+xml");
-    await board.body?.cancel();
-    for (
-      const path of ["velxio/tokens/../../../deno.json", "velxio/boards/arduino-uno.svg", "nope"]
-    ) {
-      const response = await fetch(`${url}${path}`);
-      assertEquals(response.status, 404, path);
-      await response.body?.cancel();
-    }
-  } finally {
-    const { code, stderr } = await view.interrupt();
-    await Deno.remove(dir, { recursive: true });
-    assertEquals(code, 0, stderr);
-    assert(!stderr.includes("stays up"), stderr);
-  }
-});
+  },
+);
 
 Deno.test("view: an invalid scenario exits 2 before serving", async () => {
   const dir = await Deno.makeTempDir({ prefix: "hzb-view-" });
@@ -511,6 +522,7 @@ Deno.test("view: a LoRa run draws its link budgets, and a drag moves the node an
   } finally {
     const { code, stderr } = await view.interrupt();
     await Deno.remove(dir, { recursive: true });
-    assertEquals(code, 0, stderr);
+    // Windows ends the process on kill() without running its shutdown, so its exit code says nothing.
+    if (!IS_WINDOWS) assertEquals(code, 0, stderr);
   }
 });

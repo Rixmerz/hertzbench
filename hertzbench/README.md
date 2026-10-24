@@ -29,6 +29,63 @@ virtual controller on an HCI UART, and **Phase 7**, an optional live view in the
 | BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and through the CLI with scripted hosts; ESP32 relay tested with a fake worker; **Bluedroid firmware not run**, see [BLE](#ble)                |
 | Mobile bridge (Phase 5): IP proxy with mDNS (5a), BlueZ GATT mirror (5b), the phone as a node          | done, tested end to end with scripted boards and stand-ins for the host's network and BlueZ; **no real phone, LAN mDNS or adapter used**, see [Mobile bridge](#mobile-bridge) |
 
+## Install
+
+Hertzbench runs on Linux, macOS and Windows, on x64 and arm64. The CI runs lint, type check and the
+test suite on all three systems (`.github/workflows/hertzbench-ci.yml`). There are two ways to get
+it.
+
+**A release binary** (nothing else to install). Download the file for your system from the GitHub
+Release of a `v*` tag, together with `SHA256SUMS`, and check it:
+
+| System  | x64                          | arm64                          |
+| ------- | ---------------------------- | ------------------------------ |
+| Linux   | `hertzbench-linux-x64`       | `hertzbench-linux-arm64`       |
+| macOS   | `hertzbench-macos-x64`       | `hertzbench-macos-arm64`       |
+| Windows | `hertzbench-windows-x64.exe` | `hertzbench-windows-arm64.exe` |
+
+```bash
+# Linux and macOS
+sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+chmod +x hertzbench-linux-x64 && ./hertzbench-linux-x64 --help
+# macOS only, the first run of an unsigned download: xattr -d com.apple.quarantine hertzbench-macos-arm64
+```
+
+```powershell
+# Windows (PowerShell)
+Get-FileHash .\hertzbench-windows-x64.exe -Algorithm SHA256   # compare with the line in SHA256SUMS
+.\hertzbench-windows-x64.exe --help
+```
+
+A binary carries the permissions `deno task lan` grants (network, read, write, run, env). Rename or
+copy it to `hertzbench` / `hzb` somewhere on your PATH. To build the binaries yourself, from this
+directory: `deno task compile` (all six, into `dist/`) or `deno task compile linux-x64`
+(`deno task compile --list` names them).
+
+**From source.** Install [Deno](https://deno.com) 2.x, then use `deno task hertzbench ...` from this
+directory:
+
+| System  | Deno                                                                         |
+| ------- | ---------------------------------------------------------------------------- |
+| Linux   | `curl -fsSL https://deno.land/install.sh \| sh`                              |
+| macOS   | `brew install deno` or the same script                                       |
+| Windows | `winget install DenoLand.Deno` or `irm https://deno.land/install.ps1 \| iex` |
+
+What differs by system:
+
+- **Python 3** is needed only for the ESP32 boards' compile helper, the ESP32 worker, and a few
+  tests (`python3` on Linux and macOS, `python` on Windows; `HERTZBENCH_PYTHON` overrides it).
+- **ESP32 under QEMU** needs `libqemu-xtensa` for your system (`QEMU_ESP32_LIB`), see
+  [docs/e2e-esp32.md](docs/e2e-esp32.md). The scripted boards need nothing.
+- **The BLE mobile bridge is Linux only** (it uses BlueZ). On Windows and macOS a scenario with a
+  BLE bridge is refused before it starts, with a message saying so; the alternatives are in
+  [docs/mobile-bridge.md](docs/mobile-bridge.md#windows-and-macos). The IP bridge works everywhere.
+- **Ctrl-C** stops a run cleanly on every system; SIGTERM only exists on Linux and macOS.
+- **Timers on Windows** tick every 15.6 ms. Scripted boards on a wall clock cannot meet the 10 ms
+  ESP-NOW ACK wait there, so the ESP-NOW ACK rates of scripted scenarios read low on Windows.
+- Tests that cannot run on a given system are listed in
+  [docs/missing-tests.md](docs/missing-tests.md).
+
 ## Quick start (no QEMU needed)
 
 Needs [Deno](https://deno.com) 2.x.

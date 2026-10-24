@@ -3,6 +3,8 @@
 // BlueZ, and the real BlueZ helper against a fake bluetoothd on a private
 // D-Bus (never the host's adapter or system bus).
 
+import { PYTHON } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   BLUEZ_HELPER,
@@ -14,7 +16,7 @@ import {
 import type { DiscoveredService } from "../orchestrator/boards/drivers/att.ts";
 import { type LiveRun, parseScenario, renderReport, runScenario } from "../orchestrator/mod.ts";
 
-const FAKE_BLUEZ = new URL("./fixtures/fake_bluez.py", import.meta.url).pathname;
+const FAKE_BLUEZ = fileURLToPath(new URL("./fixtures/fake_bluez.py", import.meta.url));
 const SERVICES: DiscoveredService[] = [{
   uuid: "0000ff00-0000-1000-8000-00805f9b34fb",
   startHandle: 0x0e,
@@ -28,8 +30,9 @@ const SERVICES: DiscoveredService[] = [{
   }],
 }];
 
-const hasDbus = new Deno.Command("sh", { args: ["-c", "command -v dbus-run-session"] })
-  .outputSync().success;
+// D-Bus sessions and BlueZ are Linux only: elsewhere the helper test cannot run.
+const hasDbus = Deno.build.os === "linux" &&
+  new Deno.Command("sh", { args: ["-c", "command -v dbus-run-session"] }).outputSync().success;
 
 Deno.test({
   name: "bluez: the helper registers the mirrored table and relays a phone's operations",
@@ -104,7 +107,7 @@ Deno.test("bluez: a helper that cannot reach BlueZ fails start with its reason",
   const peripheral = new BluezPeripheral({
     adapter: "hci0",
     command: [
-      "python3",
+      PYTHON,
       "-I",
       "-c",
       "import sys; sys.stderr.write('no bluetoothd here\\n'); sys.exit(3)",
