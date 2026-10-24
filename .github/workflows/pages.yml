@@ -1,0 +1,64 @@
+name: Pages
+
+# Publishes site/ (the Hertzbench landing page) to GitHub Pages. The repository
+# setting Pages > Source must be "GitHub Actions" for the deploy job to work.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# No token scopes by default; each job asks for the ones it needs.
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and package the page
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout only
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # v2.0.5, pinned by SHA like every third-party action (.github/zizmor.yml).
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed
+        with:
+          deno-version: v2.x
+
+      # The headless-browser test: layout, contrast and OS detection. It needs
+      # the runner's Chrome, and --no-sandbox is added when CI is set.
+      - name: Test the page
+        working-directory: site
+        run: deno task test
+
+      # Ship the page only, not its test.
+      - name: Stage the site
+        run: |
+          mkdir _site
+          cp site/index.html site/style.css site/download.js _site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write # publish the artifact
+      id-token: write # prove to Pages that the deploy comes from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
