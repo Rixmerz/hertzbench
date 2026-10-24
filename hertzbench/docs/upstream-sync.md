@@ -17,12 +17,14 @@ git merge upstream/master   # or cherry-pick specific commits
 
 ## Patches
 
-Phase 1 and Phase 3 touch the **same** Velxio file, `esp32_worker.py`, in two separate patches. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`). Phase 4 (ESP-NOW) touches **none** either: it rides on patch 1, which already puts each board's NIC on the engine and gives it its own station MAC, and the QEMU fork is used as it is (ADR 0001). Its sketches go through Velxio's compiler unchanged. Phase 5 (the mobile bridge) touches **none**: the IP bridge is a station on the engine's own medium, and the BLE bridge a virtual controller on its air; BlueZ is reached through hertzbench's own helper (`bridge/ble/bluez_gatt.py`). Phase 6 (BLE) touches **none**: the ESP32 board relays the firmware's HCI UART through the worker's existing `uart_tx` event and `uart_send` command, and its firmware is an ESP-IDF project hertzbench builds itself instead of a change to Velxio's template (ADR 0002). Phase 7 (the view) touches **none** either: it serves a few Velxio frontend files read-only, listed below.
+Phase 1 and Phase 3 touch the **same** Velxio file, `esp32_worker.py`, in two separate patches. Phase 2 (the MCP server) touches **none**: it is new code under `hertzbench/mcp/` and does not import or mount Velxio's own MCP server (`backend/app/mcp/server.py`). Phase 4 (ESP-NOW) touches **no Velxio file** either: it rides on patch 1, which already puts each board's NIC on the engine and gives it its own station MAC. It does need a small patch to the QEMU fork's Wi-Fi MAC (patch 3), applied to the fork's source before building libqemu; no QEMU source or binary is kept in this tree. Its sketches go through Velxio's compiler unchanged. Phase 5 (the mobile bridge) touches **none**: the IP bridge is a station on the engine's own medium, and the BLE bridge a virtual controller on its air; BlueZ is reached through hertzbench's own helper (`bridge/ble/bluez_gatt.py`). Phase 6 (BLE) touches **none**: the ESP32 board relays the firmware's HCI UART through the worker's existing `uart_tx` event and `uart_send` command, and its firmware is an ESP-IDF project hertzbench builds itself instead of a change to Velxio's template (ADR 0002). Phase 7 (the view) touches **none** either: it serves a few Velxio frontend files read-only, listed below.
 
 | # | File | Commit subject | Upstreamable |
 |---|---|---|---|
 | 1 | `backend/app/services/esp32_worker.py` | `core-patch: attach the ESP32 Wi-Fi NIC to an external stream netdev` | Possibly, as an opt-in. See below. |
 | 2 | `backend/app/services/esp32_worker.py` | `Implement Phase 3 of hertzbench/docs/PLAN.md: LoRa SX127x register-level…` (79b4e960; not prefixed `core-patch:`, see below) | Possibly, as an opt-in. See below. |
+| 3 | `hw/misc/esp32_wifi.c`, `hw/misc/esp32_wifi_ap.c`, `include/hw/misc/esp32_wifi.h` in the lcgamboa QEMU fork (not in this tree) | none: applied by hand before building libqemu, see below | Yes, as a bug fix. Not offered yet. |
+| 3 (doc) | `docs/BUILD-QEMU.md` (section 7 and the header line, pointing at patch 3) | `core-patch: make ESP-NOW pass on real firmware with a QEMU fork patch` | No: it documents hertzbench's build. |
 
 ### Patch 1: `esp32_worker.py`, external Wi-Fi netdev and per-board eFuse image
 
@@ -95,6 +97,90 @@ Re-applying it after an upstream sync, if the merge conflicts or silently drops 
 Not verified on this host: there is no libqemu, so no guest has clocked SPI bytes through the link; the arbitration with `_responder` and `_cs_active` is read from the code, not run.
 
 Upstreamable: `radio_spi` is opt-in and changes nothing when absent; the `_set_pin_locked` extraction behaves as before. We have not discussed it with the maintainers.
+
+### Patch 3: the QEMU fork's Wi-Fi MAC, ESP-NOW receive and tx-done (outside this tree)
+
+Why: on real firmware `espnow-mesh-5-nodes.yaml` failed 4 of 7 assertions against a libqemu built from the public fork, `lcgamboa/qemu` branch `picsimlab-esp32` commit `9c298984` ([e2e-esp32.md](e2e-esp32.md#the-esp-now-example)). Two defects in the fork's MAC model, both read from its code:
+
+1. **The netdev never reads again after the injection queue overflows.** Frames from the netdev go into the guest through a queue drained one per `INTER_FRAME_TIME` by `Esp32_WLAN_inject_timer` (`hw/misc/esp32_wifi_ap.c`). Above `Esp32_WLAN__MAX_INJECT_QUEUE_SIZE` (20, `hw/misc/esp32_wlan.h:135`) `Esp32_WLAN_can_receive` answers false; QEMU's net layer then queues the packet in hand and the socket netdev stops polling its socket until someone calls `qemu_flush_queued_packets` on the NIC. Nothing in the fork does. The sensors' driver resends an unacked frame dozens of times a second (66 a second measured), so a gateway that boots a few seconds after them sees more than 20 frames at once and is deaf for the rest of the run: it logged 21 readings, then none, while the engine delivered 13,010 more. The patch flushes the NIC's queue in the inject timer as soon as the queue drops back to the limit.
+2. **A unicast ESP-NOW frame was reported done before its ACK.** `esp32_wifi_write` raises the tx-done interrupt (`0x80`) as soon as the DMA of an outgoing frame ends, with the packet status still `ESP32_PHYA_NACK`; `Esp32_WLAN_handle_frame` arms `wait_ack_timer`, which raises it again when the ACK arrives or after 10 ms. The patch keeps the first interrupt for every frame that does not wait for an ACK, and leaves unicast action frames to the timer. This is the behaviour hertzbench's model of the fork (`orchestrator/boards/espnow-fork-model.ts`) already assumed ([fidelity.md](fidelity.md#esp-now)).
+
+The two hunks were not measured apart: every run on 2026-10-24 used both. The first one's effect is shown by the run (the gateway kept reading its netdev for the whole run); the second is reasoned from the code and from the model the tests already use.
+
+Nothing else changes: broadcasts, Wi-Fi/IP data frames and management frames still raise tx-done at the end of the DMA, and the queue limit stays 20.
+
+Apply it to a clean checkout of the fork, then build as in [e2e-esp32.md](e2e-esp32.md#setting-up-a-host-without-root):
+
+```bash
+cd ~/.local/src/lcgamboa-qemu    # lcgamboa/qemu, picsimlab-esp32, 9c298984
+git apply <<'PATCH'
+diff --git a/hw/misc/esp32_wifi.c b/hw/misc/esp32_wifi.c
+index 5791444..98b51e1 100644
+--- a/hw/misc/esp32_wifi.c
++++ b/hw/misc/esp32_wifi.c
+@@ -305,8 +305,15 @@ static void esp32_wifi_write(void *opaque, hwaddr addr, uint64_t value,
+                 // frame from esp32 to ap
+                 frame.frame_length=item.length;
+                 frame.next_frame=0;
++                s->ack_wait_armed = 0;
+                 Esp32_WLAN_handle_frame(s, &frame);
+-                set_interrupt(s,0x80);
++                /* A unicast frame is done when its ACK arrives or the ACK wait
++                 * runs out (wait_ack_timer), not when the DMA ends. Raised now,
++                 * the driver reads the NACK status still set and retries the
++                 * frame about 25 times in a few milliseconds. */
++                if (!s->ack_wait_armed) {
++                    set_interrupt(s,0x80);
++                }
+             }
+     }
+     s->mem[addr/4]=value;
+diff --git a/hw/misc/esp32_wifi_ap.c b/hw/misc/esp32_wifi_ap.c
+index 6686115..5cc8fdb 100644
+--- a/hw/misc/esp32_wifi_ap.c
++++ b/hw/misc/esp32_wifi_ap.c
+@@ -105,6 +105,13 @@ static void Esp32_WLAN_inject_timer(void *opaque)
+         s->inject_queue = frame->next_frame;
+         Esp32_sendFrame(s, (void *)frame, frame->frame_length,frame->signal_strength);
+         free(frame);
++        /* Esp32_WLAN_can_receive answers false while the queue is over its
++         * limit, which parks the netdev's packet and stops it reading its
++         * socket until the NIC is flushed. Nothing else flushes it: do it as
++         * soon as room opens, or the netdev never reads again. */
++        if (s->inject_queue_size == Esp32_WLAN__MAX_INJECT_QUEUE_SIZE) {
++            qemu_flush_queued_packets(qemu_get_queue(s->nic));
++        }
+     }
+     if (s->inject_queue_size > 0) {
+         // there are more packets... schedule
+@@ -640,6 +647,7 @@ void Esp32_WLAN_handle_frame(Esp32WifiState *s, struct mac80211_frame *frame)
+                 //if destination is not broadcast wait for ack 
+                 if(memcmp(&ethernet_frame[0],BROADCAST,6)){ 
+                    Esp32_WLAN_Set_Packet_Status(ESP32_PHYA_NACK);
++                   s->ack_wait_armed = 1;
+                    timer_mod(s->wait_ack_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + WAIT_ACK_TIMEOUT);
+                    return;
+                 }
+diff --git a/include/hw/misc/esp32_wifi.h b/include/hw/misc/esp32_wifi.h
+index 7ac57c1..9fa55aa 100644
+--- a/include/hw/misc/esp32_wifi.h
++++ b/include/hw/misc/esp32_wifi.h
+@@ -35,6 +35,7 @@ typedef struct Esp32WifiState {
+     int inject_timer_running;
+     unsigned int inject_sequence_number;
+     int beacon_ap;
++    int ack_wait_armed;
+ 
+     hwaddr receive_queue_address;
+     uint32_t receive_queue_count;
+PATCH
+```
+
+Check that a checkout carries it: `git -C ~/.local/src/lcgamboa-qemu apply --check -R` with the same heredoc succeeds. After a fork update, re-apply; if a hunk fails, the two places to find are the `A_WIFI_DMA_OUTLINK` case of `esp32_wifi_write` and the end of `Esp32_WLAN_inject_timer`. Drop the patch once the fork flushes its NIC queue and defers unicast tx-done itself.
+
+Velxio's own QEMU source archive (`docs/BUILD-QEMU.md`) was not checked: it may carry the same defects. The one Velxio file this patch touches is that doc: its section 7, "The ESP-NOW patch hertzbench applies to the public fork", points here, and the file carries the header line.
+
+**Verified on real firmware** (2026-10-24): see [e2e-esp32.md](e2e-esp32.md#results-on-real-firmware).
 
 ### Velxio behaviours hertzbench depends on but does not change
 

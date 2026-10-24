@@ -1,5 +1,7 @@
 # Building QEMU from source for Velxio
 
+<!-- Modified by hertzbench contributors, 2026-10 (see hertzbench/docs/upstream-sync.md) -->
+
 The Velxio docker image ships with prebuilt `libqemu-xtensa` and
 `libqemu-riscv32` libraries so ESP32 / ESP32-S3 / ESP32-C3 simulation
 works out of the box. If you'd rather not use the prebuilts —
@@ -218,6 +220,30 @@ Read `build/ninja-link-*.log`, which the script keeps.
 (`esp32s3-picsimlab`, `esp32-picsimlab`, `esp32c3-picsimlab`)** — you
 built from an upstream clone rather than the source archive. See the
 warning at the top of this document.
+
+## 7. The ESP-NOW patch hertzbench applies to the public fork
+
+hertzbench (`hertzbench/`) builds its libqemu from the public
+`lcgamboa/qemu` fork, branch `picsimlab-esp32`, commit `9c298984`,
+and applies one small patch to its Wi-Fi MAC model first
+(`hw/misc/esp32_wifi.c`, `hw/misc/esp32_wifi_ap.c`,
+`include/hw/misc/esp32_wifi.h`). Without it ESP-NOW between boards
+breaks:
+
+- once more than 20 frames wait in the MAC's injection queue,
+  `Esp32_WLAN_can_receive` answers false and nothing ever calls
+  `qemu_flush_queued_packets`, so the NIC never reads its netdev
+  again;
+- a unicast ESP-NOW frame raises its tx-done interrupt when its DMA
+  ends, before the ACK wait, with the status still NACK.
+
+The patch itself, how to apply and check it, and what it leaves
+alone are in
+[`hertzbench/docs/upstream-sync.md`](../hertzbench/docs/upstream-sync.md#patch-3-the-qemu-forks-wi-fi-mac-esp-now-receive-and-tx-done-outside-this-tree).
+Apply it before running the build script; neither the patched
+source nor the resulting binaries are committed to this repository.
+Whether the source archive in section 1 carries the same two
+defects has not been checked.
 
 ## License notes
 

@@ -2,12 +2,14 @@
 # reading to the gateway every 500 ms, the gateway broadcasts a beacon every
 # second. A wall stands between the gateway and the two farther sensors. At
 # 30 s sensor-4 walks away: its frames need more retries, run past the fork's
-# 10 ms ACK wait or are lost, so the gateway hears it less and sensor-4's
-# firmware sees its sends fail. Run it with:
+# 10 ms ACK wait or are lost, so far fewer of its frames are acked. On real
+# firmware the Wi-Fi driver resends each reading itself, so most readings still
+# reach the gateway (docs/e2e-esp32.md, ESP-NOW step 5). Run it with:
 #
 #   cd hertzbench && deno task hertzbench run scenarios/examples/espnow-mesh-5-nodes.yaml
 #
-# Needs libqemu-xtensa and the ESP-IDF toolchain; see docs/e2e-esp32.md.
+# Needs libqemu-xtensa built with the fork patch in docs/upstream-sync.md
+# (patch 3) and the sketch toolchain; see docs/e2e-esp32.md.
 # scenarios/examples/espnow-mesh-scripted.yaml is the same experiment with
 # scripted boards, which runs anywhere.
 #

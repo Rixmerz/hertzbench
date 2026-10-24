@@ -516,3 +516,21 @@ for (
     assert(far.espnow!.ackedPct < near.espnow!.ackedPct - 40);
   });
 }
+
+// The real-firmware run (docs/e2e-esp32.md) boots the boards seconds apart. A
+// sensor that sends before the gateway is up gets no ACK, its driver resends
+// dozens of times a second, and phase "start" then measures the boot order.
+Deno.test("example espnow-sensor sketch: sends readings only after it has heard the gateway", async () => {
+  const sketch = await Deno.readTextFile(`${EXAMPLES}fw/espnow-sensor/espnow-sensor.ino`);
+  const receive = sketch.slice(sketch.indexOf("static void handleReceive("));
+  const receiveBody = receive.slice(0, receive.indexOf("\n}\n"));
+  assert(
+    /if \(fromGateway\) gatewayHeard = true;/.test(receiveBody),
+    "a gateway frame opens the gate",
+  );
+  const loop = sketch.slice(sketch.indexOf("void loop()"));
+  const gate = loop.indexOf("if (gatewayHeard &&");
+  const send = loop.indexOf("esp_now_send(GATEWAY");
+  assert(gate !== -1 && send > gate, "loop() sends to the gateway only behind the gate");
+  assertEquals(sketch.split("esp_now_send(").length - 1, 1, "no other send bypasses it");
+});
