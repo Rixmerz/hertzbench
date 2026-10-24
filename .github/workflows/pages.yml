@@ -6,7 +6,7 @@ on:
   push:
     branches: [master]
     paths:
-      - "site/**"
+      - "site/**" # includes site/img/**
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -39,11 +39,12 @@ jobs:
         working-directory: site
         run: deno task test
 
-      # Ship the page only, not its test.
+      # Ship the page and its screenshots only, not its test or deno.json.
       - name: Stage the site
         run: |
           mkdir _site
           cp site/index.html site/style.css site/download.js _site/
+          cp -r site/img _site/img
 
       - uses: actions/upload-pages-artifact@v3
         with:

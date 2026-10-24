@@ -12,7 +12,8 @@
   const API_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
   // Only links that stay on GitHub's release hosting are written into an href.
   const ASSET_URL = /^https:\/\/github\.com\/Rixmerz\/hertzbench\/releases\/download\//;
-  const NOT_A_BUILD = /\.(sha\d+|sig|asc|pem|sbom|json|jsonl|txt|md|minisig|sha256sum)$|checksums?|sha\d+sums?/i;
+  const NOT_A_BUILD =
+    /\.(sha\d+|sig|asc|pem|sbom|json|jsonl|txt|md|minisig|sha256sum)$|checksums?|sha\d+sums?/i;
 
   /** "linux", "macos" or "windows", or null when the name says none of them. */
   function osOf(name) {
@@ -68,7 +69,11 @@
     if (!data || !data.getHighEntropyValues) return null;
     try {
       const values = await data.getHighEntropyValues(["architecture", "bitness", "platform"]);
-      return { platform: values.platform, architecture: values.architecture, bitness: values.bitness };
+      return {
+        platform: values.platform,
+        architecture: values.architecture,
+        bitness: values.bitness,
+      };
     } catch (_) {
       // Hints refused by the browser: the user agent string is all there is.
       return null;
@@ -154,7 +159,11 @@
     }
     if (response.status === 404) {
       for (const row of list.querySelectorAll("li")) setRow(row, "No build published", null);
-      setStatus(status, "none", "No release is published yet. Hertzbench runs from source with Deno: see Install below.");
+      setStatus(
+        status,
+        "none",
+        "No release is published yet. Hertzbench runs from source with Deno: see Install below.",
+      );
       return;
     }
     if (!response.ok) {
@@ -188,23 +197,35 @@
         return kind && kind.os === os && (kind.arch === null || kind.arch === arch);
       });
       if (found) linked++;
-      setRow(row, "Not in this release", found && {
-        name: found.name,
-        url: found.browser_download_url,
-        size: typeof found.size === "number" ? found.size : 0,
-      });
+      setRow(
+        row,
+        "Not in this release",
+        found && {
+          name: found.name,
+          url: found.browser_download_url,
+          size: typeof found.size === "number" ? found.size : 0,
+        },
+      );
     }
 
     const tag = typeof release.tag_name === "string" ? release.tag_name : "unnamed";
     const when = Date.parse(release.published_at);
-    const date = Number.isNaN(when) ? "" : `, published ${new Date(when).toISOString().slice(0, 10)}`;
+    const date = Number.isNaN(when)
+      ? ""
+      : `, published ${new Date(when).toISOString().slice(0, 10)}`;
     if (linked === 0) {
-      setStatus(status, "empty", `Latest release ${tag}${date}, has no build for Windows, macOS or Linux.`, {
-        href: typeof release.html_url === "string" && release.html_url.startsWith("https://github.com/")
-          ? release.html_url
-          : RELEASES_URL,
-        text: "See what it contains.",
-      });
+      setStatus(
+        status,
+        "empty",
+        `Latest release ${tag}${date}, has no build for Windows, macOS or Linux.`,
+        {
+          href: typeof release.html_url === "string" &&
+              release.html_url.startsWith("https://github.com/")
+            ? release.html_url
+            : RELEASES_URL,
+          text: "See what it contains.",
+        },
+      );
     } else {
       setStatus(status, "ok", `Latest release ${tag}${date}.`);
     }
