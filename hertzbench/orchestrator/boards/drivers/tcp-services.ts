@@ -20,7 +20,7 @@ import type { TcpConnection } from "../../../engine/mod.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC11B65";
+const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /** A request head larger than this is refused rather than buffered. */
 const MAX_HEAD_BYTES = 8192;
 
@@ -165,6 +165,8 @@ export function serveHttp(conn: TcpConnection, ctx: ServiceContext): void {
       } else if (frame.opcode === 0x9) {
         void conn.write(websocketFrame(0xa, frame.payload)).catch(() => {});
       } else if (frame.opcode === 0x8) {
+        // The WebSocket is over: the peer's FIN that follows must not log a second close.
+        websocket = false;
         ctx.onSerial(`ws closed from ${peer}`);
         void conn.write(websocketFrame(0x8, frame.payload.slice(0, 2))).then(() => conn.end())
           .catch(() => {});
@@ -239,7 +241,9 @@ export function parseMqttPacket(
   let multiplier = 1;
   let i = 1;
   for (;; i++) {
-    if (i >= buf.length || i > 4) return null;
+    // A fifth length byte can never make the packet valid: waiting for more would buffer forever.
+    if (i > 4) throw new RangeError("MQTT remaining length longer than four bytes");
+    if (i >= buf.length) return null;
     const byte = buf[i] as number;
     length += (byte & 0x7f) * multiplier;
     multiplier *= 128;
@@ -283,7 +287,13 @@ export class MqttBroker {
     conn.onData((chunk) => {
       buffer = concat(buffer, chunk);
       for (;;) {
-        const packet = parseMqttPacket(buffer);
+        let packet;
+        try {
+          packet = parseMqttPacket(buffer);
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+          return conn.abort("malformed MQTT packet");
+        }
         if (!packet) return;
         buffer = buffer.slice(packet.size);
         if (!connected && packet.type !== MQTT.connect) return conn.abort("MQTT without CONNECT");
