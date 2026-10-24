@@ -59,6 +59,10 @@ welcome; each one links the evidence.
       measured 3228 lock takes a second against a bound of 2200, even with three 1 s windows.
       That is too far over the bound to be jitter: likely timer catch-up bursts after the thread
       is descheduled, or a real cost bug in the compiled worker. Do not just raise the bound.
+- An unfinished attempt at the first two is on the branch
+  [`wip/ci-flakes`](https://github.com/Rixmerz/hertzbench/tree/wip/ci-flakes): a Chromium
+  cold-start budget and a sub-tick clock for the medium. It was never verified; start from it or
+  ignore it.
 - [ ] **Publish Docker Image fails on master.** The workflow has failed on its last runs; not
       investigated.
 - [ ] **Dependency review always fails** because the repository's dependency graph is disabled.
