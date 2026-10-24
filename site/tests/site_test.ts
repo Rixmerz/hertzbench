@@ -125,6 +125,7 @@ const MIME: Record<string, string> = {
   html: "text/html; charset=utf-8",
   css: "text/css; charset=utf-8",
   js: "text/javascript; charset=utf-8",
+  png: "image/png",
 };
 
 function serveSite(): { origin: string; ready: Promise<void>; stop: () => Promise<void> } {
@@ -141,7 +142,9 @@ function serveSite(): { origin: string; ready: Promise<void>; stop: () => Promis
     const path = new URL(request.url).pathname;
     const name = path === "/" ? "index.html" : path.slice(1);
     const ext = name.split(".").pop() ?? "";
-    if (name.includes("/") || name.includes("..") || !(ext in MIME) || name.startsWith("deno")) {
+    // Only top-level files and the one image folder; never the tests or deno.json.
+    const nested = name.includes("/") && !/^img\/[\w-]+\.png$/.test(name);
+    if (nested || name.includes("..") || !(ext in MIME) || name.startsWith("deno")) {
       return new Response("not found", { status: 404 });
     }
     try {
@@ -525,22 +528,13 @@ const CONTRAST_SCRIPT = `(() => {
     if (!range.getClientRects().length) continue;
     const cs = getComputedStyle(el);
     if (Number(cs.opacity) !== 1) failures.push(label(el) + " has opacity");
-    const svg = el.closest("svg");
-    const fg = svg ? parse(cs.fill) : parse(cs.color);
-    const bed = svg ? parse(getComputedStyle(svg.querySelector("rect")).fill) : null;
-    const bg = bed ?? background(el);
+    const fg = parse(cs.color);
+    const bg = background(el);
     const size = parseFloat(cs.fontSize);
     const large = size >= 24 || (size >= 18.66 && Number(cs.fontWeight) >= 700);
     check(label(el), over(fg, bg), bg, large ? 3 : 4.5);
   }
-  // Marks and lines that carry meaning need 3:1: the map's links, nodes and wall,
-  // the focus ring, and the border of the detected system.
-  const svg = document.querySelector(".hero-art svg");
-  const bed = parse(getComputedStyle(svg.querySelector("rect")).fill);
-  for (const el of svg.querySelectorAll(".art-link, .art-wall, .art-node circle")) {
-    check("svg " + label(el), parse(getComputedStyle(el).stroke), bed, 3);
-  }
-  const vars = getComputedStyle(document.documentElement);
+  // Lines and marks that carry meaning need 3:1: the focus ring, the border of the detected system.
   const token = (name) => {
     const probe = document.createElement("i");
     probe.style.color = "var(" + name + ")";
@@ -748,7 +742,7 @@ Deno.test({
           }),
       );
 
-      for (const width of [360, 768, 1280, 1920]) {
+      for (const width of [360, 375, 768, 1280, 1440, 1920]) {
         await t.step(
           `layout at ${width}px: no sideways scroll, nothing outside, no overlap`,
           () =>
@@ -779,43 +773,106 @@ Deno.test({
         );
       }
 
+      const shown = new Set<string>();
+      for (const scheme of ["light", "dark"] as const) {
+        await t.step(
+          `images, ${scheme} scheme: loaded, sized, described and the scheme picks the file`,
+          () =>
+            withPage({ scheme }, async (page) => {
+              const images = await page.evaluate<any[]>(`(async () => {
+              const all = [...document.images];
+              const loading = all.map((img) => img.getAttribute("loading"));
+              for (const img of all) img.loading = "eager";
+              await Promise.all(all.map((img) => img.decode()));
+              return all.map((img, i) => ({
+                src: img.currentSrc.split("/").slice(-2).join("/"), alt: img.alt,
+                width: img.getAttribute("width"), height: img.getAttribute("height"),
+                natural: [img.naturalWidth, img.naturalHeight],
+                hero: img.getAttribute("fetchpriority") === "high",
+                loading: loading[i],
+              }));
+            })()`);
+              assert(images.length >= 5, `only ${images.length} images on the page`);
+              for (const image of images) {
+                assert(
+                  image.src.endsWith(`-${scheme}.png`),
+                  `${image.src} for the ${scheme} scheme`,
+                );
+                assert(image.alt.trim().length > 40, `${image.src} has no real alt text`);
+                assertEquals(
+                  [Number(image.width), Number(image.height)],
+                  image.natural,
+                  `${image.src}: width and height attributes differ from the file`,
+                );
+                shown.add(image.src);
+              }
+              assertEquals(images.filter((i) => i.hero).length, 1, "exactly one hero image");
+              for (const image of images) {
+                assertEquals(image.loading, image.hero ? null : "lazy", `${image.src}: loading`);
+              }
+              const picture = await page.evaluate<string[]>(
+                `[...document.querySelectorAll("picture")].map((p) =>
+                  [...p.querySelectorAll("source")].map((s) => s.media).join())`,
+              );
+              for (const media of picture) assertEquals(media, "(prefers-color-scheme: dark)");
+            }),
+        );
+      }
+
+      await t.step("images: every file in img/ is used, all of them under 3 MB", async () => {
+        const used = new Set([...shown].map((src) => src.replace("img/", "")));
+        const files: { name: string; size: number }[] = [];
+        for await (const entry of Deno.readDir(`${SITE}img`)) {
+          files.push({
+            name: entry.name,
+            size: (await Deno.stat(`${SITE}img/${entry.name}`)).size,
+          });
+        }
+        assertEquals(files.map((f) => f.name).sort(), [...used].sort(), "unused or missing images");
+        const total = files.reduce((sum, f) => sum + f.size, 0);
+        assert(total < 3 * 1024 * 1024, `img/ is ${total} bytes`);
+      });
+
       await t.step(
-        "the figure's text description matches the drawing",
+        "lazy loading: only the hero loads before the first scroll",
         () =>
-          withPage({}, async (page) => {
-            // Which links cross the wall, from the SVG's own coordinates.
-            const figure = await page.evaluate<
-              { desc: string; links: { pair: string; crosses: boolean }[] }
-            >(`(() => {
-            const num = (el, name) => Number(el.getAttribute(name));
-            const wall = document.querySelector(".art-wall");
-            const x = num(wall, "x1");
-            if (x !== num(wall, "x2")) throw new Error("the wall is no longer vertical");
-            const [lo, hi] = [num(wall, "y1"), num(wall, "y2")].sort((a, b) => a - b);
-            const nodes = [...document.querySelectorAll(".art-node")].map((g) => ({
-              name: g.querySelector("text").textContent.trim(),
-              x: num(g.querySelector("circle"), "cx"), y: num(g.querySelector("circle"), "cy") }));
-            const at = (px, py) => nodes.find((n) => n.x === px && n.y === py).name;
-            const links = [...document.querySelectorAll(".art-link")].map((l) => {
-              const [ax, ay, bx, by] = ["x1", "y1", "x2", "y2"].map((n) => num(l, n));
-              const crosses = (ax - x) * (bx - x) < 0 &&
-                (y => y >= lo && y <= hi)(ay + (by - ay) * (x - ax) / (bx - ax));
-              return { pair: [at(ax, ay), at(bx, by)].sort().join(""), crosses };
-            });
-            return { desc: document.getElementById("art-desc").textContent.replace(/\\s+/g, " "), links };
-          })()`);
-            assertEquals(figure.links.length, 3);
-            for (const { pair, crosses } of figure.links) {
-              const sentence = figure.desc.split(/\.\s*/).find((part) =>
-                part.startsWith(`Node ${pair[0]} and node ${pair[1]} `)
-              );
-              assert(sentence, `the description says nothing about ${pair}: ${figure.desc}`);
-              assertEquals(
-                /cross/.test(sentence),
-                crosses,
-                `${pair} ${crosses ? "crosses" : "does not cross"} the wall: "${sentence}"`,
-              );
+          withPage({ width: 1440, height: 900 }, async (page) => {
+            const loaded = await page.evaluate<{ src: string; below: boolean }[]>(
+              `[...document.images].filter((i) => i.complete && i.naturalWidth > 0).map((i) => ({
+                 src: i.currentSrc, below: i.getBoundingClientRect().top > innerHeight * 2 }))`,
+            );
+            assert(loaded.length >= 1, "the hero image did not load");
+            assert(
+              !loaded.some((i) => i.below),
+              `lazy images loaded early: ${JSON.stringify(loaded)}`,
+            );
+          }),
+      );
+
+      await t.step(
+        "375px: the screenshots pan inside their frames and the page does not scroll",
+        () =>
+          withPage({ width: 375, height: 667 }, async (page) => {
+            const panes = await page.evaluate<
+              { label: string; scrolls: boolean; focusable: boolean; frame: number }[]
+            >(`[...document.querySelectorAll(".pan-scroller")].map((el) => ({
+                 label: el.getAttribute("aria-label"), scrolls: el.scrollWidth > el.clientWidth,
+                 focusable: el.tabIndex === 0 && el.getAttribute("role") === "region",
+                 frame: el.closest(".frame").getBoundingClientRect().width }))`);
+            assert(panes.length >= 4, `${panes.length} panning screenshots`);
+            for (const pane of panes) {
+              assert(pane.scrolls, `${pane.label} does not pan`);
+              assert(pane.focusable, `${pane.label} cannot be reached by keyboard`);
+              assert(pane.frame <= 375, `${pane.label}: frame is ${pane.frame}px wide`);
             }
+            const hero = await page.evaluate<number>(
+              `document.querySelector(".hero img").getBoundingClientRect().width`,
+            );
+            assert(hero <= 375, `the hero is ${hero}px wide`);
+            const scroll = await page.evaluate<number[]>(
+              `[document.documentElement.scrollWidth, document.documentElement.clientWidth]`,
+            );
+            assert(scroll[0]! <= scroll[1]!, `page scrolls sideways: ${scroll}`);
           }),
       );
 

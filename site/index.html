@@ -5,8 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
     <title>Hertzbench: simulate the radio network between your boards</title>
-    <meta name="description" content="Hertzbench is a local, open-source simulator for the radio links between microcontroller boards: real firmware, simulated Wi-Fi, ESP-NOW, LoRa, nRF24 and BLE with distance, path loss, jitter and loss.">
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230071e3'/%3E%3Ccircle cx='9' cy='22' r='3' fill='%23fff'/%3E%3Ccircle cx='16' cy='9' r='3' fill='%23fff'/%3E%3Ccircle cx='24' cy='22' r='3' fill='%23fff'/%3E%3Cpath d='M9 22 16 9 24 22Z' fill='none' stroke='%23fff' stroke-width='1.6'/%3E%3C/svg%3E">
+    <meta name="description"
+      content="Hertzbench is a local, open-source simulator for the radio links between microcontroller boards: real firmware, simulated Wi-Fi, ESP-NOW, LoRa, nRF24 and BLE with distance, path loss, jitter and loss.">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Hertzbench: simulate the radio network between your boards">
+    <meta property="og:description"
+      content="N microcontroller boards on real firmware, talking over simulated wireless links with a distance, a path loss, a latency and a loss. Local, free, AGPLv3.">
+    <meta property="og:url" content="https://rixmerz.github.io/hertzbench/">
+    <meta property="og:image" content="https://rixmerz.github.io/hertzbench/img/hero-dark.png">
+    <link rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230071e3'/%3E%3Ccircle cx='9' cy='22' r='3' fill='%23fff'/%3E%3Ccircle cx='16' cy='9' r='3' fill='%23fff'/%3E%3Ccircle cx='24' cy='22' r='3' fill='%23fff'/%3E%3Cpath d='M9 22 16 9 24 22Z' fill='none' stroke='%23fff' stroke-width='1.6'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="style.css">
     <script src="download.js" defer></script>
   </head>
@@ -14,105 +22,493 @@
     <a class="skip" href="#main">Skip to content</a>
 
     <header class="bar">
-      <p class="brand">Hertzbench</p>
+      <p class="brand">hertzbench</p>
       <nav aria-label="Page sections">
         <ul>
-          <li><a href="#what">What it is</a></li>
+          <li><a href="#how">How it works</a></li>
+          <li><a href="#radios">Radios</a></li>
           <li><a href="#download">Download</a></li>
-          <li><a href="#install">Install</a></li>
           <li><a href="#status">Status</a></li>
           <li><a href="#docs">Docs</a></li>
+          <li><a href="https://github.com/Rixmerz/hertzbench">GitHub</a></li>
         </ul>
       </nav>
     </header>
 
     <main id="main">
       <section class="hero" aria-labelledby="top-title">
-        <div class="hero-copy">
-          <h1 id="top-title">The radio network between your boards, simulated.</h1>
-          <p class="lead">Run N microcontroller boards on real firmware and let them talk over simulated
-            wireless links with a distance, a path loss, a latency and a loss. Local, free, open source
-            under AGPLv3.</p>
-          <p class="actions">
-            <a class="button primary" href="#download">Download</a>
-            <a class="button" href="https://github.com/Rixmerz/hertzbench">View on GitHub</a>
-          </p>
-        </div>
+        <p class="eyebrow">Local, free, open source (AGPLv3)</p>
+        <h1 id="top-title">The radio network between your boards, simulated.</h1>
+        <p
+          class="lead">Run N microcontroller boards on real firmware and let them talk over simulated
+          wireless links, each with a distance, a path loss, a latency and a loss. Wi-Fi/IP, ESP-NOW,
+          LoRa, nRF24 and BLE.</p>
+        <p class="actions">
+          <a class="button primary" href="#download">Download</a>
+          <a class="button" href="https://github.com/Rixmerz/hertzbench">View on GitHub</a>
+        </p>
 
-        <figure class="hero-art">
-          <svg viewBox="0 0 480 320" role="img" aria-labelledby="art-title art-desc">
-            <title id="art-title">Three nodes on a map with a wall between them</title>
-            <desc id="art-desc">Node a and node b are joined by a solid line. Node b and node c are joined by
-              a dashed line that crosses the wall. Node a and node c are joined by a dotted line that
-              also crosses the wall.</desc>
-            <rect class="art-bed" x="0" y="0" width="480" height="320" rx="8"/>
-            <path class="art-grid" d="M0 80H480M0 160H480M0 240H480M120 0V320M240 0V320M360 0V320"/>
-            <line class="art-wall" x1="300" y1="64" x2="300" y2="280"/>
-            <text class="art-text" x="312" y="76">wall</text>
-            <line class="art-link q-bad" x1="70" y1="240" x2="410" y2="240"/>
-            <line class="art-link q-poor" x1="200" y1="100" x2="410" y2="240"/>
-            <line class="art-link q-good" x1="70" y1="240" x2="200" y2="100"/>
-            <g class="art-node"><circle cx="70" cy="240" r="13"/><text x="70" y="290">a</text></g>
-            <g class="art-node"><circle cx="200" cy="100" r="13"/><text x="200" y="68">b</text></g>
-            <g class="art-node"><circle cx="410" cy="240" r="13"/><text x="410" y="290">c</text></g>
-          </svg>
-          <figcaption>Solid, dashed and dotted lines stand for good, poor and bad link quality, as in the live
-            view. The layout is an illustration, not a measurement.</figcaption>
+        <figure class="frame fit">
+          <div class="frame-bar">
+            <span class="frame-cmd">hertzbench view espnow-mesh-5-nodes.yaml</span>
+            <span class="frame-tag">7 of 7 assertions pass</span>
+          </div>
+          <picture>
+            <source srcset="img/hero-dark.png" media="(prefers-color-scheme: dark)" width="1440"
+              height="1375">
+            <img src="img/hero-light.png" width="1440" height="1375" fetchpriority="high"
+              alt="The live view of a finished run: a map with a gateway and four sensors in a row, a wall between the third and the fourth, each link labelled with its signal in dBm, a table of every link with RSSI and SNR, and a packet timeline with a row per link.">
+          </picture>
+          <figcaption>A real screenshot of <code>hertzbench view</code>: five ESP32 boards running real
+            ESP-NOW firmware under QEMU, 60 s, one sensor walking away at 30 s. Run on 2026-10-24.</figcaption>
         </figure>
       </section>
 
-      <section id="what" class="block" aria-labelledby="what-title">
-        <h2 id="what-title">What it is</h2>
-        <ul class="features">
-          <li class="feature lead-feature">
-            <h3>Links with a channel model</h3>
-            <p>Each Wi-Fi/IP and ESP-NOW frame pays for the distance. The engine computes RSSI and SNR from
-              the positions and any walls, picks a rate, rolls retries and loss, and delivers the frame after
-              the modelled delay, jitter included. Its randomness comes from the scenario seed, so the same
-              frames on a link get the same outcomes.</p>
+      <section id="how" class="block" aria-labelledby="how-title">
+        <p class="kicker">How it works</p>
+        <h2 id="how-title">One file in, one verdict out.</h2>
+        <p
+          class="note">Everything below is from the same run as the screenshot above, five ESP32 boards
+          running the ESP-NOW sketches in <code>scenarios/examples/fw/</code>.</p>
+        <ol class="stages">
+          <li class="stage">
+            <h3>A scenario file</h3>
+            <p>Nodes, positions in metres, walls, the radio of each node and what must hold at the end.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">scenarios/examples/espnow-mesh-5-nodes.yaml</span>
+                <span class="frame-tag">excerpt</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="Scenario excerpt"><code>name: espnow-mesh-5-nodes
+seed: 42
+duration: 60s
+environment:
+  preset: indoor_office
+  obstacles:
+    - { polygon: [[12, -10], [12, 10]], attenuation_db: 12 }
+nodes:
+  - id: gw
+    board: esp32
+    firmware: ./fw/espnow-gateway
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 1, tx_power_dbm: 15 }]
+  - id: sensor
+    count: 4
+    board: esp32
+    firmware: ./fw/espnow-sensor
+    position: { grid: { origin: [6, 0], step: [4, 0] } }
+timeline:
+  - { at: 30s, label: far, move: { node: sensor-4, to: [44, 0] } }</code></pre>
+            </figure>
           </li>
-          <li class="feature">
-            <h3>Real firmware</h3>
-            <p>ESP32 boards run under QEMU with their own MAC addresses. Scripted boards, a traffic
-              generator instead of firmware, run with nothing but Deno.</p>
+          <li class="stage">
+            <h3>Emulated boards</h3>
+            <p>Each ESP32 runs its own firmware under QEMU, with its own MAC. Serial output is kept per board.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">serial-gw.log</span>
+                <span class="frame-tag">excerpt</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="Gateway serial output"><code>[7.677s] espnow up mac=02:68:7a:62:01:01 channel=1
+[7.692s] espnow tx ok to broadcast
+[7.724s] espnow rx reading:0 from sensor-3
+[7.725s] espnow rx reading:0 from sensor-4
+[7.729s] espnow rx reading:0 from sensor-1
+[8.218s] espnow rx reading:1 from sensor-1
+[8.222s] espnow rx reading:1 from sensor-4
+[8.227s] espnow rx reading:1 from sensor-3
+[8.686s] espnow tx ok to broadcast
+[8.719s] espnow rx reading:2 from sensor-1</code></pre>
+            </figure>
           </li>
-          <li class="feature">
-            <h3>Five kinds of link</h3>
-            <p>Wi-Fi/IP, ESP-NOW, LoRa (SX127x) and nRF24L01+ chip models at their SPI interface, and BLE
-              through a virtual controller on an HCI UART, with the firmware built host-only for it. LoRa,
-              nRF24 and BLE share a chip-level air where overlapping packets can collide. Every report prints
-              the fidelity of each part.</p>
+          <li class="stage">
+            <h3>Simulated radio links</h3>
+            <p>Every frame pays for the distance and the wall: RSSI, SNR, rate, retries, loss and delay.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">report of the run above, phase "far"</span>
+                <span class="frame-tag">excerpt</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="Link table excerpt"><code>link          sent  delivered  loss   p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+sensor-1-&gt;gw  59    59         0.0%   0.29    0.47    0.48    -48.4     42.5    1.00
+sensor-2-&gt;gw  60    60         0.0%   0.27    0.48    0.54    -55.1     35.9    1.00
+sensor-3-&gt;gw  61    61         0.0%   0.31    0.50    0.57    -71.5     19.5    1.00
+sensor-4-&gt;gw  468   65         86.1%  1.44    11.09   15.42   -86.4     4.6     6.50</code></pre>
+            </figure>
           </li>
-          <li class="feature">
-            <h3>An MCP server for AI agents</h3>
-            <p><code>hertzbench mcp</code> gives an agent tools to build, edit, run and steer scenarios: move
-              a node, force loss or latency, raise the interference on a link, and read the serial output
-              and the metrics while the run plays.</p>
+          <li class="stage">
+            <h3>A result you can assert on</h3>
+            <p>The run exits non-zero when an assertion fails, and leaves <code>metrics.json</code>, <code>air.pcap</code> and <code>events.jsonl</code>.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">report of the run above</span>
+                <span class="frame-tag">PASS</span>
+              </div>
+              <pre tabindex="0" role="region" aria-label="Assertions"><code>Assertions
+  PASS  serial gw contains "espnow up mac=02:68:7a:62:01:01" within 30000 ms  (seen at 7677.382 ms)
+  PASS  serial sensor-4 contains "espnow up mac=02:68:7a:62:01:05" within 30000 ms  (seen at 6076.732 ms)
+  PASS  serial gw contains "from sensor-4" within 30000 ms  (seen at 7725.491 ms)
+  PASS  serial sensor-1 contains "espnow rx beacon" within 30000 ms  (seen at 7701.669 ms)
+  PASS  metric sensor-*-&gt;gw (phase start, espnow frames): latency_p95_ms lt 5, acked_pct gt 75, ack_rtt_p95_ms lt 10  (4 link(s) satisfy it)
+  PASS  metric sensor-4-&gt;gw (phase far, espnow frames): acked_pct lt 50  (1 link(s) satisfy it)
+  PASS  metric sensor-1-&gt;gw (phase far, espnow frames): acked_pct gt 90  (1 link(s) satisfy it)
+
+RESULT: PASS</code></pre>
+            </figure>
           </li>
-          <li class="feature">
-            <h3>A live view</h3>
-            <p><code>hertzbench view</code> draws the nodes on a map, colors each link by signal or by loss,
-              and lets you drag a node to move it mid-run. It is optional and needs no build step.</p>
-          </li>
-          <li class="feature">
-            <h3>A mobile bridge</h3>
-            <p>Lets a real phone on the same Wi-Fi reach a simulated board over IP, with mDNS, or over BLE
-              through BlueZ on Linux. It has not been tried with a real phone yet.</p>
-          </li>
-          <li class="feature">
-            <h3>Plain outputs</h3>
-            <p>A scenario is a YAML file. A run writes <code>metrics.json</code>, <code>air.pcap</code> for
-              Wireshark and <code>events.jsonl</code>, and exits non-zero when an assertion fails.</p>
-          </li>
-        </ul>
+        </ol>
+      </section>
+
+      <section id="radios" class="block" aria-labelledby="radios-title">
+        <p class="kicker">Radios and tools</p>
+        <h2 id="radios-title">Eight things it does, each with its proof.</h2>
+        <p
+          class="note">Fidelity levels are the ones every report prints: F1 and F2 mean the same firmware
+          binary; F3 means a host-only build. A scripted board is a traffic generator, not firmware, and
+          the page says so wherever one is shown.</p>
+
+        <article class="radio" id="wifi">
+          <div class="radio-rail">
+            <h3>Wi-Fi/IP</h3>
+            <p class="fidelity">F2, same firmware binary</p>
+          </div>
+          <div class="radio-body">
+            <p>Each board's Wi-Fi NIC is a QEMU network device on the engine instead of SLIRP. The engine
+              is a layer-2 switch with a virtual gateway at <code>192.168.4.1</code> that answers ARP and
+              DHCP. Three boards exchange UDP; behind the wall one link loses frames and the other holds.</p>
+            <figure class="frame pan">
+              <div class="frame-bar">
+                <span class="frame-cmd">hertzbench view udp-3-nodes.yaml</span>
+                <span class="frame-tag">3 ESP32 boards</span>
+              </div>
+              <div class="pan-scroller" tabindex="0" role="region"
+                aria-label="Wi-Fi/IP view, scrolls sideways">
+                <picture>
+                  <source srcset="img/wifi-dark.png" media="(prefers-color-scheme: dark)"
+                    width="1440" height="900">
+                  <img src="img/wifi-light.png" width="1440" height="900" loading="lazy"
+                    alt="The live view of three ESP32 boards on a map with a wall, and the table of links with their RSSI and SNR.">
+                </picture>
+              </div>
+              <figcaption>Real screenshot, real firmware (<code>udp-3-nodes.yaml</code>).</figcaption>
+            </figure>
+          </div>
+        </article>
+
+        <article class="radio" id="espnow">
+          <div class="radio-rail">
+            <h3>ESP-NOW</h3>
+            <p class="fidelity">F1, same firmware binary</p>
+          </div>
+          <div class="radio-body">
+            <p>The QEMU fork's Wi-Fi MAC turns each 802.11 action frame into pseudo-Ethernet and the engine
+              carries it, with the fork's 10 ms ACK wait. The report lists every send as the sender's
+              firmware sees it, and <code>air-80211.pcap</code> holds the frames as 802.11 for Wireshark.
+              It needs a small patch to the fork's Wi-Fi MAC.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">report of the run above, phase "far"</span>
+                <span class="frame-tag">PASS, 7 of 7</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="ESP-NOW sends"><code>ESP-NOW unicast sends, as the sending firmware sees them (the fork waits 10 ms for each ACK)
+link          sends  acked  acked %  frame_lost  ack_timeout  no_ack  rtt p50 ms  rtt max ms
+sensor-1-&gt;gw  59     59     100.0%   0           0            0       2.51        3.62
+sensor-2-&gt;gw  60     60     100.0%   0           0            0       2.51        4.03
+sensor-3-&gt;gw  61     61     100.0%   0           0            0       2.48        4.58
+sensor-4-&gt;gw  468    61     13.0%    403         0            4       2.64        9.48</code></pre>
+            </figure>
+          </div>
+        </article>
+
+        <article class="radio" id="lora">
+          <div class="radio-rail">
+            <h3>LoRa</h3>
+            <p class="fidelity">F1, same firmware binary</p>
+          </div>
+          <div class="radio-body">
+            <p>The SX127x is modelled at its SPI interface, so arduino-LoRa runs on an SX1276
+              model with the same firmware binary. A gateway and six nodes 300 m apart, out to 1.8 km, at SF7 BW125: the link budget runs
+              out along the line. LoRa, nRF24 and BLE share a chip-level air where overlapping packets can
+              collide.</p>
+            <figure class="frame pan">
+              <div class="frame-bar">
+                <span class="frame-cmd">hertzbench view lora-gateway-6-nodes.yaml</span>
+                <span class="frame-tag">PASS</span>
+              </div>
+              <div class="pan-scroller" tabindex="0" role="region"
+                aria-label="LoRa view, scrolls sideways">
+                <picture>
+                  <source srcset="img/lora-dark.png" media="(prefers-color-scheme: dark)"
+                    width="1032" height="300">
+                  <img src="img/lora-light.png" width="1032" height="300" loading="lazy"
+                    alt="The map of the live view with a LoRa gateway and six nodes in a line, 300 m apart, each link drawn in a color for its signal.">
+                </picture>
+              </div>
+              <figcaption>Real screenshot, real firmware (<code>lora-gateway-6-nodes.yaml</code>).</figcaption>
+            </figure>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">report of hertzbench view lora-gateway-6-nodes.yaml</span>
+                <span class="frame-tag">PASS</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="LoRa links"><code>link        sent  delivered  loss    p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+node-1-&gt;gw  32    32         0.0%    51.46   51.46   51.46   -103.9    13.1    1.00
+node-2-&gt;gw  33    31         6.1%    51.46   51.46   51.46   -114.5    2.6     1.00
+node-3-&gt;gw  29    25         13.8%   51.46   51.46   51.46   -120.6    -3.6    1.00
+node-4-&gt;gw  25    15         40.0%   51.46   51.46   51.46   -125.0    -8.0    1.00
+node-5-&gt;gw  38    0          100.0%  -       -       -       -128.4    -11.4   1.00
+node-6-&gt;gw  31    0          100.0%  -       -       -       -131.2    -14.1   1.00</code></pre>
+            </figure>
+          </div>
+        </article>
+
+        <article class="radio" id="nrf24">
+          <div class="radio-rail">
+            <h3>nRF24L01+</h3>
+            <p class="fidelity">F1, chip model</p>
+          </div>
+          <div class="radio-body">
+            <p>The chip model is done and tested at its SPI command interface. No example runs it on an
+              ESP32 board yet, so this run uses scripted hosts: one node 5 m from the gateway, one 400 m
+              away. The scenario below is the one in <code>hertzbench/tests/cli_test.ts</code>; save it
+              as <code>nrf24.yaml</code> to run it.</p>
+            <p
+              class="honest">Scripted boards replay what a sketch would do; this shows the chip model and
+              the channel, not firmware.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">nrf24.yaml</span>
+                <span class="frame-tag">scenario</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="nRF24 scenario"><code>name: nrf24-scripted
+seed: 5
+duration: 2s
+environment: { preset: indoor_office, shadowing_sigma_db: 0 }
+nodes:
+  - { id: gw, board: scripted, position: [0, 0], radios: [{ phy: nrf24 }], firmware: {} }
+  - id: near
+    board: scripted
+    position: [5, 0]
+    radios: [{ phy: nrf24 }]
+    firmware: { send: [{ to: gw, every: 200ms, count: 5, payload: t }] }
+  - id: far
+    board: scripted
+    position: [400, 0]
+    radios: [{ phy: nrf24 }]
+    firmware: { send: [{ to: gw, every: 200ms, count: 5, start: 100ms, payload: t }] }
+assertions:
+  - serial: { node: near, contains: "tx t:0 from near ok" }
+  - serial: { node: gw, contains: 'rx "t:4 from near" pipe=1' }
+  - serial: { node: far, contains: "tx t:0 from far failed" }
+  - metric: { link: "near-&gt;gw", kind: nrf24, loss_pct: { eq: 0 }, sent: { eq: 5 } }
+  - metric: { link: "gw-&gt;near", kind: nrf24-ack, loss_pct: { eq: 0 } }
+  - metric: { link: "far-&gt;gw", kind: nrf24, loss_pct: { eq: 100 }, sent: { eq: 80 } }</code></pre>
+            </figure>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">hertzbench run nrf24.yaml</span>
+                <span class="frame-tag">PASS, scripted</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="nRF24 report"><code>nrf24: F1, same firmware binary, the nRF24L01+ modelled at its SPI command interface
+
+link      sent  delivered  loss    p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+far-&gt;gw   80    0          100.0%  -       -       -       -118.4    -14.4   1.00
+gw-&gt;near  5     5          0.0%    0.07    0.07    0.07    -61.3     42.7    1.00
+near-&gt;gw  5     5          0.0%    0.33    0.33    0.33    -61.3     42.7    1.00
+
+Assertions
+  PASS  serial near contains "tx t:0 from near ok"  (seen at 32.052 ms)
+  PASS  serial gw contains "rx \"t:4 from near\" pipe=1"  (seen at 834.115 ms)
+  PASS  serial far contains "tx t:0 from far failed"  (seen at 160.733 ms)
+  PASS  metric near-&gt;gw (nrf24 frames): sent eq 5, loss_pct eq 0  (1 link(s) satisfy it)
+  PASS  metric gw-&gt;near (nrf24-ack frames): loss_pct eq 0  (1 link(s) satisfy it)
+  PASS  metric far-&gt;gw (nrf24 frames): sent eq 80, loss_pct eq 100  (1 link(s) satisfy it)
+
+RESULT: PASS</code></pre>
+              <figcaption>Excerpt of the report; the scenario is run with seed 5.</figcaption>
+            </figure>
+          </div>
+        </article>
+
+        <article class="radio" id="ble">
+          <div class="radio-rail">
+            <h3>BLE</h3>
+            <p class="fidelity">F3, host-only build</p>
+          </div>
+          <div class="radio-body">
+            <p>The firmware runs its real Bluedroid host stack, built host-only, and sends HCI over a UART.
+              The board relays that UART to a virtual link-layer controller on the engine's air. The binary
+              differs from production by that build option and the UART driver. The report lists every
+              connection and disconnection and the ACL data, and <code>hci-&lt;node&gt;.btsnoop</code> opens in
+              Wireshark.</p>
+            <figure class="frame pan">
+              <div class="frame-bar">
+                <span class="frame-cmd">hertzbench view ble-sensors-3-nodes.yaml</span>
+                <span class="frame-tag">BLE</span>
+              </div>
+              <div class="pan-scroller" tabindex="0" role="region"
+                aria-label="BLE view, scrolls sideways">
+                <picture>
+                  <source srcset="img/ble-dark.png" media="(prefers-color-scheme: dark)"
+                    width="1440" height="1049">
+                  <img src="img/ble-light.png" width="1440" height="1049" loading="lazy"
+                    alt="The live view of a BLE central and three sensor peripherals on a map, with the table of links and the packet timeline.">
+                </picture>
+              </div>
+              <figcaption>Real screenshot (<code>ble-sensors-3-nodes.yaml</code>): ESP32 sensors on
+                real firmware, the central a scripted host.</figcaption>
+            </figure>
+          </div>
+        </article>
+
+        <article class="radio" id="bridge">
+          <div class="radio-rail">
+            <h3>Mobile bridge</h3>
+            <p class="fidelity">Not a board</p>
+          </div>
+          <div class="radio-body">
+            <p>A real phone on the same Wi-Fi reaches a simulated board over IP, with mDNS, or over BLE
+              through BlueZ on Linux. Every connection to the host's port becomes the bridge's own TCP
+              connection to the node, so it pays the channel model from the bridge's position. Below, a
+              scripted web node answers <code>curl</code> through the bridge on the host's port 8080.</p>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">hertzbench run bridge-web-scripted.yaml</span>
+                <span class="frame-tag">PASS, scripted</span>
+              </div>
+              <pre tabindex="0" role="region" aria-label="Bridge report"><code>Mobile bridge
+  bridge phone: http web:80 at 127.0.0.1:8080
+  bridge phone: mqtt web:1883 at 127.0.0.1:1883
+  bridge phone: mDNS off (the scenario turned it off, or the proxy listens on loopback only)
+
+link         sent  delivered  loss  p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+phone-&gt;web   12    12         0.0%  0.33    0.46    0.46    -39.5     51.5    1.00
+sensor-&gt;web  90    90         0.0%  0.27    0.47    0.50    -52.3     38.7    1.00
+web-&gt;phone   10    10         0.0%  0.25    0.43    0.43    -39.5     51.5    1.00
+web-&gt;sensor  90    90         0.0%  0.30    0.49    0.52    -52.3     38.7    1.00</code></pre>
+              <figcaption>Excerpt of the report. <code>phone</code> is the bridge's station on the
+                  medium, not a device.</figcaption>
+            </figure>
+            <figure class="frame">
+              <div class="frame-bar">
+                <span class="frame-cmd">curl, in another terminal</span>
+                <span class="frame-tag">while it runs</span>
+              </div>
+              <pre tabindex="0" role="region"
+                aria-label="curl through the bridge"><code>$ curl -i http://127.0.0.1:8080/status
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 17
+Connection: close
+
+web: GET /status</code></pre>
+            </figure>
+            <p
+              class="honest">On real firmware the IP bridge serves an ESP32's web server to the host's
+              <code>curl</code>. No phone has been used yet.</p>
+          </div>
+        </article>
+
+        <article class="radio" id="mcp">
+          <div class="radio-rail">
+            <h3>MCP server</h3>
+            <p class="fidelity">23 tools</p>
+          </div>
+          <div class="radio-body">
+            <p><code>hertzbench mcp</code> gives an AI agent such as Claude Code tools to build, edit, run
+              and steer scenarios while a run plays: move a node, force loss or latency, raise the
+              interference on a link, read the serial output and the metrics. Every file it writes stays
+              inside its workspace.</p>
+            <div class="pair">
+              <figure class="frame">
+                <div class="frame-bar">
+                  <span class="frame-cmd">claude mcp add hertzbench</span>
+                  <span class="frame-tag">setup</span>
+                </div>
+                <pre tabindex="0" role="region"
+                  aria-label="Register the MCP server"><code>claude mcp add hertzbench -- \
+  hertzbench mcp --workspace /path/to/your/project</code></pre>
+              </figure>
+              <figure class="frame">
+                <div class="frame-bar">
+                  <span class="frame-cmd">move_node, inject_fault</span>
+                  <span class="frame-tag">real session</span>
+                </div>
+                <pre tabindex="0" role="region"
+                  aria-label="Two tool calls and their results"><code>move_node {"node":"c","position":[42,0]}
+{ "node": "c",
+  "from": { "x": 12, "y": 4 },
+  "to":   { "x": 42, "y": 0 },
+  "at_ms": 1499.721,
+  "phase": null,
+  "links": [
+    { "link": "c-&gt;a", "distance_m": 42,
+      "rssi_dbm": -85.865, "snr_db": 5.125 },
+    { "link": "c-&gt;b", "distance_m": 34,
+      "rssi_dbm": -83.111, "snr_db": 7.878 } ] }
+
+inject_fault {"link":"a-&gt;b","extra_loss_pct":30}
+{ "links": ["a-&gt;b"], "extra_loss_pct": 30,
+  "extra_latency_ms": 0, "extra_jitter_ms": 0,
+  "interference_db": 0, "at_ms": 1501.45, "phase": null }</code></pre>
+                <figcaption>From a live <code>hertzbench mcp</code> process running
+                  <code>udp-3-scripted.yaml</code> (scripted boards), after <code>run_scenario</code>.
+                  The JSON is re-indented; no field was removed.</figcaption>
+              </figure>
+            </div>
+            <p
+              class="honest">Tested through the real <code>hertzbench mcp</code> process with scripted
+              boards. ESP32 boards through MCP have not been run.</p>
+          </div>
+        </article>
+
+        <article class="radio" id="view">
+          <div class="radio-rail">
+            <h3>Live view</h3>
+            <p class="fidelity">Optional, no build step</p>
+          </div>
+          <div class="radio-body">
+            <p><code>hertzbench view</code> draws the nodes on a map, colors each link by its signal or by
+              its loss over the last 2 s, and plots every frame on a timeline: a mark per frame delivered or
+              lost, and a vertical mark for every move and forced fault. Drag a node, or focus it and use
+              the arrow keys, to move it while the run plays. It follows your light or dark setting.</p>
+            <figure class="frame pan">
+              <div class="frame-bar">
+                <span class="frame-cmd">hertzbench view espnow-mesh-5-nodes.yaml</span>
+                <span class="frame-tag">packet timeline</span>
+              </div>
+              <div class="pan-scroller" tabindex="0" role="region"
+                aria-label="Packet timeline, scrolls sideways">
+                <picture>
+                  <source srcset="img/timeline-dark.png" media="(prefers-color-scheme: dark)"
+                    width="1440" height="422">
+                  <img src="img/timeline-light.png" width="1440" height="422" loading="lazy"
+                    alt="The packet timeline of the last 10 seconds: a row per directed link, green marks for delivered frames and red marks for lost ones on the links to the far sensor.">
+                </picture>
+              </div>
+              <figcaption>The last 10 s of the run above: red marks are frames lost on the links to the far
+                sensor.</figcaption>
+            </figure>
+          </div>
+        </article>
       </section>
 
       <section id="download" class="block" aria-labelledby="download-title">
-        <h2 id="download-title">Download</h2>
-        <p class="note">This section asks the GitHub API for the latest release once, when the page loads.
+        <p class="kicker">Download</p>
+        <h2 id="download-title">Windows, macOS and Linux.</h2>
+        <p
+          class="note">This section asks the GitHub API for the latest release once, when the page loads.
           Hertzbench is distributed as source that runs on Deno today; see
           <a href="#install">Install</a> for that path.</p>
-        <p id="release-status" class="release-status" role="status" aria-live="polite" data-state="idle">
+        <p id="release-status" class="release-status" role="status" aria-live="polite"
+          data-state="idle">
           Open the releases page to see what is published.</p>
         <ul id="downloads" class="builds" aria-label="Builds by system" data-os="" data-arch="">
           <li data-key="windows-x64"><span class="build-name">Windows, x64</span>
@@ -132,8 +528,10 @@
       </section>
 
       <section id="install" class="block" aria-labelledby="install-title">
-        <h2 id="install-title">Install and first run</h2>
-        <p class="note">These commands run Hertzbench from source with <a href="https://deno.com">Deno</a> 2.x
+        <p class="kicker">Install</p>
+        <h2 id="install-title">Install and first run.</h2>
+        <p
+          class="note">These commands run Hertzbench from source with <a href="https://deno.com">Deno</a> 2.x
           (<a href="https://docs.deno.com/runtime/getting_started/installation/">other ways to install
           Deno</a>). They use scripted boards, so no QEMU is needed. The run lasts 6 s of engine time, prints
           per-link RSSI, loss and latency, and writes <code>metrics.json</code>, <code>air.pcap</code> and
@@ -141,7 +539,8 @@
 
         <details class="os" id="os-linux" open>
           <summary>Linux</summary>
-          <pre tabindex="0" role="region" aria-label="Linux commands"><code># Install Deno, then fetch Hertzbench
+          <pre tabindex="0" role="region"
+            aria-label="Linux commands"><code># Install Deno, then fetch Hertzbench
 curl -fsSL https://deno.land/install.sh | sh
 git clone https://github.com/Rixmerz/hertzbench.git
 cd hertzbench/hertzbench
@@ -159,7 +558,8 @@ claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project</c
 
         <details class="os" id="os-macos" open>
           <summary>macOS</summary>
-          <pre tabindex="0" role="region" aria-label="macOS commands"><code># Install Deno, then fetch Hertzbench
+          <pre tabindex="0" role="region"
+            aria-label="macOS commands"><code># Install Deno, then fetch Hertzbench
 curl -fsSL https://deno.land/install.sh | sh
 git clone https://github.com/Rixmerz/hertzbench.git
 cd hertzbench/hertzbench
@@ -177,7 +577,8 @@ claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project</c
 
         <details class="os" id="os-windows" open>
           <summary>Windows (PowerShell)</summary>
-          <pre tabindex="0" role="region" aria-label="Windows commands"><code># Install Deno, then fetch Hertzbench
+          <pre tabindex="0" role="region"
+            aria-label="Windows commands"><code># Install Deno, then fetch Hertzbench
 irm https://deno.land/install.ps1 | iex
 git clone https://github.com/Rixmerz/hertzbench.git
 cd hertzbench\hertzbench
@@ -193,58 +594,63 @@ deno task install-cli
 claude mcp add hertzbench -- hertzbench mcp --workspace C:\path\to\your\project</code></pre>
         </details>
 
-        <p class="note">ESP32 boards on real firmware need a libqemu built from the public QEMU fork and
+        <p
+          class="note">ESP32 boards on real firmware need a libqemu built from the public QEMU fork and
           an Arduino or ESP-IDF toolchain; the steps are in the
           <a href="https://github.com/Rixmerz/hertzbench/blob/master/hertzbench/docs/e2e-esp32.md">ESP32
-          guide</a>. Windows and macOS have not been tried, see <a href="#status">Status</a>.</p>
+          guide</a>. The ESP32 runs on this page were done on Linux x86_64; the project's CI runs its tests
+          on Linux, macOS and Windows. See <a href="#status">Status</a>.</p>
       </section>
 
       <section id="status" class="block" aria-labelledby="status-title">
-        <h2 id="status-title">Status, as tested</h2>
-        <p class="note">The ESP32 runs below were done on <strong>Linux x86_64</strong>. No Windows or macOS
-          run is recorded, so treat both as untested. The ESP32 results are from 2026-10-23, on a libqemu
-          built from the public
-          <a href="https://github.com/lcgamboa/qemu">lcgamboa fork</a> without root or Docker.</p>
+        <p class="kicker">Status</p>
+        <h2 id="status-title">What was run, and what was not.</h2>
+        <p
+          class="note">The ESP32 runs below were done on <strong>Linux x86_64</strong>, with a libqemu built
+          from the public <a href="https://github.com/lcgamboa/qemu">lcgamboa fork</a> without root or
+          Docker. The screenshots on this page come from the same host.</p>
         <ul class="status-list">
           <li>
-            <div class="row-head"><h3>RF engine, adapters, CLI and outputs</h3><span class="chip" data-kind="pass">Tested</span></div>
+            <div
+              class="row-head"><h3>RF engine, adapters, CLI and outputs</h3><span class="chip" data-kind="pass">Tested</span></div>
             <p>Channel model, medium, seeded RNG, event log, <code>metrics.json</code>, <code>air.pcap</code>
               and assertions are unit-tested on a manual clock and through the real CLI.</p>
           </li>
           <li>
-            <div class="row-head"><h3>ESP32 over Wi-Fi/IP, LoRa and BLE on real firmware</h3><span class="chip" data-kind="pass">Passes</span></div>
+            <div
+              class="row-head"><h3>ESP32 over Wi-Fi/IP, ESP-NOW, LoRa and BLE on real firmware</h3><span class="chip" data-kind="pass">Passes</span></div>
             <p>Three boards exchange UDP; behind the wall one link loses frames and the other holds. The
-              LoRa gateway scenario (arduino-LoRa on an SX1276 model) and the BLE scenario pass their
-              assertions. The BLE firmware is a host-only Bluedroid build (ESP-IDF v5.3.6), so its binary
-              differs from production.</p>
+              five-board ESP-NOW mesh passes 7 of 7 assertions (2026-10-24) with a small patch to the QEMU
+              fork's Wi-Fi MAC. The LoRa gateway scenario (arduino-LoRa on an SX1276 model) and the BLE
+              scenario pass their assertions. The BLE firmware is a host-only Bluedroid build (ESP-IDF
+              v5.3.6), so its binary differs from production.</p>
           </li>
           <li>
-            <div class="row-head"><h3>ESP-NOW on real firmware</h3><span class="chip" data-kind="fail">Fails</span></div>
-            <p>4 of 7 assertions pass. The boards boot with their own MACs and broadcasts arrive, but the
-              gateway stops taking frames after 21, when the QEMU fork's 20-frame injection queue overflows,
-              and every sensor reports its sends as failed. ESP-NOW is tested with scripted boards.</p>
-          </li>
-          <li>
-            <div class="row-head"><h3>MCP server and live view</h3><span class="chip" data-kind="part">Partly</span></div>
+            <div
+              class="row-head"><h3>MCP server and live view</h3><span class="chip" data-kind="part">Partly</span></div>
             <p>Tested through the real <code>hertzbench mcp</code> process and in headless Chromium, with
-              scripted boards. ESP32 boards through MCP or the view have not been run.</p>
+              scripted boards. ESP32 boards through MCP have not been run.</p>
           </li>
           <li>
-            <div class="row-head"><h3>Mobile bridge</h3><span class="chip" data-kind="part">Partly</span></div>
+            <div
+              class="row-head"><h3>Mobile bridge</h3><span class="chip" data-kind="part">Partly</span></div>
             <p>On real firmware the IP bridge serves an ESP32's web server to the host's <code>curl</code>,
               and BlueZ advertises the firmware's GATT service. No phone has been used, and mDNS has not been
               seen from another host. The BLE bridge needs Linux with BlueZ.</p>
           </li>
           <li>
-            <div class="row-head"><h3>nRF24L01+</h3><span class="chip" data-kind="part">Partly</span></div>
+            <div
+              class="row-head"><h3>nRF24L01+</h3><span class="chip" data-kind="part">Partly</span></div>
             <p>The chip model is done and tested. No example runs it on an ESP32 board.</p>
           </li>
           <li>
-            <div class="row-head"><h3>Docker Compose file</h3><span class="chip" data-kind="none">Not started</span></div>
+            <div
+              class="row-head"><h3>Docker Compose file</h3><span class="chip" data-kind="none">Not started</span></div>
             <p>There is no <code>docker-compose.hertzbench.yml</code> yet.</p>
           </li>
           <li>
-            <div class="row-head"><h3>Limits of the channel model</h3><span class="chip" data-kind="none">Limits</span></div>
+            <div
+              class="row-head"><h3>Limits of the channel model</h3><span class="chip" data-kind="none">Limits</span></div>
             <p>On Wi-Fi/IP and ESP-NOW there are no collisions, carrier-sense contention, hidden nodes or
               capture effect (each link is simulated alone), and no adjacent-channel interference. LoRa,
               nRF24 and BLE do model collisions on the chip-level air, but a scenario runs one PHY, so BLE and
@@ -257,7 +663,8 @@ claude mcp add hertzbench -- hertzbench mcp --workspace C:\path\to\your\project<
       </section>
 
       <section id="docs" class="block" aria-labelledby="docs-title">
-        <h2 id="docs-title">Docs and source</h2>
+        <p class="kicker">Docs</p>
+        <h2 id="docs-title">Docs and source.</h2>
         <ul class="doc-list">
           <li><a href="https://github.com/Rixmerz/hertzbench/blob/master/hertzbench/README.md">README</a>
             <span>Quick start, how it works, layout, tests.</span></li>
@@ -277,15 +684,20 @@ claude mcp add hertzbench -- hertzbench mcp --workspace C:\path\to\your\project<
             <span>Goals, decisions and the phase roadmap.</span></li>
         </ul>
         <p class="actions">
-          <a class="button primary" href="https://github.com/Rixmerz/hertzbench">Source on GitHub</a>
+          <a class="button primary"
+            href="https://github.com/Rixmerz/hertzbench">Source on GitHub</a>
           <a class="button" href="https://github.com/Rixmerz/hertzbench/releases">Releases</a>
         </p>
       </section>
     </main>
 
     <footer class="foot">
-      <p>Hertzbench is free software under the AGPLv3
-        (<a href="https://github.com/Rixmerz/hertzbench/blob/master/LICENSE">license</a>).</p>
+      <ul aria-label="Project links">
+        <li><a href="https://github.com/Rixmerz/hertzbench">GitHub</a></li>
+        <li><a href="https://github.com/Rixmerz/hertzbench/blob/master/LICENSE">AGPLv3 license</a></li>
+        <li><a href="https://github.com/Rixmerz/hertzbench/releases">Releases</a></li>
+      </ul>
+      <p>Hertzbench is free software under the AGPLv3.</p>
       <p>It is based on <a href="https://github.com/davidmonterocrespo24/velxio">Velxio</a>, which does the
         CPU emulation. The name and logo of Velxio are not ours to use as a brand.</p>
     </footer>

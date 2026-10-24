@@ -41,3 +41,14 @@ Deno.test("pages workflow: checkout does not persist its token", () => {
   assert(at >= 0);
   assertEquals(lines.slice(at, at + 4).some((l) => /persist-credentials:\s*false/.test(l)), true);
 });
+
+Deno.test("pages workflow: stages the page and site/img, and nothing else of site/", () => {
+  const stage = text.slice(
+    text.indexOf("name: Stage the site"),
+    text.indexOf("upload-pages-artifact"),
+  );
+  assert(/cp site\/index\.html site\/style\.css site\/download\.js _site\//.test(stage), stage);
+  assert(/cp -r site\/img _site\/img/.test(stage), "site/img is not staged");
+  assert(!/site\/tests|deno\.json/.test(stage), "the test or deno.json would be published");
+  assert(/"site\/\*\*"/.test(text), "a change under site/ does not trigger the deploy");
+});

@@ -1,11 +1,18 @@
 /* Tokens copied from Velxio's frontend/src/tokens/ (colors.css, spacing.css,
  * radius.css, typography.css), the same ones hertzbench/view/static/style.css
- * consumes. The Pages artifact is this folder only, so they cannot be linked;
- * a value here changes only when the token it names changes there. Light is
- * the base and dark overrides it under prefers-color-scheme, so a page with
- * no JavaScript follows the system. Inter is not shipped: the system stack is
- * the tokens' own fallback. Every text color clears 4.5:1 on the surface it
- * sits on, and every line and mark 3:1, in both schemes (tests/site_test.ts). */
+ * consumes, so the page and the screenshots on it share one look. The Pages
+ * artifact is this folder only, so they cannot be linked; a value here changes
+ * only when the token it names changes there. Light is the base and dark
+ * overrides it under prefers-color-scheme, so a page with no JavaScript follows
+ * the system. Inter is not shipped: the system stack is the tokens' own
+ * fallback. Every text color clears 4.5:1 on the surface it sits on, and every
+ * line and mark 3:1, in both schemes (tests/site_test.ts).
+ *
+ * The one signature is the instrument frame (.frame): every real screenshot and
+ * every real terminal run sits in a window whose title strip names the command
+ * that produced it. The accent is the Velxio blue, spent on links and the one
+ * primary action; green, amber and red appear only where the view uses them to
+ * grade a link. */
 
 :root {
   color-scheme: light dark;
@@ -15,7 +22,6 @@
   --surface: #ffffff;
   --panel: #eceef1;
   --raised: #e0e3e8;
-  --map-bed: #e9ebee;
   --ink: #0d1117;
   --text: #24292f;
   --muted: #57606a;
@@ -48,8 +54,8 @@
   --t-small: 0.9375rem;
   --t-body: 1.0625rem;
   --t-lead: 1.375rem;
-  --t-h2: 1.75rem;
-  --t-display: clamp(2rem, 1.2rem + 3.6vw, 3.25rem);
+  --t-h2: 1.875rem;
+  --t-display: clamp(2.125rem, 1.2rem + 4.2vw, 3.75rem);
 
   --space-2: 0.25rem;
   --space-4: 0.5rem;
@@ -59,6 +65,7 @@
   --space-9: 2rem;
   --space-11: 3rem;
   --space-12: 4rem;
+  --space-14: 6rem;
   --radius-sm: 8px;
   --radius-md: 12px;
   --prose: 65ch;
@@ -72,7 +79,6 @@
     --surface: #141416;
     --panel: #1c1c1e;
     --raised: #2a2a2a;
-    --map-bed: #1a1a1a;
     --ink: #f0f0f0;
     --text: #cccccc;
     --muted: #9d9d9d;
@@ -124,12 +130,14 @@ h2,
 h3,
 p,
 ul,
+ol,
 figure,
 pre {
   margin: 0;
 }
 
-ul {
+ul,
+ol {
   padding: 0;
   list-style: none;
 }
@@ -191,9 +199,10 @@ main,
 }
 
 .brand {
+  font-family: var(--font-mono);
   font-size: var(--t-lead);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
   color: var(--ink);
 }
 
@@ -210,26 +219,31 @@ main,
   font-size: var(--t-small);
 }
 
-/* Hero: the headline leads, the link map is the page's one signature. */
+/* Hero: the headline, then the real view as wide as the page lets it be. */
 .hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-9);
-  align-items: center;
   padding-block: var(--space-9) var(--space-12);
 }
 
+.eyebrow {
+  margin-block-end: var(--space-6);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 h1 {
-  max-width: 18ch;
+  max-width: 16ch;
   color: var(--ink);
   font-size: var(--t-display);
-  font-weight: 700;
-  line-height: 1.08;
-  letter-spacing: -0.03em;
+  font-weight: 800;
+  line-height: 1.04;
+  letter-spacing: -0.04em;
 }
 
 .lead {
-  max-width: 48ch;
+  max-width: 52ch;
   margin-block-start: var(--space-8);
   font-size: var(--t-lead);
   line-height: 1.4;
@@ -271,91 +285,122 @@ h1 {
   background: var(--action-hover);
 }
 
-.hero-art svg {
+.hero .frame {
+  margin-block-start: var(--space-11);
+}
+
+/* The instrument frame: a title strip with the command, then the evidence. */
+.frame {
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.frame-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0 var(--space-6);
+  padding: var(--space-4) var(--space-6);
+  border-block-end: 1px solid var(--line-strong);
+  background: var(--raised);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+}
+
+.frame-cmd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.frame-cmd::before {
+  content: "$ ";
+  color: var(--muted);
+}
+
+.frame-tag {
+  color: var(--ink);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* A screenshot is wider than a phone: it pans inside its frame instead of
+ * shrinking past reading. The hero fits, because there the picture is the point. */
+.pan-scroller {
+  overflow-x: auto;
+}
+
+.pan-scroller img {
+  display: block;
+  width: 100%;
+  min-width: 44rem;
+  height: auto;
+}
+
+.fit img {
   display: block;
   width: 100%;
   height: auto;
 }
 
-.hero-art figcaption {
-  max-width: var(--prose);
-  margin-block-start: var(--space-5);
+.frame pre {
+  overflow-x: auto;
+  padding: var(--space-6);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.frame pre code {
+  font-size: inherit;
+  overflow-wrap: normal;
+}
+
+.frame figcaption,
+.caption {
+  padding: var(--space-5) var(--space-6);
+  border-block-start: 1px solid var(--line);
+  background: var(--surface);
   color: var(--muted);
   font-size: var(--t-caption);
 }
 
-.art-bed {
-  fill: var(--map-bed);
-}
-
-.art-grid {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1;
-}
-
-.art-wall {
-  stroke: var(--idle);
-  stroke-width: 6;
-  stroke-linecap: round;
-}
-
-.art-link {
-  stroke-width: 4;
-  stroke-linecap: round;
-}
-
-.art-link.q-good {
-  stroke: var(--good);
-}
-
-.art-link.q-poor {
-  stroke: var(--poor);
-  stroke-dasharray: 10 5;
-}
-
-.art-link.q-bad {
-  stroke: var(--bad);
-  stroke-dasharray: 3 6;
-  stroke-width: 3;
-}
-
-.art-node circle {
-  fill: var(--link);
-  stroke: var(--ink);
-  stroke-width: 2;
-}
-
-.art-node text,
-.art-text {
-  fill: var(--ink);
-  font: 600 20px/1 var(--font-sans);
-  text-anchor: middle;
-}
-
-.art-text {
-  text-anchor: start;
-  font-weight: 400;
-}
-
 /* Sections */
 .block {
-  padding-block: var(--space-11);
+  padding-block: var(--space-12);
   border-block-start: 1px solid var(--line);
 }
 
+.kicker {
+  margin-block-end: var(--space-4);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 h2 {
+  max-width: 24ch;
   margin-block-end: var(--space-8);
   color: var(--ink);
   font-size: var(--t-h2);
-  line-height: 1.2;
-  letter-spacing: -0.02em;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
 }
 
 h3 {
   color: var(--ink);
   font-size: var(--t-body);
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1.3;
 }
 
@@ -364,30 +409,94 @@ h3 {
   margin-block-end: var(--space-8);
 }
 
-.block > p:not(.note):not(.release-status):not(.actions) {
+.block > p:not(.note):not(.release-status):not(.actions):not(.kicker) {
   margin-block-start: var(--space-8);
 }
 
-/* What it is: the first item leads; the rest are ruled, not boxed. */
-.features {
+/* How it works: four stages of one run, in the order the data moves. */
+.stages {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-8) var(--space-11);
+  gap: var(--space-9);
+  counter-reset: stage;
 }
 
-.feature p {
+.stage {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: var(--space-4);
+  min-width: 0;
+  counter-increment: stage;
+}
+
+.stage h3::before {
+  content: counter(stage, decimal-leading-zero) " ";
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-weight: 400;
+}
+
+.stage p {
   max-width: var(--prose);
-  margin-block-start: var(--space-4);
 }
 
-.lead-feature h3 {
-  font-size: var(--t-lead);
+.stage .frame {
+  align-self: start;
 }
 
-.lead-feature p {
+/* Radios: a spec sheet. The name and fidelity sit in a rail, the proof beside it. */
+.radio {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  padding-block: var(--space-11);
+  border-block-start: 1px solid var(--line);
+}
+
+.radio:first-of-type {
+  border-block-start: 0;
+  padding-block-start: 0;
+}
+
+.radio-rail h3 {
   font-size: var(--t-lead);
-  line-height: 1.4;
-  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.fidelity {
+  margin-block-start: var(--space-2);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+}
+
+.radio-body {
+  display: grid;
+  gap: var(--space-8);
+  min-width: 0;
+}
+
+.radio-body > p {
+  max-width: var(--prose);
+}
+
+.radio-body .frame {
+  max-width: 100%;
+}
+
+.pair {
+  display: grid;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-8);
+}
+
+.honest {
+  max-width: var(--prose);
+  padding-inline-start: var(--space-6);
+  border-inline-start: 3px solid var(--line-strong);
+  color: var(--text);
+  font-size: var(--t-small);
 }
 
 /* Download */
@@ -615,30 +724,60 @@ h3 {
   max-width: var(--prose);
 }
 
+.foot ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-8);
+}
+
+.foot li a {
+  display: inline-block;
+  padding-block: var(--space-4);
+}
+
 @media (min-width: 48rem) {
-  .features,
   .doc-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .lead-feature {
-    grid-column: 1 / -1;
   }
 
   .builds {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .pan-scroller img {
+    min-width: 0;
+  }
+
+  .stages {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-11) var(--space-9);
+  }
+
+  .pair {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* The link table and the assertions are wider than half a page. */
+  .stage:nth-child(n + 3) {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (min-width: 60rem) {
-  .hero {
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-    gap: var(--space-12);
-  }
-
   .bar,
   main,
   .foot {
     padding-inline: var(--space-9);
+  }
+
+  .radio {
+    grid-template-columns: 13rem minmax(0, 1fr);
+    gap: var(--space-9);
+  }
+
+  .radio-rail {
+    align-self: start;
+    position: sticky;
+    inset-block-start: var(--space-8);
   }
 }
