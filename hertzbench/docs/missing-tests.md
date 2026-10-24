@@ -6,9 +6,8 @@ its own name (`[skipped on Windows: ...]`), so a skip is never silent.
 
 The suite was run on Linux (674 passed, 0 failed) and on Windows 10 22H2 x64 in a VM with Deno 2.9.5
 and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
-(`.github/workflows/hertzbench-ci.yml`) runs on GitHub: **`macos-latest` (arm64) passes**;
-`ubuntu-latest` (headless Chromium timeouts, the `dbus` BlueZ test) and `windows-latest` (one runner
-timing test) failed on the first runs and are being fixed. **arm64 Linux and Windows were not run.**
+(`.github/workflows/hertzbench-ci.yml`) runs on GitHub and **passes on `ubuntu-latest`, `windows-latest` and `macos-latest` (arm64)** (run
+40083042461). **arm64 Linux and Windows were not run.**
 
 Known flaky: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed once and passed on
 the rerun.
