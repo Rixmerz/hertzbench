@@ -49,10 +49,21 @@ waits for JSON-RPC on stdin, so this is only useful for debugging.
 `--workspace DIR` defaults to the current directory. Claude Code starts stdio servers in the project
 directory, so the default is usually what you want.
 
-- **Paths you give** (`path`, `out`) are relative to the workspace. An absolute path also works for
-  reading, so `run_scenario` can run the examples where they are, as the CLI can.
-- **Every file the server writes stays inside the workspace**: `create_scenario` files and every run
-  output. A path that leaves the workspace is refused, including through `..` and through a symlink.
+- **Paths you give** (`path`, `out`) are relative to the workspace. An absolute path works too, if
+  it is inside a root (below).
+- **Every file the server reads or writes by a path you give stays inside its roots.** Reads
+  (`read_scenario`, `validate_scenario`, `run_scenario`) may use two roots: the workspace and the
+  shipped example scenarios (`scenarios/examples/`), so `run_scenario` can run the examples where
+  they are. Writes (`create_scenario`, `edit_scenario`, `add_node`, `remove_node`, `export_capture`
+  and every run output) may use the workspace only: the examples are never modified.
+- **A path outside the roots is a tool error** (`isError`), not a server fault. That covers `..`,
+  an absolute path elsewhere, and a symlink, also a dangling one, that leads out: symlinks are
+  resolved before the check. A path with a NUL byte is refused too. The error is the same whether
+  or not the file outside exists, and never contains its text.
+- **To change the roots**, start the server with another `--workspace DIR` (for Claude Code,
+  `claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/project`). There is one
+  workspace per server and no other option; to read scenarios elsewhere, copy or link them in,
+  with a link that stays inside the workspace.
   A run always writes to its own `out` directory. The scenario's `outputs:` paths are ignored there,
   as `hertzbench run --out` ignores them.
 - **Firmware paths inside a scenario** resolve from the scenario file's directory, as with the CLI.

@@ -3,6 +3,7 @@
 // plays. The last run stays readable after it ends, until the next one starts.
 
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type ChannelChanges,
   type ChipSignal,
@@ -25,6 +26,9 @@ import {
 } from "../orchestrator/runner.ts";
 import type { BoardKind, LinkRule, Scenario } from "../orchestrator/scenario.ts";
 import { ToolError } from "./protocol.ts";
+
+/** The shipped example scenarios: readable (never writable), as the examples/* resources already are. */
+const EXAMPLES_DIR = resolve(fileURLToPath(new URL("../scenarios/examples/", import.meta.url)));
 
 export type RunState = "starting" | "running" | "finished" | "failed" | "stopped";
 
@@ -64,7 +68,41 @@ export class Session {
     this.#options = options;
   }
 
-  /** A path the caller gave, relative to the workspace. Reads may go anywhere, like the CLI. */
+  /**
+   * A scenario file the server will read. It must sit under the workspace or
+   * the bundled examples, also once symlinks are followed (CWE-22, CWE-59), so
+   * a tool never reads an arbitrary host file. Whether a file outside exists
+   * is not revealed: every path that leaves the roots gets the same answer.
+   */
+  async readablePath(path: string, what: string): Promise<string> {
+    const target = this.resolvePath(path);
+    const outside = () =>
+      new ToolError(
+        `${what} must be inside the workspace ${this.workspace} or the bundled examples, got ${path}`,
+      );
+    let real: string;
+    try {
+      // The file may not exist yet; its nearest existing parent decides, the caller reports the rest.
+      real = await Deno.realPath(await nearestExisting(target));
+    } catch (error) {
+      if (
+        !(error instanceof Deno.errors.NotFound) && !(error instanceof Deno.errors.NotADirectory)
+      ) {
+        // Windows reports a dangling link as a generic error; a link that leads nowhere leaves the roots.
+        if (!(await Deno.lstat(target).then((i) => i.isSymlink, () => false))) {
+          throw new ToolError(`${what} ${path} cannot be resolved: ${(error as Error).message}`);
+        }
+      }
+      throw outside();
+    }
+    for (const root of [this.workspace, EXAMPLES_DIR]) {
+      const realRoot = await Deno.realPath(root).catch(() => null);
+      if (realRoot !== null && inside(realRoot, real)) return target;
+    }
+    throw outside();
+  }
+
+  /** A path the caller gave, relative to the workspace. Not checked against the roots: see readablePath and writablePath. */
   resolvePath(path: string): string {
     // The OS ends a file name at NUL, so it would open another file than the one named (CWE-158).
     if (path.includes("\0")) {
@@ -170,6 +208,7 @@ export class Session {
   }
 
   async #launch(path: string, options: { seed?: number; out?: string }): Promise<Run> {
+    // The roots are enforced by the MCP tools; the CLI starts runs on files anywhere, like `run`.
     const file = this.resolvePath(path);
     const id = new Date().toISOString().replace(/[:.]/g, "-");
     const stem = file.replace(/^.*[\\/]/, "").replace(/\.ya?ml$/, "");

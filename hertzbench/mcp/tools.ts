@@ -294,7 +294,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
           if ((path === null) === (yaml === null)) {
             throw new ToolError("give exactly one of path or yaml");
           }
-          const file = path === null ? null : session.resolvePath(path);
+          const file = path === null ? null : await session.readablePath(path, "path");
           const scenario = file !== null
             ? (await loadScenario(file)).scenario
             : withFirmwareFrom(parseScenario(yaml as string), session.workspace);
@@ -357,7 +357,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
       },
       call: async (args) => {
         known(args, ["path"]);
-        const file = session.resolvePath(requiredText(args, "path"));
+        const file = await session.readablePath(requiredText(args, "path"), "path");
         const yaml = await readScenarioFile(file, `${file} does not exist`);
         try {
           return { file, yaml, valid: true, scenario: summary(parseScenario(yaml)) };
@@ -469,7 +469,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
       call: (args) =>
         expected(async () => {
           known(args, ["path", "seed", "out"]);
-          const path = requiredText(args, "path");
+          const path = await session.readablePath(requiredText(args, "path"), "path");
           const seed = optionalInt(args, "seed", 0, 2 ** 32 - 1);
           const out = optionalText(args, "out");
           await session.start(path, {
