@@ -2,7 +2,7 @@
 // run, started in the background so the live tools can act on it while it
 // plays. The last run stays readable after it ends, until the next one starts.
 
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   type ChannelChanges,
   type ChipSignal,
@@ -109,6 +109,8 @@ export class Session {
     // A dangling symlink exists to lstat but resolves nowhere: refuse it like any other link out.
     const resolvedPart = await Deno.realPath(existingPart).catch((error) => {
       if (error instanceof Deno.errors.NotFound) throw escapes();
+      // Windows reports a dangling link as a generic error ("filename syntax is incorrect").
+      if (Deno.lstatSync(existingPart).isSymlink) throw escapes();
       throw error;
     });
     if (!inside(root, resolvedPart)) throw escapes();
@@ -558,7 +560,7 @@ export class Session {
       ? "air-live-80211.pcap"
       : `hci-${node}-live.btsnoop`;
     const file = await this.writablePath(
-      path ?? `${run.loaded.outDir}/${defaultName}`,
+      path ?? join(run.loaded.outDir, defaultName),
       "path",
       "file",
     );
@@ -637,7 +639,12 @@ async function nearestExisting(path: string): Promise<string> {
       await Deno.lstat(current);
       return current;
     } catch (error) {
-      if (!(error instanceof Deno.errors.NotFound) || dirname(current) === current) throw error;
+      if (dirname(current) === current) throw error;
+      if (!(error instanceof Deno.errors.NotFound)) {
+        // Windows reports a path through a dangling symlink as a generic error, not NotFound.
+        const underLink = await Deno.lstat(dirname(current)).then((i) => i.isSymlink, () => false);
+        if (!underLink) throw error;
+      }
     }
   }
 }

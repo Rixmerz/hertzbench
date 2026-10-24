@@ -3,13 +3,15 @@
 // the real TypeScript adapter and SX127x model. A byte layout changed on one
 // side only fails here, without libqemu.
 
+import { PYTHON } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assertEquals } from "@std/assert";
 import { type AirFrame, WallClock } from "../engine/mod.ts";
 import { Sx127x } from "../adapters/lora-sx127x/mod.ts";
 import { SpiLinkAdapter } from "../adapters/spi-link/mod.ts";
 import { substream } from "../engine/rng.ts";
 
-const BACKEND = new URL("../../backend", import.meta.url).pathname;
+const BACKEND = fileURLToPath(new URL("../../backend", import.meta.url));
 const PINS = { cs: 5, reset: 14, dio0: 26 };
 
 // Drives the chip the way arduino-LoRa does on the guest, through the worker's
@@ -65,7 +67,7 @@ Deno.test("spi-link: the worker's Python client drives the TypeScript SX127x mod
       warn: (message) => problems.push(message),
     }));
   try {
-    const output = await new Deno.Command("python3", {
+    const output = await new Deno.Command(PYTHON, {
       args: ["-c", SCRIPT, String(port)],
       stdout: "piped",
       stderr: "piped",

@@ -25,6 +25,10 @@ export async function loadScenario(file: string, outDirOverride?: string): Promi
   try {
     text = await Deno.readTextFile(file);
   } catch (error) {
+    // Windows reports a directory as "Incorrect function (os error 1)", not as IsADirectory.
+    if ((await Deno.stat(file).catch(() => null))?.isDirectory) {
+      throw new ScenarioError(`cannot read ${file}: it is a directory, not a scenario file`);
+    }
     throw new ScenarioError(
       `cannot read ${file}: ${error instanceof Error ? error.message : error}`,
     );

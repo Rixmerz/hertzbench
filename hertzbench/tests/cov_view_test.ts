@@ -5,6 +5,7 @@
 // produces, and the timeline cursor. In process, no browser: the page itself
 // is measured in view_ui_test.ts.
 
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import type { ChipSignal, EngineEvent, LinkBudget, Position } from "../engine/mod.ts";
 import { ToolError } from "../mcp/protocol.ts";
@@ -22,7 +23,7 @@ import {
 } from "../view/scene.ts";
 import { serveView, type ViewServer } from "../view/server.ts";
 
-const LIVE = new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url).pathname;
+const LIVE = fileURLToPath(new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url));
 
 // Answers are JSON documents read field by field.
 // deno-lint-ignore no-explicit-any

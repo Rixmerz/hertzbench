@@ -4,6 +4,9 @@
 // control, the air networks, and the boards (scripted and qemu-esp32 against a
 // fake worker).
 
+import { join } from "node:path";
+import { writeFakePython } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import {
   assert,
   assertEquals,
@@ -2253,26 +2256,26 @@ Deno.test("load: firmware and outputs resolve against the scenario's directory; 
     });
     await Deno.writeTextFile(`${dir}/s.yaml`, stringify(doc));
     const loaded = await loadScenario(`${dir}/s.yaml`);
-    assertEquals(loaded.file, `${dir}/s.yaml`);
-    assertEquals(loaded.outDir, `${dir}/out`);
+    assertEquals(loaded.file, join(dir, "s.yaml"));
+    assertEquals(loaded.outDir, join(dir, "out"));
     assertEquals(
       loaded.scenario.nodes.map((n) => n.firmware.kind === "script" ? null : n.firmware.path),
       [
-        `${dir}/fw/a`,
+        join(dir, "fw", "a"),
         "/abs/b.bin",
         null,
       ],
     );
     assertEquals(loaded.outputs, {
-      metrics: `${dir}/res/m.json`,
+      metrics: join(dir, "res", "m.json"),
       pcap: "/abs/air.pcap",
-      events: `${dir}/out/events.jsonl`,
+      events: join(dir, "out", "events.jsonl"),
     });
     const redirected = await loadScenario(`${dir}/s.yaml`, `${dir}/elsewhere`);
     assertEquals(redirected.outputs, {
-      metrics: `${dir}/elsewhere/metrics.json`,
-      pcap: `${dir}/elsewhere/air.pcap`,
-      events: `${dir}/elsewhere/events.jsonl`,
+      metrics: join(dir, "elsewhere", "metrics.json"),
+      pcap: join(dir, "elsewhere", "air.pcap"),
+      events: join(dir, "elsewhere", "events.jsonl"),
     });
   });
 });
@@ -2305,7 +2308,7 @@ Deno.test("load: firmware checks name what is missing and what has the wrong kin
 });
 
 Deno.test("load: every example scenario parses, and only unbuilt ESP-IDF binaries are missing", async () => {
-  const dir = new URL("../scenarios/examples/", import.meta.url).pathname;
+  const dir = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
   const files = [...Deno.readDirSync(dir)].filter((e) => e.name.endsWith(".yaml")).map((e) =>
     e.name
   )
@@ -2316,7 +2319,7 @@ Deno.test("load: every example scenario parses, and only unbuilt ESP-IDF binarie
     assert(loaded.scenario.nodes.length >= 2, name);
     for (const line of await checkFirmwareFiles(loaded.scenario)) {
       // ESP-IDF projects are committed as sources; their build/ output is made by `idf.py build`.
-      assert(/\/build\/[^/]+\.bin does not exist$/.test(line), `${name}: ${line}`);
+      assert(/[\\/]build[\\/][^\\/]+\.bin does not exist$/.test(line), `${name}: ${line}`);
     }
   }
 });
@@ -2627,9 +2630,9 @@ Deno.test("runner: a full run with live control writes metrics.json, the pcap, e
       `${dir}/m/metrics.json`,
       `${dir}/air.pcap`,
       `${dir}/events.jsonl`,
-      `${dir}/serial-a.log`,
-      `${dir}/serial-b.log`,
-      `${dir}/serial-phone.log`,
+      join(dir, "serial-a.log"),
+      join(dir, "serial-b.log"),
+      join(dir, "serial-phone.log"),
     ]);
     // No ESP-NOW crossed: no 802.11 capture.
     await assertRejects(() => Deno.stat(`${dir}/air-80211.pcap`), Deno.errors.NotFound);
@@ -2901,18 +2904,21 @@ async function withFakeWorker(mode: string, fn: (rig: Esp32Rig) => Promise<void>
   await withTempDir(async (dir) => {
     await Deno.writeTextFile(`${dir}/worker.py`, FAKE_WORKER);
     await Deno.writeTextFile(`${dir}/compile.py`, FAKE_COMPILE);
-    await Deno.writeTextFile(
-      `${dir}/python`,
-      `#!/bin/sh\ncase "$1" in\n  *compile_sketch.py) exec python3 ${dir}/compile.py "$2" ;;\n  *) exec python3 ${dir}/worker.py ;;\nesac\n`,
+    // The compile helper gets its sketch directory, the worker its config on stdin.
+    const python = await writeFakePython(
+      dir,
+      `import runpy, sys\nhere = ${JSON.stringify(dir)}\n` +
+        `if sys.argv[1].endswith("compile_sketch.py"):\n` +
+        `    sys.argv = [sys.argv[0], sys.argv[2]]\n    runpy.run_path(here + "/compile.py", run_name="__main__")\n` +
+        `else:\n    runpy.run_path(here + "/worker.py", run_name="__main__")\n`,
     );
-    await Deno.chmod(`${dir}/python`, 0o755);
     await Deno.writeFile(`${dir}/libqemu-xtensa.so`, new Uint8Array(0));
     await Deno.writeFile(`${dir}/fw.bin`, Uint8Array.of(0xe9, 1, 2, 3));
     await Deno.mkdir(`${dir}/sketch`);
     const saved = ["HERTZBENCH_PYTHON", "QEMU_ESP32_LIB", "HZB_FAKE_MODE", "HZB_FAKE_COUNT"].map((
       k,
     ) => [k, Deno.env.get(k)] as const);
-    Deno.env.set("HERTZBENCH_PYTHON", `${dir}/python`);
+    Deno.env.set("HERTZBENCH_PYTHON", python);
     Deno.env.set("QEMU_ESP32_LIB", `${dir}/libqemu-xtensa.so`);
     Deno.env.set("HZB_FAKE_MODE", mode);
     Deno.env.set("HZB_FAKE_COUNT", `${dir}/compiles.txt`);

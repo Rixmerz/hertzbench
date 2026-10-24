@@ -6,6 +6,7 @@
 // Nothing here listens beyond 127.0.0.1, joins a multicast group or reads the
 // host's interfaces: those go through the modules' hooks or a stub.
 
+import { makeExecutable, PYTHON, signalTest, skipOnWindows } from "./platform.ts";
 import {
   assert,
   assertEquals,
@@ -21,6 +22,7 @@ import {
   BleBridge,
   BluezPeripheral,
   BluezStartError,
+  bluezUnsupportedReason,
   type BridgeEndpoint,
   bridgeLines,
   bridgeRecords,
@@ -793,7 +795,8 @@ Deno.test("mdns udp: a port held without address reuse fails the bind", async ()
   try {
     const error = await assertRejects(() => udpTransport({ bind: "127.0.0.1", port, group: null }));
     assertInstanceOf(error, Error);
-    assertStringIncludes(error.message, "EADDRINUSE");
+    // Windows refuses a bind to a held port with EACCES.
+    assertMatch(error.message, /EADDRINUSE|EACCES/);
   } finally {
     await new Promise<void>((resolve) => holder.close(() => resolve()));
   }
@@ -1023,7 +1026,7 @@ async function helperDir(): Promise<{ dir: string; script: string; report: strin
   const dir = await Deno.makeTempDir({ prefix: "hzb-cov-bluez-" });
   const script = `${dir}/helper.py`;
   await Deno.writeTextFile(script, HELPER);
-  await Deno.chmod(script, 0o755);
+  await makeExecutable(script);
   return { dir, script, report: `${dir}/report.jsonl` };
 }
 
@@ -1051,7 +1054,11 @@ const idleHandlers: PeripheralHandlers = {
   subscribe: () => Promise.resolve(),
 };
 
-Deno.test("bluez: a missing program is named; any other spawn failure is passed through", async () => {
+const missingProgramTest = skipOnWindows(
+  "Windows reports a program path that does not exist as a generic error, not NotFound; the BLE bridge is Linux only",
+);
+
+missingProgramTest("bluez: a missing program is named", async () => {
   const missing = new BluezPeripheral({ adapter: "hci9", command: ["/nonexistent/hzb-python"] });
   assertEquals(missing.description, "BlueZ on hci9");
   const error = await assertRejects(
@@ -1059,20 +1066,26 @@ Deno.test("bluez: a missing program is named; any other spawn failure is passed 
     BluezStartError,
   );
   assertStringIncludes(error.message, "/nonexistent/hzb-python is not installed");
-
-  const dir = await Deno.makeTempDir({ prefix: "hzb-cov-bluez-" });
-  try {
-    const notExecutable = `${dir}/helper`;
-    await Deno.writeTextFile(notExecutable, "#!/bin/sh\n");
-    await Deno.chmod(notExecutable, 0o644);
-    const refused = new BluezPeripheral({ adapter: "hci0", command: [notExecutable] });
-    const passed = await assertRejects(() => refused.start(SERVICES, "x", idleHandlers));
-    assertInstanceOf(passed, Deno.errors.PermissionDenied);
-    assertFalse(passed instanceof BluezStartError);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
 });
+
+// Windows has no execute bit, so there is no file it refuses to run for its mode.
+skipOnWindows("a file without the execute bit cannot be tested")(
+  "bluez: a spawn failure other than a missing program is passed through",
+  async () => {
+    const dir = await Deno.makeTempDir({ prefix: "hzb-cov-bluez-" });
+    try {
+      const notExecutable = `${dir}/helper`;
+      await Deno.writeTextFile(notExecutable, "#!/bin/sh\n");
+      await Deno.chmod(notExecutable, 0o644);
+      const refused = new BluezPeripheral({ adapter: "hci0", command: [notExecutable] });
+      const passed = await assertRejects(() => refused.start(SERVICES, "x", idleHandlers));
+      assertInstanceOf(passed, Deno.errors.PermissionDenied);
+      assertFalse(passed instanceof BluezStartError);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
 
 Deno.test("bluez: close and notify before start do nothing", async () => {
   const peripheral = new BluezPeripheral({ adapter: "hci0", command: ["/nonexistent/hzb-python"] });
@@ -1086,7 +1099,7 @@ Deno.test("bluez: an error event from the helper fails start with BlueZ's reason
   try {
     const peripheral = new BluezPeripheral({
       adapter: "hci0",
-      command: ["python3", "-I", script, "error", report],
+      command: [PYTHON, "-I", script, "error", report],
     });
     const error = await assertRejects(
       () => peripheral.start(SERVICES, "sensor", idleHandlers),
@@ -1105,7 +1118,7 @@ Deno.test("bluez: a helper that dies before ready fails start with its code and 
   try {
     const crash = new BluezPeripheral({
       adapter: "hci0",
-      command: ["python3", "-I", script, "crash", report],
+      command: [PYTHON, "-I", script, "crash", report],
     });
     const crashed = await assertRejects(
       () => crash.start(SERVICES, "x", idleHandlers),
@@ -1117,7 +1130,7 @@ Deno.test("bluez: a helper that dies before ready fails start with its code and 
 
     const silent = new BluezPeripheral({
       adapter: "hci0",
-      command: ["python3", "-I", script, "silent", report],
+      command: [PYTHON, "-I", script, "silent", report],
     });
     const quiet = await assertRejects(
       () => silent.start(SERVICES, "x", idleHandlers),
@@ -1164,7 +1177,7 @@ Deno.test("bluez: each phone operation gets its reply, errors mapped, stray outp
   };
   const peripheral = new BluezPeripheral({
     adapter: "hci0",
-    command: ["python3", "-I", script, "script", report, JSON.stringify(events)],
+    command: [PYTHON, "-I", script, "script", report, JSON.stringify(events)],
   });
   try {
     await peripheral.start(SERVICES, "hzb sensor", handlers);
@@ -1224,12 +1237,12 @@ Deno.test("bluez: each phone operation gets its reply, errors mapped, stray outp
   }
 });
 
-Deno.test("bluez: a helper that ignores stop is terminated after the grace period", async () => {
+signalTest("bluez: a helper that ignores stop is terminated after the grace period", async () => {
   const { dir, script, report } = await helperDir();
   try {
     const peripheral = new BluezPeripheral({
       adapter: "hci0",
-      command: ["python3", "-I", script, "stubborn", report],
+      command: [PYTHON, "-I", script, "stubborn", report],
     });
     await peripheral.start(SERVICES, "sensor", idleHandlers);
     await peripheral.close();
@@ -1619,4 +1632,13 @@ Deno.test("mirror: closing during discovery, or right after a drop, reports noth
   );
   assertEquals(dropped.fake.count(OP.leCreateConnection), 1, "no reconnection after close");
   assertEquals(dropped.lines.filter((l) => l === "bridge connecting to sensor").length, 1);
+});
+
+Deno.test("bluez: only Linux has BlueZ; Windows and macOS get a message with the way out", () => {
+  assertEquals(bluezUnsupportedReason("linux"), null);
+  const windows = bluezUnsupportedReason("windows")!;
+  assertStringIncludes(windows, "only exists on Linux");
+  assertStringIncludes(windows, "WSL2");
+  assertStringIncludes(windows, "docs/mobile-bridge.md");
+  assertStringIncludes(bluezUnsupportedReason("darwin")!, "Linux host");
 });

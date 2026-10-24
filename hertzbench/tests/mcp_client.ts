@@ -1,10 +1,11 @@
 // A test client for `hertzbench mcp`: the server as a separate process, spoken
 // to over stdin and stdout the way Claude Code does. Shared by the MCP tests.
 
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals } from "@std/assert";
 
-const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
-export const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
+export const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 
 // Tool results are JSON documents read field by field; typing each one here
 // would only restate the server.

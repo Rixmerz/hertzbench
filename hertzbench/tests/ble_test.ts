@@ -2,6 +2,7 @@
 // air with a manual clock: what a host stack sees (HCI events), and what the
 // engine logs (frames, connections, host-to-host ACL delivery).
 
+import { commandExists } from "./platform.ts";
 import { assert, assertAlmostEquals, assertEquals, assertExists } from "@std/assert";
 import {
   BleController,
@@ -375,9 +376,7 @@ Deno.test("ble controller: frames on the air are BLE frames with the PHY's airti
 Deno.test({
   name:
     "ble hci: BlueZ's btmon reads the Supported Commands bitmap back as the commands the controller answers",
-  ignore: !(await new Deno.Command("btmon", { args: ["--version"] }).output().then(() =>
-    true, () =>
-    false)),
+  ignore: !(await commandExists("btmon", ["--version"])),
   fn: async () => {
     const snoop = new BtsnoopWriter(0);
     snoop.add(

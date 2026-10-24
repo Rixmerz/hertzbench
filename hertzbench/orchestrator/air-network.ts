@@ -42,7 +42,14 @@ import {
   type BtsnoopWriter,
   isBleFrame,
 } from "../adapters/ble-hci/mod.ts";
-import { BleBridge, BluezPeripheral, type BridgeHooks, type RunningBridge } from "../bridge/mod.ts";
+import {
+  BleBridge,
+  BluezPeripheral,
+  bluezUnsupportedReason,
+  type BridgeHooks,
+  type RunningBridge,
+} from "../bridge/mod.ts";
+import { BoardError } from "./boards/board.ts";
 import type { NodeRadio } from "./radios.ts";
 import type { Scenario } from "./scenario.ts";
 
@@ -205,6 +212,9 @@ function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSe
     if (!mirror || radio.phy !== "ble") {
       throw new Error("the BLE bridge needs a mirrored node and a ble radio");
     }
+    // Refuse before any board starts, not as a problem in the report of a run that cannot work.
+    const unsupported = ctx.hooks?.peripheral ? null : bluezUnsupportedReason();
+    if (unsupported) throw new BoardError(unsupported);
     bridge = new BleBridge({
       spec,
       mirrorAddress: mirror.mac,

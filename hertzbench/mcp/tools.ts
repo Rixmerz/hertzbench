@@ -4,6 +4,7 @@
 // and act on.
 
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PRODUCT } from "../brand.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
 import { ESP32_FIDELITY, resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
@@ -199,6 +200,10 @@ async function readScenarioFile(file: string, missing: string): Promise<string> 
     }
     if (error instanceof Deno.errors.PermissionDenied) {
       throw new ToolError(`${file} cannot be read: permission denied`);
+    }
+    // Windows reports a directory as "Incorrect function (os error 1)", not as IsADirectory.
+    if ((await Deno.stat(file).catch(() => null))?.isDirectory) {
+      throw new ToolError(`${file} is a directory, not a scenario file`);
     }
     throw error;
   }
@@ -908,7 +913,7 @@ export async function resources(): Promise<ResourceDefinition[]> {
     list.push({
       uri: `${scheme}examples/${name}`,
       name: `Example scenario ${name}`,
-      description: `Ready-to-run example; on disk at ${url.pathname}`,
+      description: `Ready-to-run example; on disk at ${fileURLToPath(url)}`,
       mimeType: "application/yaml",
       read: () => Deno.readTextFile(url),
     });
