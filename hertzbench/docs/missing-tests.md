@@ -6,9 +6,8 @@ its own name (`[skipped on Windows: ...]`), so a skip is never silent.
 
 The suite was run on Linux (674 passed, 0 failed) and on Windows 10 22H2 x64 in a VM with Deno 2.9.5
 and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
-(`.github/workflows/hertzbench-ci.yml`) runs on GitHub: **`macos-latest` (arm64) passes**;
-`ubuntu-latest` (headless Chromium timeouts, the `dbus` BlueZ test) and `windows-latest` (one runner
-timing test) failed on the first runs and are being fixed. **arm64 Linux and Windows were not run.**
+(`.github/workflows/hertzbench-ci.yml`) runs on GitHub and **passes on `ubuntu-latest`, `windows-latest` and `macos-latest` (arm64)** (run
+40083042461). **arm64 Linux and Windows were not run.**
 
 Known flaky: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed once and passed on
 the rerun.
@@ -29,7 +28,7 @@ the rerun.
 | `run: the scripted ESP-NOW mesh passes ...` (`tests/cli_test.ts`), `runner: scripted ESP-NOW unicast is acknowledged ...` (`tests/espnow_test.ts`) | Scripted boards answer an ESP-NOW unicast inside the fork's 10 ms ACK wait on a wall clock | Windows timers tick every 15.6 ms (measured: `setTimeout(1)` takes 15.6 ms), so no ACK arrives in time. This is a real limit of the scripted ESP-NOW model on Windows | Linux, macOS |
 | `view_ui_test.ts`, `view_browser_test.ts` (headless Chromium) | The page's layout, contrast and drag | Chromium is looked up at the Linux paths in `findChromium` or `HERTZBENCH_CHROMIUM`; none on the Windows VM | Linux with Chromium: `deno task test`; elsewhere set `HERTZBENCH_CHROMIUM` |
 | `ble hci: BlueZ's btmon reads ...`, the `btmon` part of the BLE CLI test | The capture decodes in BlueZ's own tool | `btmon` is part of BlueZ, Linux only | Linux with `bluez` installed |
-| `bluez: the helper registers the mirrored table ...` | The real `bluez_gatt.py` against a fake `bluetoothd` | Needs `dbus-run-session` | Linux with `dbus` |
+| `bluez: the helper registers the mirrored table ... [skipped: ...]` (`tests/bridge_ble_test.ts`) | The real `bluez_gatt.py` against a fake `bluetoothd` | Needs `dbus-run-session` and PyGObject (`gi`) in the `python3` the test runs; the CI's `setup-python` interpreter has no `gi`, so it is skipped on the GitHub runners too | Linux with `dbus` and `python3-gi` (or `pip install PyGObject`) |
 
 ## Not run anywhere on this host
 
