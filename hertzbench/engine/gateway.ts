@@ -109,6 +109,12 @@ export class VirtualGateway {
     this.#config = config;
   }
 
+  /** The station MAC whose lease is `ip`, if any. */
+  stationForIp(ip: string): string | undefined {
+    for (const [mac, leased] of this.#config.leases) if (leased === ip) return mac;
+    return undefined;
+  }
+
   /** The gateway's answer to `frame`, or null when the frame is not addressed to it. */
   handle(frame: Uint8Array): GatewayResult | null {
     const arp = parseArp(frame);

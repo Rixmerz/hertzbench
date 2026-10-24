@@ -1,4 +1,4 @@
-// qemu-wifi-l2: connects each board's QEMU `stream` netdev to the engine.
+// qemu-wifi-l2: connects each board's QEMU `socket` netdev to the engine.
 //
 // One loopback TCP listener per node (adapters/loopback-ports.ts). QEMU
 // connects to its node's port as the client (`server=off`). Frames QEMU sends

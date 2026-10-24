@@ -559,13 +559,8 @@ class RadioSpiLink:
 
 
 def wifi_nic_arg(machine: str, wifi_enabled: bool,
-                 hostfwd_port: int = 0, l2_port: int = 0) -> str | None:
+                 hostfwd_port: int = 0) -> str | None:
     """The `-nic` value for this machine, or None if it gets no radio.
-
-    `l2_port` (hertzbench): when set, the NIC is a QEMU `stream` netdev that
-    connects to the hertzbench engine on 127.0.0.1:<l2_port> instead of
-    SLIRP. There is then no NAT, DHCP or DNS from QEMU, and `hostfwd_port`
-    is ignored because it is a SLIRP feature.
 
     On the classic ESP32 the radio is attached whether or not the sketch
     appears to use it, because a real ESP32 has one either way. It used to be
@@ -610,15 +605,47 @@ def wifi_nic_arg(machine: str, wifi_enabled: bool,
         # The S3 machine models no radio (hw/xtensa/esp32s3.c never looks for
         # the NIC), so handing it one would leave an unconsumed netdev.
         return None
-    if l2_port:
-        if not valid_tcp_port(l2_port):
-            raise ValueError(f'l2_port must be a TCP port number, got {l2_port!r}')
-        return (f'stream,model={model},server=off,'
-                f'addr.type=inet,addr.host=127.0.0.1,addr.port={l2_port}')
     arg = f'user,model={model},net=192.168.4.0/24'
     if wifi_enabled and hostfwd_port:
         arg += f',hostfwd=tcp::{hostfwd_port}-192.168.4.15:80'
     return arg
+
+
+_L2_NETDEV_ID = 'hzb-l2'
+
+
+def wifi_nic_argv(machine: str, wifi_enabled: bool,
+                  hostfwd_port: int = 0, l2_port: int = 0) -> list[str]:
+    """QEMU arguments for this machine's radio; empty when it gets none.
+
+    Without `l2_port` this is `-nic <wifi_nic_arg(...)>`, Velxio's SLIRP NIC.
+
+    `l2_port` (hertzbench): the NIC is a QEMU `socket` netdev that connects to
+    the hertzbench engine on 127.0.0.1:<l2_port> instead of SLIRP. There is
+    then no NAT, DHCP or DNS from QEMU, and `hostfwd_port` is ignored because
+    it is a SLIRP feature. Frames cross the TCP stream with a 4-byte
+    big-endian length before each, as with the newer `stream` netdev.
+
+    Both alternatives were run against the lcgamboa fork (QEMU 9.2) and
+    failed: `-nic stream,...` is refused with "Parameter 'type' is missing"
+    (`-nic` parses its options flat, and `addr` is a nested SocketAddress),
+    and behind `-netdev stream` the guest either reset on its watchdogs over
+    and over (QEMU on its own) or booted and never associated (under this
+    worker), and sent no frame either way. The `socket` netdev boots,
+    associates and carries DHCP, UDP and ESP-NOW.
+    """
+    nic = wifi_nic_arg(machine, wifi_enabled, hostfwd_port)
+    if nic is None:
+        return []
+    if not l2_port:
+        return ['-nic', nic]
+    if not valid_tcp_port(l2_port):
+        raise ValueError(f'l2_port must be a TCP port number, got {l2_port!r}')
+    model = 'esp32c3_wifi' if 'c3' in machine else 'esp32_wifi'
+    return [
+        '-netdev', f'socket,id={_L2_NETDEV_ID},connect=127.0.0.1:{l2_port}',
+        '-net', f'nic,model={model},netdev={_L2_NETDEV_ID}',
+    ]
 
 
 def efuse_drive_args(image_path: str) -> list[str]:
@@ -1062,10 +1089,10 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
     # ── WiFi NIC (slirp user-mode networking) ──────────────────────────────
     # Always present on the classic ESP32, on the C3 only for a sketch that
     # uses WiFi — see wifi_nic_arg().
-    nic_arg = wifi_nic_arg(machine, wifi_enabled, wifi_hostfwd_port, wifi_l2_port)
-    if nic_arg:
-        args_list.extend([b'-nic', nic_arg.encode()])
-        _log(f'WiFi radio attached (sketch wants WiFi: {wifi_enabled}): -nic {nic_arg}')
+    nic_argv = wifi_nic_argv(machine, wifi_enabled, wifi_hostfwd_port, wifi_l2_port)
+    if nic_argv:
+        args_list.extend(a.encode() for a in nic_argv)
+        _log(f'WiFi radio attached (sketch wants WiFi: {wifi_enabled}): {" ".join(nic_argv)}')
     elif wifi_enabled:
         _log(f'WiFi requested but machine {machine} models no radio — '
              'the sketch will fault if it touches the MAC')

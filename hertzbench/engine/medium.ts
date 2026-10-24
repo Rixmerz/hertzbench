@@ -32,7 +32,7 @@ import type { Clock } from "./clock.ts";
 import { ESPNOW_ACK_TIMEOUT_MS, type EspNowFrame, parseEspNow } from "./espnow.ts";
 import type { ChannelChanges, DropReason, EspNowOutcome, EventLog, FrameKind } from "./events.ts";
 import type { VirtualGateway } from "./gateway.ts";
-import { classifyFrame, isGroupMac, parseEthernet } from "./packet.ts";
+import { classifyFrame, isGroupMac, parseEthernet, parseIpv4 } from "./packet.ts";
 import { substream } from "./rng.ts";
 
 export interface MediumNode {
@@ -254,7 +254,7 @@ export class Medium {
     }
 
     const group = isGroupMac(eth.dst);
-    const targetId = group ? undefined : this.#idByMac.get(eth.dst);
+    const targetId = group ? undefined : this.#idByMac.get(eth.dst) ?? this.#leaseHolderOf(frame);
     // Group addresses and addresses nobody owns reach every other station on
     // the air, the way a broadcast does. Neither is acknowledged.
     const unacked = group || targetId === undefined;
@@ -271,6 +271,20 @@ export class Medium {
         espnow?.channel ?? sender.radio.channel,
       );
     }
+  }
+
+  /**
+   * The node an IPv4 frame is for when its destination MAC names no node.
+   * The QEMU fork's Wi-Fi MAC writes its access point's MAC
+   * (10:01:00:c4:0a:51 for "Espressif") as the Ethernet destination of every
+   * frame a station sends (hw/misc/esp32_wifi_ap.c), so on real firmware the
+   * peer is only known from the destination IP and the lease that holds it.
+   */
+  #leaseHolderOf(frame: Uint8Array): string | undefined {
+    const ip = parseIpv4(frame);
+    if (!ip) return undefined;
+    const mac = this.#opts.gateway?.stationForIp(ip.dst);
+    return mac === undefined ? undefined : this.#idByMac.get(mac);
   }
 
   #replyFromGateway(to: NodeState, reply: Uint8Array): void {
