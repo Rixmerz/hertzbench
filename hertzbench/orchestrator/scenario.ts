@@ -258,6 +258,9 @@ function known(obj: Obj, allowed: readonly string[], path: string): void {
 
 const DURATION = /^(\d+(?:\.\d+)?)(ms|s|m)$/;
 
+/** The longest delay a timer keeps; a longer one fires at once (setTimeout's 32-bit limit). */
+const MAX_DURATION_MS = 2 ** 31 - 1;
+
 /** "500ms", "60s", "1.5s", "2m" to milliseconds. A bare number is refused: its unit would be a guess. */
 export function parseDuration(value: unknown, path: string): number {
   if (typeof value !== "string") {
@@ -266,7 +269,9 @@ export function parseDuration(value: unknown, path: string): number {
   const match = DURATION.exec(value.trim());
   if (!match) fail(path, `not a duration: ${JSON.stringify(value)} (use ms, s or m)`);
   const amount = Number(match[1]);
-  return match[2] === "ms" ? amount : match[2] === "s" ? amount * 1000 : amount * 60_000;
+  const ms = match[2] === "ms" ? amount : match[2] === "s" ? amount * 1000 : amount * 60_000;
+  if (ms > MAX_DURATION_MS) fail(path, `must be at most ${MAX_DURATION_MS} ms (about 24 days)`);
+  return ms;
 }
 
 /** `[x, y]` or `[x, y, z]` in metres. */
@@ -369,12 +374,15 @@ export function parseChannelChanges(obj: Record<string, unknown>, path: string):
   };
 }
 
+/** A decimal octet without leading zeros, so one address has one spelling. */
+const OCTET = "(?:0|[1-9]\\d{0,2})";
+
 function parseSubnet(value: unknown, path: string): string {
   if (value === undefined) return "192.168.4";
   const obj = record(value, path);
   known(obj, ["subnet"], path);
   const subnet = text(obj.subnet, `${path}.subnet`);
-  const match = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.0\/24$/.exec(subnet);
+  const match = new RegExp(`^(${OCTET}\\.${OCTET}\\.${OCTET})\\.0/24$`).exec(subnet);
   if (!match || (match[1] as string).split(".").some((o) => Number(o) > 255)) {
     fail(
       `${path}.subnet`,
@@ -624,7 +632,7 @@ const FIRST_HOST = 11;
 
 /** A board address the DHCP server may hand out: inside the /24, and not the network, gateway or broadcast address. */
 function checkHostAddress(ip: string, subnetPrefix: string, path: string): void {
-  const match = /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})$/.exec(ip);
+  const match = new RegExp(`^(${OCTET}\\.${OCTET}\\.${OCTET})\\.(${OCTET})$`).exec(ip);
   if (!match || match[1] !== subnetPrefix) fail(path, `${ip} is not inside ${subnetPrefix}.0/24`);
   const host = Number(match[2]);
   if (host < 2 || host > 254) {
@@ -641,9 +649,8 @@ export const GATEWAY_HOST = 1;
 
 function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
   const raw = list(value, "nodes");
-  if (raw.length < 2 || raw.length > 10) {
-    fail("nodes", `Phase 1 runs 2 to 10 boards, got ${raw.length}`);
-  }
+  // Every entry is at least one board; the exact count is known after `count` expansion.
+  if (raw.length > 10) fail("nodes", `Phase 1 runs 2 to 10 boards, got ${raw.length}`);
   const nodes: ScenarioNode[] = [];
   raw.forEach((entry, i) => {
     const path = `nodes[${i}]`;
@@ -689,6 +696,9 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
       });
     }
   });
+  if (nodes.length < 2 || nodes.length > 10) {
+    fail("nodes", `Phase 1 runs 2 to 10 boards, got ${nodes.length}`);
+  }
   const ids = new Set<string>();
   const ips = new Set<string>();
   for (const node of nodes) {
@@ -730,6 +740,8 @@ export function parseLinkRule(value: unknown, path: string): LinkRule {
 }
 
 function parseTimeline(value: unknown): TimelineEvent[] {
+  // A phase is judged by its label, so two phases with one label would judge only the first.
+  const labels = new Set<string>(["start"]);
   return list(value ?? [], "timeline")
     .map((raw, i): TimelineEvent => {
       const path = `timeline[${i}]`;
@@ -750,6 +762,15 @@ function parseTimeline(value: unknown): TimelineEvent[] {
       }
       const label = obj.label === undefined ? null : text(obj.label, `${path}.label`);
       if (actions.length === 0 && label === null) fail(path, "needs a move, a link or a label");
+      if (label !== null && labels.has(label)) {
+        fail(
+          `${path}.label`,
+          label === "start"
+            ? '"start" is the phase before the first label'
+            : `${JSON.stringify(label)} is already a phase`,
+        );
+      }
+      if (label !== null) labels.add(label);
       return { atMs: parseDuration(obj.at, `${path}.at`), label, actions };
     })
     .sort((a, b) => a.atMs - b.atMs);
@@ -791,7 +812,7 @@ function parseAssertion(raw: unknown, path: string): Assertion {
     const m = record(obj.metric, `${path}.metric`);
     known(m, ["link", "phase", "kind", ...METRIC_FIELDS], `${path}.metric`);
     const link = text(m.link, `${path}.metric.link`);
-    if (!link.includes("->")) fail(`${path}.metric.link`, 'expected "from->to"');
+    if (link.split("->").length !== 2) fail(`${path}.metric.link`, 'expected "from->to"');
     const checks: MetricCheck[] = [];
     for (const field of METRIC_FIELDS) {
       if (m[field] === undefined) continue;

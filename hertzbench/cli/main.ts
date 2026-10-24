@@ -60,11 +60,15 @@ interface Args {
 
 const DEFAULT_VIEW_PORT = 7480;
 
+/** Decimal digits only: Number() reads "" and " " as 0, and "0x10" or "1e3" are not what a person types. */
+function parseWhole(value: string | undefined, max: number): number | undefined {
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const n = Number(value);
+  return n <= max ? n : undefined;
+}
+
 function parsePort(value: string | undefined): number | undefined {
-  const port = Number(value);
-  return value !== undefined && Number.isInteger(port) && port >= 0 && port <= 65535
-    ? port
-    : undefined;
+  return parseWhole(value, 65535);
 }
 
 function parseArgs(argv: string[]): Args | string {
@@ -88,10 +92,8 @@ function parseArgs(argv: string[]): Args | string {
       args.out = rest.shift();
       if (args.out === undefined) return "--out needs a directory";
     } else if (arg === "--seed") {
-      const value = Number(rest.shift());
-      if (!Number.isInteger(value) || value < 0 || value > 2 ** 32 - 1) {
-        return "--seed needs an integer from 0 to 4294967295";
-      }
+      const value = parseWhole(rest.shift(), 2 ** 32 - 1);
+      if (value === undefined) return "--seed needs an integer from 0 to 4294967295";
       args.seed = value;
     } else if (arg === "--workspace") {
       args.workspace = rest.shift();
