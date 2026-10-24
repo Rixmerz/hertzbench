@@ -13,6 +13,7 @@ import {
   type GattPeripheral,
   type PeripheralHandlers,
 } from "../bridge/mod.ts";
+import { servicesToPublish } from "../bridge/ble/mirror.ts";
 import type { DiscoveredService } from "../orchestrator/boards/drivers/att.ts";
 import { type LiveRun, parseScenario, renderReport, runScenario } from "../orchestrator/mod.ts";
 
@@ -29,6 +30,23 @@ const SERVICES: DiscoveredService[] = [{
     cccdHandle: 0x11,
   }],
 }];
+
+Deno.test("bridge ble: GAP and GATT are left to the host's own peripheral, the rest is published", () => {
+  // Bluedroid's table, as discovered from real firmware: BlueZ refuses to
+  // register its own GAP or GATT service a second time.
+  const service = (uuid: string): DiscoveredService => ({
+    uuid,
+    startHandle: 1,
+    endHandle: 1,
+    characteristics: [],
+  });
+  const discovered = [
+    service("00001801-0000-1000-8000-00805f9b34fb"),
+    service("00001800-0000-1000-8000-00805F9B34FB"),
+    ...SERVICES,
+  ];
+  assertEquals(servicesToPublish(discovered), SERVICES);
+});
 
 // D-Bus sessions and BlueZ are Linux only: elsewhere the helper test cannot run.
 const hasDbus = Deno.build.os === "linux" &&

@@ -99,6 +99,30 @@ Deno.test("an address nobody owns is flooded, as a switch does, and never learne
   assertEquals(rig.sinks.get("c")!.frames.length, 1);
 });
 
+Deno.test("a frame to the QEMU fork's AP MAC goes, acknowledged, to the holder of its destination IP", () => {
+  // The fork writes its access point's MAC as the Ethernet destination of
+  // every frame a station sends, so only the IP says who the peer is.
+  const gateway = new VirtualGateway({
+    mac: GATEWAY_MAC,
+    ip: GATEWAY_IP,
+    subnetMask: "255.255.255.0",
+    leases: new Map([1, 2, 3].map((i) => [macFor(i), ipFor(i)])),
+  });
+  const rig = makeRig({
+    gateway,
+    positions: { a: { x: 0, y: 0 }, b: { x: 5, y: 0 }, c: { x: 0, y: 5 } },
+  });
+  const toB = udpFrame(rig, "a", "b");
+  toB.set([0x10, 0x01, 0x00, 0xc4, 0x0a, 0x51], 0);
+  rig.medium.transmit("a", toB);
+  rig.clock.runAll();
+  assertEquals(rig.sinks.get("b")!.frames.length, 1);
+  assertEquals(rig.sinks.get("c")!.frames.length, 0, "not flooded");
+  const deliver = rig.log.events.find((e) => e.type === "deliver");
+  assert(deliver && deliver.type === "deliver");
+  assertEquals(deliver.to, "b");
+});
+
 Deno.test("two stations with the same MAC cannot join", () => {
   const rig = makeRig({ positions: { a: { x: 0, y: 0 } } });
   assertThrows(

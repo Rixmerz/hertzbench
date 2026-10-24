@@ -8,7 +8,7 @@ export * from "./framing.ts";
  * This is the contract between the adapter and the worker patch.
  */
 export interface WorkerNetworkConfig {
-  /** Loopback TCP port of this node's listener; the worker builds the `stream` netdev from it. */
+  /** Loopback TCP port of this node's listener; the worker builds the `socket` netdev from it. */
   wifi_l2_port: number;
   /** Path to the writable per-board eFuse image holding the station MAC. */
   efuse_image: string;

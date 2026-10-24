@@ -11,7 +11,7 @@ Every protocol and board declares how faithful it is (PLAN.md D10). `hertzbench 
 
 | Component | Level | What it means |
 |---|---|---|
-| `qemu-wifi-l2` adapter, Wi-Fi/IP | **F2** | The board runs the production Wi-Fi driver. Its QEMU network device is a `stream` netdev to the engine. The engine sees Ethernet frames after the guest's embedded access point has converted 802.11 to Ethernet. It does not see the 802.11 exchange. |
+| `qemu-wifi-l2` adapter, Wi-Fi/IP | **F2** | The board runs the production Wi-Fi driver. Its QEMU network device is a `socket` netdev to the engine. The engine sees Ethernet frames after the guest's embedded access point has converted 802.11 to Ethernet. It does not see the 802.11 exchange. |
 | `qemu-wifi-l2` adapter, ESP-NOW (Phase 4) | **F1** | The same adapter and netdev. The fork's Wi-Fi MAC model turns each 802.11 action frame into pseudo-Ethernet; the engine carries it as bytes and applies the channel model. See [ESP-NOW](#esp-now) below. |
 | `esp32` board | F2 for Wi-Fi/IP, F1 for ESP-NOW, F3 for BLE | The classic ESP32 only, machine `esp32-picsimlab`. The C3 asserts in eFuse reload when a NIC is attached, and the S3 machine models no radio (`esp32_worker.py`, `wifi_nic_arg`). |
 | `scripted` board | **none** | A traffic generator that speaks the netdev framing, answers DHCP and pings, and sends ESP-NOW through a model of the fork's MAC (`orchestrator/boards/espnow-fork-model.ts`). On LoRa, nRF24 and BLE it replays the host side of a sketch over the same socket firmware would use (for BLE, a small HCI host in `orchestrator/boards/drivers/hci-host.ts`). It is not firmware and not an emulator. It exists so the engine, adapter, metrics and assertions run on a host without libqemu. Do not use it to say anything about firmware. |
@@ -85,7 +85,7 @@ A board has exactly one Wi-Fi NIC, so a board cannot be on the medium and on SLI
 
 ## ESP-NOW
 
-**Status: built from the fork's code, never run against QEMU.** The host this was written on has no libqemu. The ADR 0001 gate, two boards with distinct station MACs exchanging one ESP-NOW frame through the switch and an ACK coming back, has not been run; [e2e-esp32.md](e2e-esp32.md) makes it the first check. Everything below about the fork is read from `lcgamboa/qemu`, branch `picsimlab-esp32`, commit `9c29898`, which may differ from the library Velxio ships. The tests run the engine against a model of that code.
+**Status: run against QEMU on 2026-10-23, not passing.** With a libqemu built from the fork named below, the boards boot with distinct station MACs, the gateway's broadcasts reach the sensors, and the gateway's firmware receives its first 21 unicast frames, then no more; 42 ACKs came back in the whole run and every sensor reports its sends as failed. The ADR 0001 gate (one frame, one ACK) was met only for those first frames. The fork's MAC model stops reading its netdev for good once its 20-frame injection queue overflows (no `qemu_flush_queued_packets`), which the sensors' resends before the gateway booted did; see [e2e-esp32.md](e2e-esp32.md#the-esp-now-example). Everything below about the fork is read from `lcgamboa/qemu`, branch `picsimlab-esp32`, commit `9c29898`, which may differ from the library Velxio ships. The tests run the engine against a model of that code.
 
 **Level F1.** The firmware is the production binary and calls the real `esp_now_*` API. Its Wi-Fi driver hands 802.11 action frames to the fork's MAC model, which writes them to the netdev as pseudo-Ethernet (`hw/misc/esp32_wifi_ap.c:608-645`):
 
@@ -143,7 +143,7 @@ An ACK for which no frame is waiting (already answered, or lost on the way) is d
 
 ## BLE
 
-**Status: built and tested with scripted hosts; never run with firmware.** The host this was written on has no libqemu and no ESP-IDF. The ADR 0002 gate, an ESP-IDF build that boots Bluedroid over the external HCI UART, has not been run; [e2e-esp32.md](e2e-esp32.md#the-ble-example) makes it the first check.
+**Status: run with firmware on 2026-10-23, passing.** The ADR 0002 gate is met: the `fw/ble-sensor` build of ESP-IDF v5.3.6 boots Bluedroid host-only over the external HCI UART under the fork's QEMU, and `ble-sensors-3-nodes.yaml` passes ([e2e-esp32.md](e2e-esp32.md#results-on-real-firmware)). Bluedroid sends one command the controller does not implement, 0x2027 (LE Set Privacy Mode), and carries on after the "Unknown HCI Command" answer.
 
 **Level F3.** The QEMU fork maps the Bluetooth block as an unimplemented device and has no HCI (discovery Q4). So the firmware is a simulation-only build: Bluedroid with `CONFIG_BT_CONTROLLER_DISABLED=y`, attached to an H4 driver on UART1 with `esp_bluedroid_attach_hci_driver` (`scenarios/examples/fw/ble-sensor`, adapted from ESP-IDF's `bluedroid_host_only_uart` example). Everything above HCI, GAP, GATT, ATT, L2CAP and the application, is the real stack. Everything below HCI is the engine's.
 

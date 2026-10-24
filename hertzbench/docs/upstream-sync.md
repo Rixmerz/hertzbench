@@ -32,25 +32,25 @@ What changed, all of it in that one file:
 
 1. A header line after the shebang: `# Modified by hertzbench contributors, 2026-10`.
 2. `valid_tcp_port(value)`: new, 3 lines. True only for an `int` from 1 to 65535 (a `bool` is not a port).
-3. `wifi_nic_arg(machine, wifi_enabled, hostfwd_port=0, l2_port=0)`: new last parameter `l2_port`. When set, the result is
+3. `wifi_nic_argv(machine, wifi_enabled, hostfwd_port=0, l2_port=0)`: new, after Velxio's `wifi_nic_arg`, which is left exactly as upstream has it. It returns the whole list of QEMU arguments for the radio: `[]` when `wifi_nic_arg` gives none, `['-nic', wifi_nic_arg(...)]` when `l2_port` is unset or 0 (byte-for-byte what the worker passed before), and with `l2_port`
 
    ```
-   stream,model=<esp32_wifi|esp32c3_wifi>,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port=<l2_port>
+   -netdev socket,id=hzb-l2,connect=127.0.0.1:<l2_port> -net nic,model=<esp32_wifi|esp32c3_wifi>,netdev=hzb-l2
    ```
 
-   instead of the `user,...` SLIRP string, and `hostfwd_port` is ignored. With `l2_port` unset or 0 the result is byte-for-byte what it was. The machine rules (classic always, C3 only for Wi-Fi sketches, S3 never) are untouched. An invalid port raises `ValueError`.
+   instead of SLIRP, `hostfwd_port` ignored. The machine rules (classic always, C3 only for Wi-Fi sketches, S3 never) are `wifi_nic_arg`'s and untouched. An invalid port raises `ValueError`.
 4. `efuse_drive_args(image_path)`: new. Returns the QEMU arguments `-drive file=<path>,if=none,format=raw,id=hzb-efuse` and `-global driver=nvram.esp32.efuse,property=drive,value=hzb-efuse`. A comma in the path is doubled so it cannot add an option.
 5. `main()`:
    - reads two optional stdin config fields, `wifi_l2_port` and `efuse_image`;
    - exits with a message on stderr if `wifi_l2_port` is not a port or `efuse_image` is not an existing file, before loading the library;
-   - passes `wifi_l2_port` to `wifi_nic_arg`;
+   - builds the radio's arguments with `wifi_nic_argv` instead of `wifi_nic_arg`, and logs them in its `WiFi radio attached` line;
    - appends `efuse_drive_args(efuse_image)` to the argv, only for the classic ESP32 machine (the C3 eFuse is a different device).
 
 The contract with the adapter is the two config fields; `hertzbench/adapters/qemu-wifi-l2/mod.ts` (`workerNetworkConfig`) produces them.
 
-Tests: `test/backend/unit/test_esp32_wifi_l2_args.py` (12 tests, including the worker's real entrypoint for the config checks).
+Tests: `test/backend/unit/test_esp32_wifi_l2_args.py` (14 tests, including the worker's real entrypoint for the config checks).
 
-**Not verified on this host**, because there is no libqemu: that QEMU accepts `-nic stream,...` for the onboard NIC, and that the `-global` binding takes the eFuse drive. Both follow QEMU 9.2 (`VERSION` of the fork) and the way the worker already uses `-nic`, but neither has been run. If `-nic stream` is refused, the fallback is `-netdev stream,id=hzb-l2,...` plus `-net nic,model=<model>,netdev=hzb-l2`, a change confined to `wifi_nic_arg`.
+**Verified on real firmware** (2026-10-23, [e2e-esp32.md](e2e-esp32.md#results-on-real-firmware)), against a libqemu built from the public lcgamboa fork (QEMU 9.2.2). The first form of this patch, `-nic stream,...`, was refused at start-up (`Parameter 'type' is missing`); `-netdev stream` plus `-net nic` was accepted, but the guest sent no frame: QEMU on its own reset on its watchdogs again and again, and under the worker the board booted and never associated; `-netdev socket,connect=...` boots, associates and carries DHCP, UDP and ESP-NOW. Its framing on TCP is the stream netdev's, a 4-byte big-endian length before each frame, so the engine side did not change. The `-global` binding takes the eFuse drive: each board's DHCP request carries the station MAC of its image.
 
 Upstreamable: the two config fields are opt-in and change nothing when absent, so they could be offered as they are. We have not discussed it with the maintainers; the CLA described in `README.md` applies to a pull request.
 
