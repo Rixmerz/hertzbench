@@ -1,0 +1,45 @@
+name: Test report
+description: Tell us how an item of the community test checklist went on your machine
+title: "[test report] "
+labels: ["test-report"]
+body:
+  - type: input
+    id: item
+    attributes:
+      label: Checklist item
+      description: Copy its bold title from hertzbench/docs/community-testing.md
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options: ["Passed", "Failed", "Partly worked"]
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: OS and version, CPU architecture, and hardware if relevant (phone, adapter, board)
+      placeholder: "macOS 15.2, Intel i7; or Raspberry Pi 5, Debian 12 arm64"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hertzbench version or commit
+      placeholder: "v0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What you ran and what it printed
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else

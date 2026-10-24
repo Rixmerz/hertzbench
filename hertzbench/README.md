@@ -113,6 +113,9 @@ What differs by system:
   ESP-NOW ACK wait there, so the ESP-NOW ACK rates of scripted scenarios read low on Windows.
 - Tests that cannot run on a given system are listed in
   [docs/missing-tests.md](docs/missing-tests.md).
+- **Help test it.** What nobody has run yet (Intel Macs, arm64, real phones and adapters) is a
+  checklist in [docs/community-testing.md](docs/community-testing.md). Run an item and open a
+  [test report](https://github.com/Rixmerz/hertzbench/issues/new?template=test-report.yml).
 
 ## First run from source (no QEMU needed)
 
