@@ -9,7 +9,7 @@ Before you start, download the binary for your system from the
 [latest release](https://github.com/Rixmerz/hertzbench/releases/latest) and check it against
 `SHA256SUMS`, or run from source with Deno (`cd hertzbench`).
 
-Status: `[ ]` not run, `[x]` passed (link the report), `[!]` failed (link the issue).
+Status: `[ ]` not run or not fixed, `[x]` passed (link the report), `[!]` failed (link the issue).
 
 ## Platforms
 
@@ -44,6 +44,24 @@ These ran on one Linux host under QEMU ([e2e-esp32.md](e2e-esp32.md)). More host
 - [ ] **ESP32 scenarios on macOS.** Same.
 - [ ] **Dragging a node that runs real ESP32 firmware** in `hertzbench view`: links and loss follow
       the new position and the firmware keeps running.
+
+## Known problems, open for contributions
+
+The project is now maintained by the community: these are known and unfixed. Pull requests are
+welcome; each one links the evidence.
+
+- [ ] **Browser drag test fails on GitHub's ubuntu-latest.** `tests/view_browser_test.ts:115`
+      times out with `timed out waiting for /DevTools listening on`: Chromium does not start in
+      time on the runner. It passes locally and on macOS and Windows.
+- [ ] **ESP-NOW mesh test in `tests/cli_test.ts` is flaky on macOS CI.** It fails now and then
+      and passes on rerun.
+- [ ] **`test_mpu6050_worker.py::TestIntTimerCost` (compiled) fails on loaded CI runners.** It
+      measured 3228 lock takes a second against a bound of 2200, even with three 1 s windows.
+      That is too far over the bound to be jitter: likely timer catch-up bursts after the thread
+      is descheduled, or a real cost bug in the compiled worker. Do not just raise the bound.
+- [ ] **Publish Docker Image fails on master.** The workflow has failed on its last runs; not
+      investigated.
+- [ ] **Dependency review always fails** because the repository's dependency graph is disabled.
 
 ## Done
 
