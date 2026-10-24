@@ -3,8 +3,7 @@
 // gateway's beacons too. It prints the same lines as the scripted board, so
 // the scripted twin of the scenario asserts the same text.
 //
-// Not compiled on the host this was written on (no ESP-IDF toolchain there);
-// docs/e2e-esp32.md says how to run it. Velxio builds Arduino sketches with
+// docs/e2e-esp32.md says how to build and run it. Velxio builds Arduino sketches with
 // arduino-esp32 2.x (ESP-IDF 4.4) or 3.x (ESP-IDF 5.5); the callbacks below
 // take the signature each one expects.
 #include <WiFi.h>
@@ -20,6 +19,10 @@ static const unsigned long READING_EVERY_MS = 500;
 
 unsigned long lastReading = 0;
 unsigned long readingSeq = 0;
+// Under QEMU the boards boot seconds apart. Sent before the gateway is up, a
+// reading is never acked and the driver resends it every 10 ms, so the sensor
+// waits for the first beacon instead of measuring the boot order.
+volatile bool gatewayHeard = false;
 
 static void handleReceive(const uint8_t *mac, const uint8_t *data, int len) {
   char text[64];
@@ -27,6 +30,7 @@ static void handleReceive(const uint8_t *mac, const uint8_t *data, int len) {
   memcpy(text, data, n);
   text[n] = '\0';
   bool fromGateway = memcmp(mac, GATEWAY, 6) == 0;
+  if (fromGateway) gatewayHeard = true;
   Serial.printf("espnow rx %s from %s\n", text, fromGateway ? "gw" : "another node");
 }
 
@@ -75,7 +79,7 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
-  if (now - lastReading >= READING_EVERY_MS) {
+  if (gatewayHeard && now - lastReading >= READING_EVERY_MS) {
     lastReading = now;
     char text[24];
     int n = snprintf(text, sizeof(text), "reading:%lu", readingSeq++);

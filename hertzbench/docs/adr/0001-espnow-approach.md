@@ -1,6 +1,6 @@
 # ADR 0001: ESP-NOW approach (F1)
 
-- Status: Accepted for Phase 0. Implemented in Phase 4 (2026-10) **without the gate below having been run**: no host used so far has libqemu. See "Phase 4" at the end.
+- Status: Accepted for Phase 0. Implemented in Phase 4 (2026-10) before the gate below had run; the gate passed on real firmware on 2026-10-24, with a patch to the fork. See "Phase 4" and "On real firmware" at the end.
 - Date: 2026-10-22
 - Evidence: [discovery.md](../discovery.md), Q3 and Q8.
 
@@ -53,3 +53,7 @@ The owner asked for Phase 4 on a host without libqemu, so it was built against t
 - **Platform:** the examples use the classic ESP32.
 
 The gate is now the first step of the ESP-NOW run in [e2e-esp32.md](../e2e-esp32.md). If it fails, this ADR's fallback (the F3 shim) still applies, and so does the need for its own ADR. [fidelity.md](../fidelity.md#esp-now) lists what is read from the code rather than measured.
+
+## On real firmware (2026-10-24)
+
+The gate ran: `espnow-mesh-5-nodes.yaml` passes 7/7 on a libqemu built from the public fork, so F1 stands and the F3 fallback is not needed. It did take a change this ADR said would not happen: a small patch to the fork's Wi-Fi MAC, applied to its source before building and recorded as patch 3 in [upstream-sync.md](../upstream-sync.md#patch-3-the-qemu-forks-wi-fi-mac-esp-now-receive-and-tx-done-outside-this-tree). Unpatched, the fork's NIC stops reading its netdev for good once its 20-frame injection queue overflows, and it reports a unicast frame done before its ACK. No QEMU source or binary is kept in this tree. The "fork is not changed" line in the decision above held until this run.
