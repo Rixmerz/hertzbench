@@ -17,7 +17,8 @@ function namedScenarios(): Set<string> {
     ...html.matchAll(/<pre[^>]*><code>([\s\S]*?)<\/code><\/pre>/g),
   ];
   for (const [, text] of sources) {
-    for (const line of decode(text!).split("\n")) {
+    // A placeholder in a usage line, `<scenario.yaml>`, names no file.
+    for (const line of decode(text!).replaceAll(/<[\w.-]+>/g, "").split("\n")) {
       if (!/hertzbench|deno task|^\$ /.test(line) && !/^[\w./-]+\.yaml$/.test(line.trim())) {
         continue;
       }
