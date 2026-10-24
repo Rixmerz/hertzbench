@@ -4,10 +4,14 @@ What the suite does not cover on some system or on the host this was written on,
 check, why it did not run, and the command to run it. A test skipped on a system names the reason in
 its own name (`[skipped on Windows: ...]`), so a skip is never silent.
 
-The suite was run on Linux (662 passed, 0 failed) and on Windows 10 22H2 x64 in a VM with Deno 2.9.5
-and Python 3.12.8 (628 passed, 0 failed, 34 ignored). **macOS and arm64 were not run** on this host:
-the CI matrix (`.github/workflows/hertzbench-ci.yml`) runs `macos-latest` (arm64) for the first time
-on the first push.
+The suite was run on Linux (674 passed, 0 failed) and on Windows 10 22H2 x64 in a VM with Deno 2.9.5
+and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
+(`.github/workflows/hertzbench-ci.yml`) runs on GitHub: **`macos-latest` (arm64) passes**;
+`ubuntu-latest` (headless Chromium timeouts, the `dbus` BlueZ test) and `windows-latest` (one runner
+timing test) failed on the first runs and are being fixed. **arm64 Linux and Windows were not run.**
+
+Known flaky: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed once and passed on
+the rerun.
 
 ## Skipped on Windows (by design)
 
@@ -31,12 +35,14 @@ on the first push.
 
 | What | What it would check | Why it did not run | Command |
 | ---- | ------------------- | ------------------ | ------- |
-| macOS (x64, arm64) suite | Everything above on macOS, including UDP multicast for mDNS and the `.dylib` lookup | No macOS machine, no sudo | Push; or `cd hertzbench && deno lint && deno task check && deno task test` on a Mac |
+| macOS x64 suite | Everything above on Intel macOS | CI runs only `macos-latest` (arm64) | `cd hertzbench && deno lint && deno task check && deno task test` on an Intel Mac |
 | Linux arm64 suite | The suite on aarch64 | No aarch64 host | Same, on an arm64 Linux machine (CI: add `ubuntu-24.04-arm` to the matrix) |
 | Windows arm64 suite | The suite on Windows on ARM | No such VM | Same, on a Windows ARM machine |
 | Compiled binaries for macOS and Linux arm64 | `hertzbench-<target> run scenarios/examples/udp-3-scripted.yaml --quiet` prints `RESULT: PASS` | Cross-compiled but not run (no host). Linux x64 and Windows x64 binaries were run and passed | `deno task compile` then run the file on its system |
 | Release workflow | A `v*` tag builds six binaries and attaches them with `SHA256SUMS` | Needs a tag pushed to GitHub; the workflow was not run | `git tag v0.1.0 && git push origin v0.1.0` |
-| CI workflow | The matrix on GitHub runners | Not pushed | Open a PR touching `hertzbench/` |
 | Compiled Windows binary, BLE bridge refusal | `hertzbench.exe run scenarios/examples/bridge-ble-scripted.yaml` exits 2 with the BlueZ message | The refusal was added after the VM run | On Windows: `hertzbench-windows-x64.exe run bridge-ble-scripted.yaml` |
-| Real phone, LAN mDNS, BlueZ on a real adapter, ESP32 firmware under QEMU | See [mobile-bridge.md](mobile-bridge.md) and [e2e-esp32.md](e2e-esp32.md) | No phone, adapter or libqemu | See those files |
+| Real phone, LAN mDNS, BlueZ on a real adapter | See [mobile-bridge.md](mobile-bridge.md) | No phone or adapter | See that file |
 | Windows firewall prompt for the IP bridge on `0.0.0.0` | The bridge is reachable from a phone | VM has no LAN peer | `deno task lan run ...` on Windows |
+
+ESP32 firmware under QEMU **was run** on this host (see [e2e-esp32.md](e2e-esp32.md)): UDP, ESP-NOW
+(7/7), LoRa and BLE (6/6) pass on real firmware.
