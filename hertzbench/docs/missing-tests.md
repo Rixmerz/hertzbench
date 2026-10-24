@@ -10,9 +10,16 @@ and Python 3.12.8 (628 passed, 0 failed, 34 ignored). The CI matrix
 40083042461). **arm64 Linux and Windows were not run.**
 
 Known flaky: `browser: dragging a node ...` (`tests/view_browser_test.ts`) failed once and passed on
-the rerun. So did `runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics
-count both` (`tests/espnow_test.ts:445`) on macOS in the v0.1.0 release run (19 frames counted, 20
-expected); the rerun passed.
+the rerun.
+
+Fixed: `runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics count both`
+(`tests/espnow_test.ts`) counted 19 `espnow tx ok to b` lines against 20 ACKs on macOS in the v0.1.0
+release run. The scripted board's 10 ms ACK wait started at its own send, one loopback hop before
+the engine's clock, and the ACK needed another hop back, so on a busy runner the board gave up on
+ACKs the engine had counted. The board now waits the fork's 10 ms plus 30 ms for the hops
+(`ESPNOW_HOP_ALLOWANCE_MS`), and the test keeps its exact `ok == acked` check. A second test puts 7
+ms on the leg, which left 0 of 20 sends ok before the fix on an idle Linux machine. With every core
+busy, the old assertion failed 4 of 5 runs and the file now passes 29 of 30.
 
 ## Skipped on Windows (by design)
 

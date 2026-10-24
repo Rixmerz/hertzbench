@@ -72,7 +72,7 @@ bridge: {...}                # optional: a real phone reaches the boards (see be
 
   Ports are distinct, 1 to 65535. Serial lines: `tcp listening on <port> (<protocol>)`, `http <METHOD> <path> from <ip>`, `ws open <path> from <ip>`, `ws rx "<text>" from <ip>`, `ws closed from <ip>`, `mqtt connect <client id> from <ip>`, `mqtt subscribe <filter> from <client id>`, `mqtt publish <topic> "<payload>" from <client id>`.
 
-  Frames go one at a time, each waiting for its ACK or the fork's 10 ms timeout. The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.
+  Frames go one at a time, each waiting for its ACK or, if none comes, for the fork's 10 ms timeout plus a 30 ms allowance for the loopback hops (a failed send is logged about 40 ms after it). The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.
 
 ### BLE radios
 

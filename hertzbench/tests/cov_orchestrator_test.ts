@@ -3402,7 +3402,8 @@ Deno.test("scripted board: its servers listen once bound; ESP-NOW waits for each
       "tcp listening on 80 (http)",
       "tcp listening on 1883 (mqtt)",
     ]);
-    // Nobody ACKs: each unicast send fails after the fork's 10 ms wait, then the next goes.
+    // Nobody ACKs: each unicast send fails after the board's wait (10 ms plus its 30 ms hop
+    // allowance), then the next goes.
     for (let i = 0; i < 5; i++) rig.clock.advanceBy(20);
     await until(
       () => rig.serial.filter((l) => l.startsWith("espnow tx")).length === 3,

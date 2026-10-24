@@ -21,6 +21,8 @@ export interface EspNowForkModelOptions {
   /** The guest's Wi-Fi channel (esp32_wifi_channel). */
   channel: number;
   clock: Clock;
+  /** How long a unicast frame waits for its ACK. Defaults to the fork's 10 ms. */
+  ackTimeoutMs?: number;
   /** Put a frame on the netdev. */
   output(frame: Uint8Array): void;
   /** An action frame passed the receive filters and went into the guest's RX ring. */
@@ -60,7 +62,7 @@ export class EspNowForkModel {
       return;
     }
     this.#status = "nack";
-    this.#arm(clock.now() + ESPNOW_ACK_TIMEOUT_MS);
+    this.#arm(clock.now() + (this.#opts.ackTimeoutMs ?? ESPNOW_ACK_TIMEOUT_MS));
   }
 
   /** A frame arrived from the netdev. Anything that is not ESP-NOW is not this model's. */
