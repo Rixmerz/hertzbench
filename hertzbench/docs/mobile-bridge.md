@@ -86,6 +86,29 @@ The helper that talks to BlueZ is `bridge/ble/bluez_gatt.py`. It exports `/org/h
 
 The report prints the bridge's fidelity line next to the boards' ([fidelity.md](fidelity.md#mobile-bridge)).
 
+## Windows and macOS
+
+The BLE bridge (5b) needs BlueZ, which exists only on Linux. On Windows and macOS a scenario with
+`bridge: { kind: ble }` is refused before any board starts, with
+`the BLE bridge needs BlueZ, which only exists on Linux ...`; the run exits with status 2. Options:
+
+- **Run the BLE bridge on a Linux machine** (a laptop, or a Raspberry Pi with its built-in adapter)
+  and run the same scenario there. The simulation does not need to share a host with the phone.
+- **Windows: WSL2.** Install a distribution, attach a USB Bluetooth adapter to it with
+  [usbipd-win](https://github.com/dorssel/usbipd-win), start `bluetoothd` inside, and run the Linux
+  steps above in WSL2. The WSL2 kernel must include Bluetooth support (the default kernel does not;
+  a custom kernel is needed). This route has not been tried on this project.
+- **macOS: a Linux VM or machine** with a USB adapter passed through. CoreBluetooth has no
+  equivalent of BlueZ's GATT application API that the helper could use, so a native port would be a
+  new helper, not a change to this one.
+- **Use the IP bridge (5a)** with a Wi-Fi radio instead: it works on every system. For BLE
+  behaviour without a phone, use the scripted BLE scenarios, which need no adapter.
+
+The IP bridge's mDNS needs UDP port 5353 on the LAN. On Windows the firewall asks to allow the
+program the first time it listens beyond loopback; on macOS the system may ask too. If the port is
+held by a daemon that does not share it, the report says `mDNS not advertised: <why>` and the run
+goes on; the host address always works.
+
 ## Tests
 
 | What | How | File |

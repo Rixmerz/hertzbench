@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { computeMetrics, type EngineEvent } from "../engine/mod.ts";
 import {
@@ -16,7 +17,7 @@ import {
 } from "../orchestrator/mod.ts";
 import { simulateScenarioTraffic } from "./helpers.ts";
 
-const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 
 // ── assertions ──────────────────────────────────────────────────────────────
 

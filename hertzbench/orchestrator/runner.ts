@@ -3,6 +3,7 @@
 // outputs. Time zero is the moment every board's netdev has connected, so guest
 // boot time counts toward `duration`.
 
+import { dirname, join } from "node:path";
 import { QemuWifiL2Adapter } from "../adapters/qemu-wifi-l2/mod.ts";
 import {
   BRIDGE_FIDELITY,
@@ -166,8 +167,7 @@ export function expandLinkRule(rule: LinkRule, mediumIds: readonly string[]): [s
 }
 
 async function ensureParentDir(path: string): Promise<void> {
-  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  if (slash > 0) await Deno.mkdir(path.slice(0, slash), { recursive: true });
+  await Deno.mkdir(dirname(path), { recursive: true });
 }
 
 export async function runScenario(scenario: Scenario, options: RunOptions): Promise<RunResult> {
@@ -581,7 +581,7 @@ async function writeOutputs(
   );
   for (const [node, snoop] of network.hciCaptures ?? []) {
     if (snoop.packetCount > 0) {
-      await write(`${options.outDir}/hci-${node}.btsnoop`, snoop.toBytes());
+      await write(join(options.outDir, `hci-${node}.btsnoop`), snoop.toBytes());
     }
   }
   const serialByNode = new Map<string, string[]>();
@@ -592,7 +592,7 @@ async function writeOutputs(
     serialByNode.set(event.node, lines);
   }
   for (const [node, lines] of serialByNode) {
-    await write(`${options.outDir}/serial-${node}.log`, lines.join("\n") + "\n");
+    await write(join(options.outDir, `serial-${node}.log`), lines.join("\n") + "\n");
   }
   return files;
 }

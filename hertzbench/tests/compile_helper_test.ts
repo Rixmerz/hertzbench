@@ -2,13 +2,15 @@
 // short of a real build can be checked here: reading the sketch, failing
 // clearly and picking the compiler. A real build needs a toolchain (docs/e2e-esp32.md).
 
+import { PYTHON } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 
-const HELPER = new URL("../orchestrator/compile_sketch.py", import.meta.url).pathname;
-const EXAMPLE_SKETCH = new URL("../scenarios/examples/fw/udp-node", import.meta.url).pathname;
+const HELPER = fileURLToPath(new URL("../orchestrator/compile_sketch.py", import.meta.url));
+const EXAMPLE_SKETCH = fileURLToPath(new URL("../scenarios/examples/fw/udp-node", import.meta.url));
 
 async function python(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const output = await new Deno.Command("python3", {
+  const output = await new Deno.Command(PYTHON, {
     args,
     stdout: "piped",
     stderr: "piped",

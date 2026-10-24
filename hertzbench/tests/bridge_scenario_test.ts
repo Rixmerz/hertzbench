@@ -2,6 +2,7 @@
 // scripted Wi-Fi board: what is accepted, what defaults are filled in, and
 // what is refused with which message.
 
+import { fileURLToPath } from "node:url";
 import { assertEquals, assertThrows } from "@std/assert";
 import { BRIDGE_MAC, parseScenario, ScenarioError } from "../orchestrator/mod.ts";
 
@@ -244,7 +245,7 @@ bridge: { position: [1, 0] }
   );
 });
 
-const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 
 Deno.test("bridge: the four bridge examples are valid scenarios", async () => {
   const { loadScenario } = await import("../orchestrator/mod.ts");

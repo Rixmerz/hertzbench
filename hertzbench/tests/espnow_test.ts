@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+import { ackWindowTest } from "./platform.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   ACK_AIRTIME_US,
@@ -422,40 +424,45 @@ links:
 ${assertions}`;
 }
 
-Deno.test("runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics count both", async () => {
-  const { result, dot11 } = await runYaml(espnowPair(
-    0,
-    `assertions:
+ackWindowTest(
+  "runner: scripted ESP-NOW unicast is acknowledged, broadcast is heard, metrics count both",
+  async () => {
+    const { result, dot11 } = await runYaml(espnowPair(
+      0,
+      `assertions:
   - serial: { node: b, contains: "espnow rx hello:0 from a" }
   - serial: { node: a, contains: "espnow rx beacon:0 from b" }
   - metric: { link: "a->b", kind: espnow, sent: { eq: 20 }, acked_pct: { gt: 50 }, ack_rtt_p95_ms: { lt: 10 } }
 `,
-  ));
-  for (const a of result.assertions) assert(a.passed, `${a.description}: ${a.detail}`);
-  assertEquals(result.problems, []);
-  const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
-  assertEquals(link.espnow!.sends, 20);
-  // Wall clock: two timers and loopback TCP per round trip, so not every ACK is
-  // promised; the engine and the sender's model must agree on each one.
-  const ok = serial(result, "a").filter((t) => t === "espnow tx ok to b").length;
-  assertEquals(ok, link.espnow!.acked);
-  assertEquals(serial(result, "b").filter((t) => t.startsWith("espnow rx hello")).length, 20);
-  assertEquals(serial(result, "b").filter((t) => t === "espnow tx ok to broadcast").length, 5);
-  assert(!result.events.some((e) => e.type === "tx" && e.node === "a" && e.kind === "espnow-ack"));
+    ));
+    for (const a of result.assertions) assert(a.passed, `${a.description}: ${a.detail}`);
+    assertEquals(result.problems, []);
+    const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
+    assertEquals(link.espnow!.sends, 20);
+    // Wall clock: two timers and loopback TCP per round trip, so not every ACK is
+    // promised; the engine and the sender's model must agree on each one.
+    const ok = serial(result, "a").filter((t) => t === "espnow tx ok to b").length;
+    assertEquals(ok, link.espnow!.acked);
+    assertEquals(serial(result, "b").filter((t) => t.startsWith("espnow rx hello")).length, 20);
+    assertEquals(serial(result, "b").filter((t) => t === "espnow tx ok to broadcast").length, 5);
+    assert(
+      !result.events.some((e) => e.type === "tx" && e.node === "a" && e.kind === "espnow-ack"),
+    );
 
-  // Every ESP-NOW frame and ACK on the air is in the 802.11 capture, as radiotap.
-  assert(dot11, "an ESP-NOW run writes the 802.11 capture");
-  const view = new DataView(dot11.buffer);
-  assertEquals(view.getUint32(20, true), 127);
-  let records = 0;
-  for (let offset = 24; offset < dot11.length; records++) {
-    offset += 16 + view.getUint32(offset + 8, true);
-  }
-  const onAir = result.events.filter((e) =>
-    e.type === "tx" && (e.kind === "espnow" || e.kind === "espnow-ack")
-  );
-  assertEquals(records, onAir.length);
-});
+    // Every ESP-NOW frame and ACK on the air is in the 802.11 capture, as radiotap.
+    assert(dot11, "an ESP-NOW run writes the 802.11 capture");
+    const view = new DataView(dot11.buffer);
+    assertEquals(view.getUint32(20, true), 127);
+    let records = 0;
+    for (let offset = 24; offset < dot11.length; records++) {
+      offset += 16 + view.getUint32(offset + 8, true);
+    }
+    const onAir = result.events.filter((e) =>
+      e.type === "tx" && (e.kind === "espnow" || e.kind === "espnow-ack")
+    );
+    assertEquals(records, onAir.length);
+  },
+);
 
 Deno.test("runner: 15 ms more on the a->b leg fails every ESP-NOW send at the sender, and says why", async () => {
   const { result } = await runYaml(espnowPair(15));
@@ -473,7 +480,7 @@ Deno.test("runner: 15 ms more on the a->b leg fails every ESP-NOW send at the se
 
 // ── the example scenarios' geometry, judged by the engine alone ──────────────
 
-const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 
 for (
   const [file, sensorEveryMs] of [

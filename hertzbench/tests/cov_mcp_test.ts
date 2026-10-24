@@ -4,11 +4,14 @@
 // resources, concurrent calls, and what no tool may reach or run. A few
 // protocol branches no stdio client can reach are driven in process at the end.
 
+import { basename, join, sep } from "node:path";
+import { PATH_DELIMITER, skipOnWindows, writeFakePython } from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { EXAMPLES, type Json, McpClient, pollStatus, withServer } from "./mcp_client.ts";
 import { McpServer, PROTOCOL_VERSIONS, serveLines, ToolError } from "../mcp/protocol.ts";
 
-const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
+const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
 const DOCS = new URL("../docs/", import.meta.url);
 const LIVE = `${EXAMPLES}live-3-scripted.yaml`;
 
@@ -94,8 +97,8 @@ async function rawExchange(workspace: string, chunks: string[]): Promise<Json[]>
 }
 
 /**
- * A stand-in for the ESP32 worker: HERTZBENCH_PYTHON points at `body`, a
- * shell script, and QEMU_ESP32_LIB at an empty file so the library check
+ * A stand-in for the ESP32 worker: HERTZBENCH_PYTHON runs `body`, a Python
+ * program, and QEMU_ESP32_LIB at an empty file so the library check
  * passes. No QEMU runs.
  */
 async function withFakeEsp32(
@@ -105,11 +108,10 @@ async function withFakeEsp32(
   const fake = await Deno.makeTempDir({ prefix: "hzb-cov-fake-" });
   try {
     await Deno.writeFile(`${fake}/libqemu-xtensa.so`, new Uint8Array(0));
-    await Deno.writeTextFile(`${fake}/python`, `#!/bin/sh\n${body}\n`);
-    await Deno.chmod(`${fake}/python`, 0o755);
+    const python = await writeFakePython(fake, body);
     await test({
       QEMU_ESP32_LIB: `${fake}/libqemu-xtensa.so`,
-      HERTZBENCH_PYTHON: `${fake}/python`,
+      HERTZBENCH_PYTHON: python,
     });
   } finally {
     await Deno.remove(fake, { recursive: true });
@@ -579,7 +581,7 @@ Deno.test("cov mcp: after stop and after the end, the live tools refuse with the
     const second = await client.ok("run_scenario", { path: "quick.yaml", out: "runs/q" });
     assert(second.run_id !== stopped.run_id, "a new run replaces the stopped one");
     const done = await pollStatus(client, (s) => s.state === "finished", "the run to finish");
-    assertEquals(done.out_dir, `${workspace}/runs/q`);
+    assertEquals(done.out_dir, join(workspace, "runs", "q"));
     for (const [tool, args] of RUN_TOOLS) {
       assertStringIncludes(
         await refusal(client, tool, args),
@@ -594,9 +596,9 @@ Deno.test("cov mcp: after stop and after the end, the live tools refuse with the
 });
 
 // A worker that reads its config and never connects: the run stays starting.
-const NEVER_CONNECTS = "exec cat >/dev/null";
+const NEVER_CONNECTS = "import sys\nsys.stdin.buffer.read()\n";
 // A worker that dies at once: the run fails before time zero.
-const DIES = "echo 'fake worker: no QEMU here' >&2\nexit 3";
+const DIES = "import sys\nsys.stderr.write('fake worker: no QEMU here\\n')\nsys.exit(3)\n";
 
 const ESP32_PAIR = `name: esp32-pair
 duration: 60s
@@ -916,7 +918,7 @@ for (const phy of PHYS) {
         assertEquals(tuned.changes, { channel: 1, txPowerDbm: 10 });
         await client.ok("set_channel", { noise_figure_db: 6 });
         const air80211 = await client.ok("export_capture", { kind: "pcap-80211" });
-        assert(air80211.file.endsWith("/air-live-80211.pcap"), air80211.file);
+        assert(basename(air80211.file) === "air-live-80211.pcap", air80211.file);
       }
 
       const fault = await client.ok("inject_fault", {
@@ -955,7 +957,7 @@ for (const phy of PHYS) {
       );
 
       const air = await client.ok("export_capture", { kind: "pcap" });
-      assert(air.file.startsWith(`${workspace}/out/${phy.name}/`), air.file);
+      assert(air.file.startsWith(join(workspace, "out", phy.name) + sep), air.file);
       assertEquals((await Deno.stat(air.file)).size, air.bytes);
       assert(air.packets > 0, `${phy.name}: ${air.packets} packets`);
       assertStringIncludes(
@@ -972,7 +974,7 @@ for (const phy of PHYS) {
       );
       if (phy.name === "ble") {
         const hci = await client.ok("export_capture", { kind: "btsnoop", node: "gw" });
-        assert(hci.file.endsWith("/hci-gw-live.btsnoop"), hci.file);
+        assert(basename(hci.file) === "hci-gw-live.btsnoop", hci.file);
         assert(hci.packets > 0, "the central's HCI traffic");
       } else {
         assertStringIncludes(
@@ -1095,7 +1097,7 @@ Deno.test("cov mcp: edit_scenario refuses each malformed edit and leaves the fil
       node: { id: "c", board: "esp32", firmware: "./fw/c", position: [9, 9] },
     });
     assertEquals(added.missing_firmware.length, 1, "missing firmware is reported, not refused");
-    assertStringIncludes(added.missing_firmware[0], `${workspace}/fw/c`);
+    assertStringIncludes(added.missing_firmware[0], join(workspace, "fw", "c"));
   });
 });
 
@@ -1308,7 +1310,7 @@ Deno.test({
 
 Deno.test("cov mcp regression: a dangling symlink on the way to a write is refused as a way out", async () => {
   await withServer(async (client, workspace) => {
-    await Deno.symlink("/nonexistent/hertzbench-cov", `${workspace}/dangling`);
+    await Deno.symlink("/nonexistent/hertzbench-cov", `${workspace}/dangling`, { type: "file" });
     await client.ok("create_scenario", { path: "pair.yaml", yaml: PAIR });
     const cases: [string, Record<string, unknown>][] = [
       ["create_scenario", { path: "dangling/x.yaml", yaml: QUICK }],
@@ -1401,6 +1403,10 @@ Deno.test("cov mcp: no write leaves the workspace, by absolute path, by .. or th
   }
 });
 
+const stubTest = skipOnWindows(
+  "the stubs are POSIX shell scripts found through PATH; Windows would not run them, so the test would prove nothing",
+);
+
 // Programs an attacker would want a tool to start: shells, interpreters,
 // build tools, browsers. Each stub leaves a canary file if anything runs it.
 const STUBS = [
@@ -1425,7 +1431,7 @@ const STUBS = [
   "env",
 ];
 
-Deno.test("cov mcp: no tool starts a host program, whatever its arguments say", async () => {
+stubTest("cov mcp: no tool starts a host program, whatever its arguments say", async () => {
   const bin = await Deno.makeTempDir({ prefix: "hzb-cov-bin-" });
   const canary = await Deno.makeTempDir({ prefix: "hzb-cov-canary-" });
   try {
@@ -1433,7 +1439,10 @@ Deno.test("cov mcp: no tool starts a host program, whatever its arguments say", 
       await Deno.writeTextFile(`${bin}/${name}`, `#!/bin/sh\n: > "${canary}/${name}"\n`);
       await Deno.chmod(`${bin}/${name}`, 0o755);
     }
-    const env = { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}`, BROWSER: `${bin}/firefox` };
+    const env = {
+      PATH: `${bin}${PATH_DELIMITER}${Deno.env.get("PATH") ?? ""}`,
+      BROWSER: `${bin}/firefox`,
+    };
     await withServer(async (client, workspace) => {
       const hostile = "$(touch pwned);`touch pwned2`|sh -c 'touch pwned3'&&rm -rf ~";
       const listed = (await client.request("tools/list")).result!.tools as Json[];
@@ -1481,29 +1490,32 @@ Deno.test("cov mcp: no tool starts a host program, whatever its arguments say", 
 // starts. The one it starts is the ESP32 worker, through the interpreter the
 // person running the server chose (HERTZBENCH_PYTHON, else python3 on PATH),
 // never one a tool argument names.
-Deno.test("cov mcp: the stub PATH catches the one program a run starts, the operator's ESP32 worker", async () => {
-  const bin = await Deno.makeTempDir({ prefix: "hzb-cov-bin-" });
-  const canary = await Deno.makeTempDir({ prefix: "hzb-cov-canary-" });
-  try {
-    await Deno.writeFile(`${bin}/libqemu-xtensa.so`, new Uint8Array(0));
-    await Deno.writeTextFile(`${bin}/python3`, `#!/bin/sh\n: > "${canary}/python3"\nexit 3\n`);
-    await Deno.chmod(`${bin}/python3`, 0o755);
-    const env = {
-      PATH: `${bin}:${Deno.env.get("PATH") ?? ""}`,
-      QEMU_ESP32_LIB: `${bin}/libqemu-xtensa.so`,
-    };
-    await withServer(async (client, workspace) => {
-      await Deno.writeFile(`${workspace}/fw.bin`, new Uint8Array(16));
-      await client.ok("create_scenario", { path: "esp.yaml", yaml: ESP32_PAIR });
-      await client.ok("run_scenario", { path: "esp.yaml" });
-      await pollStatus(client, (s) => s.state === "failed", "the stub worker to fail the run");
-    }, env);
-    assertEquals(await listDir(canary), ["python3"]);
-  } finally {
-    await Deno.remove(bin, { recursive: true });
-    await Deno.remove(canary, { recursive: true });
-  }
-});
+stubTest(
+  "cov mcp: the stub PATH catches the one program a run starts, the operator's ESP32 worker",
+  async () => {
+    const bin = await Deno.makeTempDir({ prefix: "hzb-cov-bin-" });
+    const canary = await Deno.makeTempDir({ prefix: "hzb-cov-canary-" });
+    try {
+      await Deno.writeFile(`${bin}/libqemu-xtensa.so`, new Uint8Array(0));
+      await Deno.writeTextFile(`${bin}/python3`, `#!/bin/sh\n: > "${canary}/python3"\nexit 3\n`);
+      await Deno.chmod(`${bin}/python3`, 0o755);
+      const env = {
+        PATH: `${bin}${PATH_DELIMITER}${Deno.env.get("PATH") ?? ""}`,
+        QEMU_ESP32_LIB: `${bin}/libqemu-xtensa.so`,
+      };
+      await withServer(async (client, workspace) => {
+        await Deno.writeFile(`${workspace}/fw.bin`, new Uint8Array(16));
+        await client.ok("create_scenario", { path: "esp.yaml", yaml: ESP32_PAIR });
+        await client.ok("run_scenario", { path: "esp.yaml" });
+        await pollStatus(client, (s) => s.state === "failed", "the stub worker to fail the run");
+      }, env);
+      assertEquals(await listDir(canary), ["python3"]);
+    } finally {
+      await Deno.remove(bin, { recursive: true });
+      await Deno.remove(canary, { recursive: true });
+    }
+  },
+);
 
 // ---------------------------------------------------------------- concurrency
 

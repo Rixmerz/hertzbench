@@ -1,10 +1,19 @@
 // The real entrypoint: `hertzbench` as a separate process, the way a person or
 // CI runs it. Nothing here imports the orchestrator.
 
+import {
+  ackWindowTest,
+  commandExists,
+  forward,
+  IS_WINDOWS,
+  signalTest,
+  writeFakePython,
+} from "./platform.ts";
+import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 
-const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
-const EXAMPLES = new URL("../scenarios/examples/", import.meta.url).pathname;
+const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
+const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
 
 interface Outcome {
   code: number;
@@ -84,27 +93,30 @@ Deno.test("run: the scripted example passes end to end and writes metrics.json a
   });
 });
 
-Deno.test("run: the scripted ESP-NOW mesh passes end to end and writes an 802.11 capture", async () => {
-  await inTempDir(async (dir) => {
-    const run = await hertzbench(["run", `${EXAMPLES}espnow-mesh-scripted.yaml`, "--out", dir]);
-    assertEquals(run.code, 0, run.stdout + run.stderr);
-    assertStringIncludes(run.stdout, "RESULT: PASS");
-    assertStringIncludes(run.stdout, "esp-now: F1");
-    assertStringIncludes(run.stdout, "ESP-NOW unicast sends");
+ackWindowTest(
+  "run: the scripted ESP-NOW mesh passes end to end and writes an 802.11 capture",
+  async () => {
+    await inTempDir(async (dir) => {
+      const run = await hertzbench(["run", `${EXAMPLES}espnow-mesh-scripted.yaml`, "--out", dir]);
+      assertEquals(run.code, 0, run.stdout + run.stderr);
+      assertStringIncludes(run.stdout, "RESULT: PASS");
+      assertStringIncludes(run.stdout, "esp-now: F1");
+      assertStringIncludes(run.stdout, "ESP-NOW unicast sends");
 
-    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/metrics.json`));
-    assertEquals(metrics.passed, true);
-    assert(metrics.fidelity.some((f: { protocol?: string }) => f.protocol === "esp-now"));
-    const s1 = metrics.links.find((l: { from: string; to: string }) =>
-      l.from === "sensor-1" && l.to === "gw"
-    );
-    assertEquals(s1.espnow.sends, 55);
+      const metrics = JSON.parse(await Deno.readTextFile(`${dir}/metrics.json`));
+      assertEquals(metrics.passed, true);
+      assert(metrics.fidelity.some((f: { protocol?: string }) => f.protocol === "esp-now"));
+      const s1 = metrics.links.find((l: { from: string; to: string }) =>
+        l.from === "sensor-1" && l.to === "gw"
+      );
+      assertEquals(s1.espnow.sends, 55);
 
-    const dot11 = await Deno.readFile(`${dir}/air-80211.pcap`);
-    assertEquals(new DataView(dot11.buffer).getUint32(20, true), 127);
-    assertStringIncludes(await Deno.readTextFile(`${dir}/serial-gw.log`), "from sensor-4");
-  });
-});
+      const dot11 = await Deno.readFile(`${dir}/air-80211.pcap`);
+      assertEquals(new DataView(dot11.buffer).getUint32(20, true), 127);
+      assertStringIncludes(await Deno.readTextFile(`${dir}/serial-gw.log`), "from sensor-4");
+    });
+  },
+);
 
 Deno.test("run: a failed assertion exits 1 and says which", async () => {
   await inTempDir(async (dir) => {
@@ -170,7 +182,7 @@ Deno.test("validate: accepts the scripted BLE example, and names the firmware th
   // The scenario itself is valid: the only complaint is the image docs/e2e-esp32.md says to build.
   assertEquals(esp32.code, 2, esp32.stdout + esp32.stderr);
   assertStringIncludes(esp32.stderr, "firmware not found");
-  assertStringIncludes(esp32.stderr, "fw/ble-sensor/build/ble-sensor-flash.bin");
+  assertStringIncludes(forward(esp32.stderr), "fw/ble-sensor/build/ble-sensor-flash.bin");
   assertEquals(esp32.stderr.split("does not exist").length - 1, 3, esp32.stderr);
 });
 
@@ -238,8 +250,9 @@ Deno.test("run: the BLE example connects three sensors, loses the one that walks
       assertEquals(new DataView(snoop.buffer).getUint32(12), 1002, "H4 datalink");
     }
     // BlueZ's own decoder reads the HCI the hosts and controllers exchanged.
-    const btmon = await new Deno.Command("btmon", { args: ["-r", `${dir}/hci-gw.btsnoop`] })
-      .output().catch(() => null);
+    const btmon = await commandExists("btmon", ["--version"])
+      ? await new Deno.Command("btmon", { args: ["-r", `${dir}/hci-gw.btsnoop`] }).output()
+      : null;
     if (btmon) {
       const text = new TextDecoder().decode(btmon.stdout);
       assertStringIncludes(text, "LE Connection Complete");
@@ -375,7 +388,7 @@ Deno.test("usage: no arguments and --help print usage; an unknown command exits 
   assertEquals(noFile.code, 2);
 });
 
-Deno.test("SIGINT: the CLI stops the run, exits 130 and writes no results", async () => {
+signalTest("SIGINT: the CLI stops the run, exits 130 and writes no results", async () => {
   await inTempDir(async (dir) => {
     await Deno.writeTextFile(`${dir}/long.yaml`, SHORT.replace("duration: 1s", "duration: 10m"));
     const child = new Deno.Command(Deno.execPath(), {
@@ -513,10 +526,8 @@ Deno.test("run: an ESP32 BLE board relays its HCI UART through the worker's uart
   await inTempDir(async (dir) => {
     await Deno.writeFile(`${dir}/libqemu-xtensa.so`, new Uint8Array(0));
     await Deno.writeFile(`${dir}/fw.bin`, new Uint8Array(16));
-    await Deno.writeTextFile(`${dir}/fake_worker.py`, FAKE_HCI_WORKER);
     // HERTZBENCH_PYTHON runs the worker script; this one ignores it and runs the fake.
-    await Deno.writeTextFile(`${dir}/python`, `#!/bin/sh\nexec python3 ${dir}/fake_worker.py\n`);
-    await Deno.chmod(`${dir}/python`, 0o755);
+    const python = await writeFakePython(dir, FAKE_HCI_WORKER);
     await Deno.writeTextFile(
       `${dir}/ble.yaml`,
       `name: relay\nduration: 2s\nnodes:\n` +
@@ -527,7 +538,7 @@ Deno.test("run: an ESP32 BLE board relays its HCI UART through the worker's uart
     );
     const run = await hertzbench(["run", `${dir}/ble.yaml`, "--out", `${dir}/out`], {
       QEMU_ESP32_LIB: `${dir}/libqemu-xtensa.so`,
-      HERTZBENCH_PYTHON: `${dir}/python`,
+      HERTZBENCH_PYTHON: python,
     });
     assertEquals(run.code, 0, run.stdout + run.stderr);
     assertStringIncludes(run.stdout, "F3 for BLE");
@@ -596,14 +607,14 @@ Deno.test("installed as real commands: hertzbench and hzb run from any directory
           "--allow-run",
           "--allow-env",
           "--config",
-          new URL("../deno.json", import.meta.url).pathname,
+          fileURLToPath(new URL("../deno.json", import.meta.url)),
           MAIN,
         ],
         stdout: "null",
         stderr: "piped",
       }).output();
       assertEquals(install.code, 0, new TextDecoder().decode(install.stderr));
-      const out = await new Deno.Command(`${dir}/bin/${name}`, {
+      const out = await new Deno.Command(`${dir}/bin/${name}${IS_WINDOWS ? ".cmd" : ""}`, {
         args: ["validate", `${EXAMPLES}udp-3-scripted.yaml`],
         cwd: dir,
         stdout: "piped",

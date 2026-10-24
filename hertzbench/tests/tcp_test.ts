@@ -1,6 +1,7 @@
 // The engine's small TCP (engine/tcp.ts): segments a real stack accepts, and
 // connections that survive the channel model's loss by retransmitting.
 
+import { PYTHON } from "./platform.ts";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   buildArp,
@@ -53,7 +54,7 @@ print(csum(zeroed_ip) == int.from_bytes(ip[10:12], "big"),
       csum(pseudo + zeroed_tcp) == int.from_bytes(tcp[16:18], "big"))
 `;
   const hex = Array.from(frame, (b) => b.toString(16).padStart(2, "0")).join("");
-  const out = await new Deno.Command("python3", { args: ["-I", "-c", script, hex] }).output();
+  const out = await new Deno.Command(PYTHON, { args: ["-I", "-c", script, hex] }).output();
   assertEquals(new TextDecoder().decode(out.stdout).trim(), "True True");
 
   const ip = parseIpv4(frame);

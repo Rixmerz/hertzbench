@@ -3,10 +3,11 @@
 // `hertzbench view` and the engine must see the move. Skipped when no Chromium
 // is installed; set HERTZBENCH_CHROMIUM to point at one.
 
+import { fileURLToPath } from "node:url";
 import { assert, assertAlmostEquals, assertEquals } from "@std/assert";
 
-const MAIN = new URL("../cli/main.ts", import.meta.url).pathname;
-const LIVE = new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url).pathname;
+const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
+const LIVE = fileURLToPath(new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url));
 
 function findChromium(): string | null {
   const candidates = [
