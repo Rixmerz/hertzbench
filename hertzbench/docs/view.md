@@ -65,9 +65,13 @@ QEMU_ESP32_LIB=/path/to/libqemu-xtensa.so \
   deno task hertzbench view scenarios/examples/udp-3-nodes.yaml --out /tmp/hzb-view
 ```
 
-ESP32 nodes are drawn with Velxio's ESP32 DevKit drawing. This was **not run** with real firmware:
-the host it was built on has no libqemu and no Docker, so the view is tested with scripted boards
-only. A scripted board is a traffic generator, not firmware; the page says so under the link table.
+ESP32 nodes are drawn with Velxio's ESP32 DevKit drawing. On real firmware (2026-10-24, Linux
+x86_64, the libqemu of [e2e-esp32.md](e2e-esp32.md)) `udp-3-nodes.yaml`, `espnow-mesh-5-nodes.yaml`,
+`lora-gateway-6-nodes.yaml` and `ble-sensors-3-nodes.yaml` ran in the view and passed their
+assertions, with the map, the link table and the timeline drawn; the screenshots on the
+[landing page](https://rixmerz.github.io/hertzbench/) come from those runs. Dragging a node was tested
+with scripted boards only. A scripted board is a traffic generator, not firmware; the page says so
+under the link table.
 
 ## What the colors mean
 

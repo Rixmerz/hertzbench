@@ -59,7 +59,7 @@
             <source srcset="img/hero-dark.png" media="(prefers-color-scheme: dark)" width="1440"
               height="1375">
             <img src="img/hero-light.png" width="1440" height="1375" fetchpriority="high"
-              alt="The live view of a finished run: a map with a gateway and four sensors in a row, a wall between the third and the fourth, each link labelled with its signal in dBm, a table of every link with RSSI and SNR, and a packet timeline with a row per link.">
+              alt="The live view of a finished run: a map with a gateway and four sensors in a row, a wall between sensor-2 and sensor-3, each link labelled with its signal in dBm, a table of every link with RSSI and SNR, and a packet timeline with a row per link.">
           </picture>
           <figcaption>A real screenshot of <code>hertzbench view</code>: five ESP32 boards running real
             ESP-NOW firmware under QEMU, 60 s, one sensor walking away at 30 s. Run on 2026-10-24.</figcaption>
@@ -126,7 +126,7 @@
           <li>
             <div
               class="row-head"><h3><a href="#view">Live view</a></h3><span class="chip" data-kind="pass">Tested</span></div>
-            <p>A map in the browser: links colored by signal or loss, drag a node to move it, a packet timeline.</p>
+            <p>A map in the browser: links colored by signal or loss, drag a node to move it, a packet timeline. ESP32 runs pass in it.</p>
           </li>
           <li>
             <div
@@ -135,8 +135,8 @@
           </li>
           <li>
             <div
-              class="row-head"><h3><a href="#download">Release binaries</a></h3><span class="chip" data-kind="part">None published</span></div>
-            <p>One file for Windows, macOS or Linux, x64 or arm64, built by the release workflow on a <code>v*</code> tag.</p>
+              class="row-head"><h3><a href="#download">Release binaries</a></h3><span class="chip" data-kind="pass">v0.1.0 published</span></div>
+            <p>One file for Windows, macOS or Linux, x64 or arm64, with <code>SHA256SUMS</code>, built by the release workflow on a <code>v*</code> tag.</p>
           </li>
         </ul>
       </section>
@@ -852,12 +852,12 @@ Resources
             <figure class="frame">
               <div class="frame-bar">
                 <span
-                  class="frame-cmd">hertzbench run udp-3-scripted.yaml --out /tmp/hzb608-udp</span>
+                  class="frame-cmd">hertzbench run udp-3-scripted.yaml --out /tmp/hzb-out</span>
                 <span class="frame-tag">PASS, scripted</span>
               </div>
               <pre tabindex="0" role="region" aria-label="Run result and files"><code>Assertions
-  PASS  serial a contains "dhcp bound ip=192.168.4.11" within 1000 ms  (seen at 7.689 ms)
-  PASS  serial c contains "rx pong" within 2000 ms  (seen at 20.293 ms)
+  PASS  serial a contains "dhcp bound ip=192.168.4.11" within 1000 ms  (seen at 8.823 ms)
+  PASS  serial c contains "rx pong" within 2000 ms  (seen at 20.041 ms)
   PASS  metric *-&gt;* (phase start, udp frames): loss_pct lt 5, latency_p95_ms lt 2  (6 link(s) satisfy it)
   PASS  metric c-&gt;a (phase behind-wall, udp frames): loss_pct gt 20, latency_p95_ms gt 4  (1 link(s) satisfy it)
   PASS  metric c-&gt;b (phase behind-wall, udp frames): loss_pct lt 10  (1 link(s) satisfy it)
@@ -865,12 +865,12 @@ Resources
 RESULT: PASS
 
 Files
-  /tmp/hzb608-udp/metrics.json
-  /tmp/hzb608-udp/air.pcap
-  /tmp/hzb608-udp/events.jsonl
-  /tmp/hzb608-udp/serial-a.log
-  /tmp/hzb608-udp/serial-b.log
-  /tmp/hzb608-udp/serial-c.log</code></pre>
+  /tmp/hzb-out/metrics.json
+  /tmp/hzb-out/air.pcap
+  /tmp/hzb-out/events.jsonl
+  /tmp/hzb-out/serial-a.log
+  /tmp/hzb-out/serial-b.log
+  /tmp/hzb-out/serial-c.log</code></pre>
             </figure>
           </div>
         </article>
@@ -882,32 +882,32 @@ Files
         <p
           class="note">A release is one file per system, with nothing else to install, and a
           <code>SHA256SUMS</code> to check it. The release workflow builds all six on every
-          <code>v*</code> tag, once the tests pass on Linux, macOS and Windows. <strong>No tag has been
-          pushed yet, so no binary is published</strong>: until then, run from source (see
-          <a href="#install">Install</a>). This section asks the GitHub API for the latest release once,
-          when the page loads.</p>
+          <code>v*</code> tag, once the tests pass on Linux, macOS and Windows.
+          <strong>v0.1.0 is published</strong> (2026-10-24). The example scenarios are read from disk,
+          so run the binary from a checkout of the repository. The binaries are not signed: on macOS,
+          the first run of a download needs <code>xattr -d com.apple.quarantine</code>. This section
+          asks the GitHub API for the latest release once, when the page loads.</p>
         <figure class="frame">
           <div class="frame-bar">
-            <span class="frame-cmd">deno task compile linux-x64</span>
-            <span class="frame-tag">built locally</span>
+            <span class="frame-cmd">gh release download v0.1.0</span>
+            <span class="frame-tag">published binary</span>
           </div>
           <pre tabindex="0" role="region"
-            aria-label="A locally built binary"><code>$ deno task compile linux-x64
-$ deno task compile --list
-linux-x64
-linux-arm64
-macos-x64
-macos-arm64
-windows-x64
-windows-arm64
-$ ./dist/hertzbench-linux-x64 run scenarios/examples/udp-3-scripted.yaml --quiet --out /tmp/hzb608/bin
+            aria-label="The published Linux binary, checked and run"><code>$ gh release download v0.1.0 --repo Rixmerz/hertzbench \
+    --pattern hertzbench-linux-x64 --pattern SHA256SUMS
+$ sha256sum -c --ignore-missing SHA256SUMS
+hertzbench-linux-x64: OK
+$ chmod +x hertzbench-linux-x64
+$ cd hertzbench/hertzbench    # a checkout: the examples are read from disk
+$ ./hertzbench-linux-x64 run scenarios/examples/udp-3-scripted.yaml --quiet --out /tmp/hzb-out
 RESULT: PASS</code></pre>
-          <figcaption>The same build the workflow runs, done by hand on Linux x86_64 on 2026-10-24
-            (106 MB).</figcaption>
+          <figcaption>The Linux x64 file of the v0.1.0 release (107 MB), downloaded, checked and run on
+            Linux x86_64 on 2026-10-24. The macOS and Windows files were built by the same workflow;
+            they were not run for this page.</figcaption>
         </figure>
         <p id="release-status" class="release-status" role="status" aria-live="polite"
           data-state="idle">
-          Open the releases page to see what is published.</p>
+          v0.1.0 is published. Open the releases page to see every file.</p>
         <ul id="downloads" class="builds" aria-label="Builds by system" data-os="" data-arch="">
           <li data-key="windows-x64"><span class="build-name">Windows, x64</span>
             <span class="build-action"><a href="https://github.com/Rixmerz/hertzbench/releases">Releases page</a></span></li>
@@ -929,7 +929,9 @@ RESULT: PASS</code></pre>
         <p class="kicker">Install</p>
         <h2 id="install-title">Install and first run.</h2>
         <p
-          class="note">These commands run Hertzbench from source with <a href="https://deno.com">Deno</a> 2.x
+          class="note">With a release binary, put it in <code>hertzbench/hertzbench</code> of a clone and
+          replace <code>deno task hertzbench</code> below with <code>./hertzbench-linux-x64</code> (or the
+          file for your system); nothing else is needed. These commands run Hertzbench from source with <a href="https://deno.com">Deno</a> 2.x
           (<a href="https://docs.deno.com/runtime/getting_started/installation/">other ways to install
           Deno</a>). They use scripted boards, so no QEMU is needed. The run lasts 6 s of engine time, prints
           per-link RSSI, loss and latency, and writes <code>metrics.json</code>, <code>air.pcap</code> and
@@ -1033,7 +1035,9 @@ claude mcp add hertzbench -- hertzbench mcp --workspace C:\path\to\your\project<
             <div
               class="row-head"><h3>Live view</h3><span class="chip" data-kind="pass">Tested</span></div>
             <p>Tested over HTTP and in headless Chromium, dragging a node with real mouse events, with
-              scripted boards. The ESP32 screenshots on this page come from <code>hertzbench view</code>.</p>
+              scripted boards. On real firmware (2026-10-24) the UDP, ESP-NOW, LoRa and BLE scenarios pass
+              in the view; the ESP32 screenshots on this page come from those runs. Dragging an ESP32 node
+              has not been tried.</p>
           </li>
           <li>
             <div
@@ -1049,9 +1053,10 @@ claude mcp add hertzbench -- hertzbench mcp --workspace C:\path\to\your\project<
           </li>
           <li>
             <div
-              class="row-head"><h3>Release binaries</h3><span class="chip" data-kind="part">Partly</span></div>
-            <p>The workflow and the six targets are in place, and a Linux x64 binary built by hand runs a
-              scenario. No <code>v*</code> tag has been pushed, so nothing is published yet.</p>
+              class="row-head"><h3>Release binaries</h3><span class="chip" data-kind="pass">Published</span></div>
+            <p>v0.1.0 has six binaries and <code>SHA256SUMS</code>, built after the tests passed on Linux,
+              macOS and Windows. The Linux x64 file was downloaded, checked and run for this page; the
+              others were not run here.</p>
           </li>
           <li>
             <div
