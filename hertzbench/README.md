@@ -21,6 +21,12 @@ interface, **Phase 4**, ESP-NOW between the boards, **Phase 5**, a mobile bridge
 phone reach a simulated board over Wi-Fi/IP or BLE, **Phase 6**, BLE between the boards through a
 virtual controller on an HCI UART, and **Phase 7**, an optional live view in the browser.
 
+Velxio emulates one circuit: a board's CPU, its components and the wires between its pins.
+Hertzbench keeps that and adds the air between boards: N boards, each at a position in metres,
+talking over simulated radio links. The only Velxio file it patches is `esp32_worker.py`. MCP,
+ESP-NOW, BLE, the mobile bridge and the view touch no Velxio file
+([docs/upstream-sync.md](docs/upstream-sync.md)).
+
 ## Quick start
 
 Hertzbench is one binary per system, with nothing else to install. Download the file for your system
@@ -57,6 +63,17 @@ serves until Ctrl-C, and its scenario runs for two minutes.
 | BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and with scripted hosts; `ble-sensors-3-nodes.yaml` **passes on real firmware** (Bluedroid host-only, ESP-IDF v5.3.6), see [BLE](#ble)                                                                                                                                                                         |
 | Mobile bridge (Phase 5): IP proxy with mDNS (5a), BlueZ GATT mirror (5b), the phone as a node          | done, tested with scripted boards and stand-ins; **on real firmware** the IP bridge serves the ESP32's `WebServer` to the host's `curl` and BlueZ advertises the firmware's GATT on `hci0`; **no phone or LAN mDNS from another host used**, see [Mobile bridge](#mobile-bridge)                                                              |
 
+## Limits
+
+- **No contention on Wi-Fi/IP or ESP-NOW.** Each link is simulated alone: there are no collisions,
+  carrier-sense contention, hidden nodes or capture effect between stations.
+- **No BLE and Wi-Fi interference.** A scenario runs one PHY, so the interference between the two is
+  not modelled.
+- **Latency is modelled, not measured.** ESP32 boards run on wall-clock time, so the delay of each
+  frame comes from the engine, not from a guest clock.
+
+[docs/fidelity.md](docs/fidelity.md) has the full list.
+
 ## Install
 
 Hertzbench runs on Linux, macOS and Windows, on x64 and arm64. The CI runs lint, type check and the
@@ -64,7 +81,8 @@ test suite on all three systems (`.github/workflows/hertzbench-ci.yml`). There a
 it.
 
 **A release binary** (nothing else to install). Download the file for your system from the GitHub
-Release of a `v*` tag, together with `SHA256SUMS`, and check it:
+Release of a `v*` tag, together with `SHA256SUMS`, and check it. `v0.1.0` is published (2026-10-24)
+with all six binaries and `SHA256SUMS`:
 
 | System  | x64                          | arm64                          |
 | ------- | ---------------------------- | ------------------------------ |
@@ -129,7 +147,8 @@ deno task hertzbench run scenarios/examples/udp-3-scripted.yaml --out /tmp/hzb-o
 It runs three **scripted** boards (a traffic generator, not firmware) for 6 s. Board `c` walks
 behind a wall at 2.5 s; the report shows its links to `a` slowing down and losing frames while the
 link to `b` holds. It prints per-link RSSI, loss and latency, a pass or fail per assertion, and
-writes `metrics.json`, `air.pcap` (open it in Wireshark) and `events.jsonl` to `/tmp/hzb-out`.
+writes `metrics.json`, `air.pcap` (open it in Wireshark), `events.jsonl` and a serial log per board
+to `/tmp/hzb-out`.
 
 Excerpt from one run, with the phase tables left out:
 
@@ -175,6 +194,33 @@ To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin d
 `hzb` is the short alias. Exit status: 0 passed, 1 an assertion failed, 2 invalid scenario or a host
 that cannot run it, 130 interrupted (boards are stopped first).
 
+## Scenario files
+
+One YAML file declares an experiment: the environment and its walls, the nodes and their radios,
+per-link overrides, a timeline of moves and faults, the assertions and an optional mobile bridge.
+
+- **Boards.** 2 to 10 per scenario. An `esp32` runs real firmware, from a sketch directory or a
+  `.bin`; a `scripted` board is a traffic generator and needs only Deno. An ESP32's station MAC is
+  `02:68:7a:62:01:NN`, NN being its place in the file, and its address is `.11`, `.12`, and so on.
+  `count: 4` with a `grid` position expands one entry into four boards. The ESP32-C3 and S3 are
+  refused for Wi-Fi, and the error says why.
+- **Errors name the field.** Unknown fields are errors, durations need a unit, and every error names
+  where it is. Three invalid files give:
+
+```
+hertzbench: scenario.colour: unknown field (allowed: name, seed, duration, environment, network, nodes, links, timeline, assertions, outputs, bridge)
+hertzbench: duration: expected a duration with a unit, like "500ms", "60s" or "2m"
+hertzbench: nodes[0].board: esp32c3 cannot do Wi-Fi networking in Phase 1: the C3 asserts in eFuse reload when a NIC is attached and the S3 machine models no radio. Use esp32.
+```
+
+- **Presets.** `environment.preset` is `indoor_office` unless set. The others are `free_space`,
+  `urban` and `rural`; see [docs/fidelity.md](docs/fidelity.md) for their numbers.
+- **Randomness.** Each frame draws from its own stream, keyed by the seed, the frame kind, the link
+  and the frame's number on that link. The same seed gives the same outcome, and one link's draws do
+  not shift another's.
+- **Internet access.** One ESP32 may keep SLIRP for the internet with `internet_gateway: true`. It
+  is off the medium, so it cannot reach the other boards, and at most one board may have it.
+
 ## ESP-NOW
 
 ```bash
@@ -205,6 +251,99 @@ deno task hertzbench run scenarios/examples/espnow-mesh-5-nodes.yaml --out /tmp/
 The numbers of each run are in [docs/e2e-esp32.md](docs/e2e-esp32.md#the-esp-now-example). What the
 engine models, the 10 ms ACK rule, and what is read from the fork's code rather than measured are in
 [docs/fidelity.md](docs/fidelity.md#esp-now).
+
+## LoRa
+
+The SX127x is modelled at its SPI register interface, so arduino-LoRa runs on an SX1276 model with
+the same firmware binary (F1). A gateway and six nodes sit 300 m apart, out to 1.8 km, at SF7 BW125
+on 868.1 MHz, so the link budget runs out along the line. LoRa, nRF24 and BLE share a chip-level air
+where overlapping packets can collide.
+
+```bash
+cd hertzbench
+deno task hertzbench run scenarios/examples/lora-gateway-6-scripted.yaml --out /tmp/hzb-lora
+```
+
+That is the scripted version, which runs on any host. Its report, seed 7:
+
+```
+link        sent  delivered  loss    p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+----------  ----  ---------  ------  ------  ------  ------  --------  ------  --------
+node-1->gw  6     6          0.0%    56.58   56.58   56.58   -103.9    13.1    1.00
+node-2->gw  6     6          0.0%    56.58   56.58   56.58   -114.5    2.6     1.00
+node-3->gw  6     6          0.0%    56.58   56.58   56.58   -120.6    -3.6    1.00
+node-4->gw  6     4          33.3%   56.58   56.58   56.58   -125.0    -8.0    1.00
+node-5->gw  6     0          100.0%  -       -       -       -128.4    -11.4   1.00
+node-6->gw  6     0          100.0%  -       -       -       -131.2    -14.1   1.00
+
+RESULT: PASS
+```
+
+`scenarios/examples/lora-gateway-6-nodes.yaml` is the same layout on ESP32 boards with real
+firmware, and it passes on real firmware (see [Status](#status)). It needs libqemu, see
+[docs/e2e-esp32.md](docs/e2e-esp32.md).
+
+![The map of the live view with a LoRa gateway and six nodes in a line, 300 m apart, each link drawn in a color for its signal.](../site/img/lora-light.png)
+
+_Live view of `lora-gateway-6-nodes.yaml` on real firmware: six ESP32 boards with SX1276 radios._
+
+## nRF24L01+
+
+The chip model is done and tested at its SPI command interface. No example runs it on an ESP32 board
+yet, so this scenario uses scripted hosts: one node 5 m from the gateway and one 400 m away. It is
+the scenario in `hertzbench/tests/cli_test.ts`; save it as `nrf24.yaml` to run it:
+
+```yaml
+name: nrf24-scripted
+seed: 5
+duration: 2s
+environment: { preset: indoor_office, shadowing_sigma_db: 0 }
+nodes:
+  - { id: gw, board: scripted, position: [0, 0], radios: [{ phy: nrf24 }], firmware: {} }
+  - id: near
+    board: scripted
+    position: [5, 0]
+    radios: [{ phy: nrf24 }]
+    firmware: { send: [{ to: gw, every: 200ms, count: 5, payload: t }] }
+  - id: far
+    board: scripted
+    position: [400, 0]
+    radios: [{ phy: nrf24 }]
+    firmware: { send: [{ to: gw, every: 200ms, count: 5, start: 100ms, payload: t }] }
+assertions:
+  - serial: { node: near, contains: "tx t:0 from near ok" }
+  - serial: { node: gw, contains: 'rx "t:4 from near" pipe=1' }
+  - serial: { node: far, contains: "tx t:0 from far failed" }
+  - metric: { link: "near->gw", kind: nrf24, loss_pct: { eq: 0 }, sent: { eq: 5 } }
+  - metric: { link: "gw->near", kind: nrf24-ack, loss_pct: { eq: 0 } }
+  - metric: { link: "far->gw", kind: nrf24, loss_pct: { eq: 100 }, sent: { eq: 80 } }
+```
+
+```bash
+deno task hertzbench run nrf24.yaml --out /tmp/hzb-nrf24
+```
+
+Its report, excerpted from the run (`hertzbench` prints the full table):
+
+```
+link      sent  delivered  loss    p50 ms  p95 ms  p99 ms  rssi dBm  snr dB  attempts
+far->gw   80    0          100.0%  -       -       -       -118.4    -14.4   1.00
+gw->near  5     5          0.0%    0.07    0.07    0.07    -61.3     42.7    1.00
+near->gw  5     5          0.0%    0.33    0.33    0.33    -61.3     42.7    1.00
+
+Assertions
+  PASS  serial near contains "tx t:0 from near ok"  (seen at 34.148 ms)
+  PASS  serial gw contains "rx \"t:4 from near\" pipe=1"  (seen at 835.143 ms)
+  PASS  serial far contains "tx t:0 from far failed"  (seen at 161.572 ms)
+  PASS  metric near->gw (nrf24 frames): sent eq 5, loss_pct eq 0  (1 link(s) satisfy it)
+  PASS  metric gw->near (nrf24-ack frames): loss_pct eq 0  (1 link(s) satisfy it)
+  PASS  metric far->gw (nrf24 frames): sent eq 80, loss_pct eq 100  (1 link(s) satisfy it)
+
+RESULT: PASS
+```
+
+_Scripted boards replay what a sketch would do. This shows the chip model and the channel, not
+firmware._
 
 ## BLE
 
@@ -263,13 +402,28 @@ is tested are in [docs/mobile-bridge.md](docs/mobile-bridge.md). No Velxio file 
 claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project
 ```
 
-The agent gets `list_boards`, `create_scenario`, `validate_scenario`, `run_scenario`, `get_status`,
-`get_serial`, `get_metrics`, `move_node`, `inject_fault` and `stop`. As resources it gets the
-example scenarios, the scenario format and the fidelity table. A run plays in the background, so the
-agent can move a node or break a link while it runs and read the effect in the metrics.
-`scenarios/examples/live-3-scripted.yaml` is a two-minute run made for that. Every file the server
-writes stays inside its workspace. Registration without installing, the tool reference and the ESP32
-setup are in [docs/mcp.md](docs/mcp.md).
+The agent gets 23 tools, grouped here as in [docs/mcp.md](docs/mcp.md):
+
+```
+Boards and scenario files (7)
+  list_boards  validate_scenario  create_scenario  read_scenario
+  edit_scenario  add_node  remove_node
+Running (4)
+  run_scenario  get_status  get_report  stop
+Changing a run while it plays (6)
+  move_node  inject_fault  set_channel  set_radio  start_phase  send_serial
+Reading a run (4)
+  get_serial  get_metrics  get_events  export_capture
+The view (2)
+  open_view  get_view_state
+```
+
+As resources it gets the example scenarios, the scenario format and the fidelity table. A run plays
+in the background, so the agent can move a node, force loss or latency, or change a radio while it
+runs, and read the effect in the metrics. No tool runs a command on the host or takes a program,
+interpreter, library path or environment variable. `scenarios/examples/live-3-scripted.yaml` is a
+two-minute run made for that. Every file the server writes stays inside its workspace. Registration
+without installing, the tool reference and the ESP32 setup are in [docs/mcp.md](docs/mcp.md).
 
 ![The live-3-scripted run steered over MCP: node c moved behind the wall and a forced 30% loss on a to b, both marked on the packet timeline.](../site/img/agent-light.png)
 
@@ -286,8 +440,6 @@ the same `move_node` tool an agent uses. `hertzbench mcp --view-port 7480` draws
 same way. No build step and no Velxio patch; see [docs/view.md](docs/view.md).
 
 ![Node c dragged behind the 12 dB wall, links colored by loss over the last 2 s: the a to c links turn poor at about 38% lost.](../site/img/drag-light.png)
-
-![The live view of the LoRa gateway scenario: six ESP32 boards with SX1276 radios on a map.](../site/img/lora-light.png)
 
 ![The packet timeline of the last 10 seconds: a row per directed link, green marks for delivered frames and red marks for lost ones on the links to the far sensor.](../site/img/timeline-light.png)
 
@@ -311,6 +463,10 @@ board N (QEMU) ──┘   (loopback TCP)     switch + channel model   └──
   DNS.
 - The fidelity of every part is printed in the report. See [docs/fidelity.md](docs/fidelity.md) for
   the model, what it leaves out, and the clock caveat: **latency is modelled, not measured**.
+- Each report states a fidelity level per part. **F1** and **F2** run the same firmware binary: F1
+  captures frames at the emulated hardware or MAC level, F2 at the network level. **F3** is a
+  host-only build with a simulation shim in place of the radio driver. A scripted board is a traffic
+  generator, not firmware.
 
 ## Layout
 
@@ -360,6 +516,8 @@ check when it is not.
 - [docs/e2e-esp32.md](docs/e2e-esp32.md): running the ESP32 example, and what to verify on the first
   run
 - [docs/upstream-sync.md](docs/upstream-sync.md): the Velxio patches and the sync policy
+- [docs/community-testing.md](docs/community-testing.md): what nobody has run yet, and how to report
+  a run
 - [docs/discovery.md](docs/discovery.md) and [docs/adr/](docs/adr/): Phase 0 findings and decisions
 
 Hertzbench is based on Velxio. The name and logo of Velxio are not ours to use as a brand.
