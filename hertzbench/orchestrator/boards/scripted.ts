@@ -17,6 +17,7 @@ import {
   createRng,
   DHCPDISCOVER,
   DHCPREQUEST,
+  ESPNOW_ACK_TIMEOUT_MS,
   ipToString,
   parseEspNowBody,
   parseEthernet,
@@ -34,6 +35,16 @@ import { MqttBroker, serveHttp } from "./drivers/tcp-services.ts";
 
 const DHCP_RETRY_MS = 1000;
 const DHCP_MAX_TRIES = 10;
+/**
+ * The engine judges an ESP-NOW ACK against the fork's 10 ms from the moment the frame reaches
+ * the medium. A scripted board's wait starts at its own send, so it also spends the loopback
+ * hop out and the one back (each several ms under load, on the first frame or on a busy CI
+ * runner), and a board that waited exactly 10 ms would give up on ACKs the engine counted.
+ * The board waits the fork's window plus this allowance: the ACK is then the engine's verdict,
+ * and silence still fails the send. ponytail: a fixed allowance, raise it if a runner's hops
+ * ever exceed it; the real fix would hand the board the engine's outcome.
+ */
+const ESPNOW_HOP_ALLOWANCE_MS = 30;
 const DHCPOFFER = 2;
 const DHCPACK = 5;
 
@@ -79,6 +90,7 @@ class ScriptedBoard implements RunningBoard {
       mac: ctx.node.mac,
       channel,
       clock: ctx.clock,
+      ackTimeoutMs: ESPNOW_ACK_TIMEOUT_MS + ESPNOW_HOP_ALLOWANCE_MS,
       output: (frame) => this.#send(frame),
       onReceive: (src, _dst, body) => {
         const payload = parseEspNowBody(body);

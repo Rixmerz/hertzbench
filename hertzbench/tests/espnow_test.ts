@@ -204,6 +204,34 @@ Deno.test("fork model: one 10 ms ACK timer; an ACK pulls it in; a late ACK re-ar
   assertEquals(a.done[3], { atMs: 41, status: "ack" }, "a broadcast completes at once");
 });
 
+Deno.test("fork model: ackTimeoutMs moves the timer, so an ACK after 10 ms still completes the send", () => {
+  const clock = new ManualClock();
+  const done: { atMs: number; status: string }[] = [];
+  const model = new EspNowForkModel({
+    mac: A,
+    channel: 5,
+    clock,
+    ackTimeoutMs: 40,
+    output: () => {},
+    onReceive: () => {},
+    onTxDone: (status) => done.push({ atMs: clock.now(), status }),
+  });
+  model.send(B, body("one"));
+  clock.advanceTo(12);
+  assertEquals(done, [], "the fork's 10 ms has passed and the send is still waiting");
+  model.receive(buildEspNowAck({ dst: A, src: B, channel: 5 }));
+  clock.advanceTo(60);
+  assertEquals(done, [{ atMs: 12, status: "ack" }], "one completion, no stray one at 40 ms");
+
+  model.send(B, body("two"));
+  clock.advanceTo(100);
+  assertEquals(
+    done[1],
+    { atMs: 100, status: "nack" },
+    "silence still fails, after the longer wait",
+  );
+});
+
 // ── fork models on the medium ────────────────────────────────────────────────
 
 interface Pair {
@@ -461,6 +489,22 @@ ackWindowTest(
       e.type === "tx" && (e.kind === "espnow" || e.kind === "espnow-ack")
     );
     assertEquals(records, onAir.length);
+  },
+);
+
+ackWindowTest(
+  "runner: 7 ms more on the a->b leg leaves 3 ms of margin, and the sender still sees every ACK the engine counted",
+  async () => {
+    const { result } = await runYaml(espnowPair(7));
+    const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
+    const lines = serial(result, "a");
+    // The engine times the round trip from the medium; the board's wait starts at its own
+    // send, one loopback hop earlier, and the ACK needs another to get back. Those hops
+    // take about as long as the margin, so a board that waited exactly 10 ms would report
+    // "fail" for ACKs the engine counted, and the ACK would land as a stray completion.
+    assert(link.espnow!.acked > 0, "the engine must count ACKs for this to prove anything");
+    assertEquals(lines.filter((t) => t === "espnow tx ok to b").length, link.espnow!.acked);
+    assert(!lines.some((t) => t.includes("nothing in flight")), "no ACK landed after the wait");
   },
 );
 
