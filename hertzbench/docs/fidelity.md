@@ -41,7 +41,8 @@ SNR     = RSSI - noise
 ```
 
 - Shadowing is one Gaussian sample per pair of nodes, `sigma` dB, drawn from the scenario seed and **kept when a node moves**. It is symmetric.
-- A wall is a line segment; the direct path pays its attenuation once per wall crossed.
+- A wall is a line segment; the direct path pays its attenuation once per wall crossed. A wall with an `id` is a door: the timeline can change its attenuation, and every frame after the change pays the new one ([scenario-format.md](scenario-format.md#environment-walls-doors-and-interference)).
+- Interference: each active source adds `power - PL(d_source_receiver) - walls + rxGain` to the thermal noise, in milliwatts, at every receiver whose frequency is in the source's band; the SNR falls by the rise and the RSSI does not. No shadowing on the source's path, no channel selectivity inside the band, constant power while on. Losses it causes are `retry_exhausted` on Wi-Fi and ESP-NOW and `noise` on the chip PHYs. Tested in `physical_events_test.ts`.
 - Presets (`environment.preset`), all overridable per scenario:
 
 | Preset | n | sigma (dB) | Jitter (ms): base + per metre |

@@ -27,6 +27,8 @@ import {
   simulateFrame,
   SPEED_OF_LIGHT_M_S,
   withInterference,
+  withSourceActive,
+  withWallAttenuation,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
 import { ESPNOW_ACK_TIMEOUT_MS, type EspNowFrame, parseEspNow } from "./espnow.ts";
@@ -75,6 +77,16 @@ export interface MediumControl {
    */
   budget(from: string, to: string): LinkBudget & { signal?: ChipSignal };
   setEnvironment(changes: ChannelChanges): void;
+  /**
+   * Set the attenuation of every wall named `id` (a door opening or closing);
+   * every later frame and budget uses it. A warning is logged when no wall has
+   * that id any more, since a live `setEnvironment` may have replaced the walls.
+   */
+  setObstacleAttenuation(id: string, attenuationDb: number): void;
+  /** Switch an interference source on or off, with the same warning for an unknown id. */
+  setInterference(id: string, active: boolean): void;
+  /** The channel model as it is now, walls and interference states included. */
+  environment(): Environment;
   /** Change a station's radio as the medium models it; each medium names what it accepts. */
   setRadio(id: string, changes: Partial<RadioConfig>): void;
   close(): void;
@@ -162,6 +174,36 @@ export class Medium {
   setEnvironment(changes: ChannelChanges): void {
     this.#environment = { ...this.#environment, ...changes };
     this.#opts.log.append({ type: "channel", t: this.#opts.clock.now(), changes });
+  }
+
+  setObstacleAttenuation(id: string, attenuationDb: number): void {
+    const next = withWallAttenuation(this.#environment, id, attenuationDb);
+    if (!next) return this.#warnUnknown("obstacle", id);
+    this.#environment = next;
+    this.#opts.log.append({
+      type: "channel",
+      t: this.#opts.clock.now(),
+      changes: { obstacles: next.obstacles },
+    });
+  }
+
+  setInterference(id: string, active: boolean): void {
+    const next = withSourceActive(this.#environment, id, active);
+    if (!next) return this.#warnUnknown("interference source", id);
+    this.#environment = next;
+    this.#opts.log.append({ type: "interference", t: this.#opts.clock.now(), id, active });
+  }
+
+  environment(): Environment {
+    return this.#environment;
+  }
+
+  #warnUnknown(what: string, id: string): void {
+    this.#opts.log.append({
+      type: "warning",
+      t: this.#opts.clock.now(),
+      text: `no ${what} named ${JSON.stringify(id)} any more; the change was ignored`,
+    });
   }
 
   /**

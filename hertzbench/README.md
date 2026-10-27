@@ -136,8 +136,8 @@ What differs by system:
   [test report](https://github.com/Rixmerz/hertzbench/issues/new?template=test-report.yml).
 - **Known problems.** Hertzbench is community-maintained from here on. Open bugs and CI failures
   nobody has fixed yet are listed in
-  [docs/community-testing.md](docs/community-testing.md#known-problems-open-for-contributions);
-  pull requests are welcome.
+  [docs/community-testing.md](docs/community-testing.md#known-problems-open-for-contributions); pull
+  requests are welcome.
 
 ## First run from source (no QEMU needed)
 
@@ -200,8 +200,9 @@ that cannot run it, 130 interrupted (boards are stopped first).
 
 ## Scenario files
 
-One YAML file declares an experiment: the environment and its walls, the nodes and their radios,
-per-link overrides, a timeline of moves and faults, the assertions and an optional mobile bridge.
+One YAML file declares an experiment: the environment, its walls, doors that open and close, and
+noise sources, the nodes and their radios, per-link overrides, a timeline of moves and faults, the
+assertions and an optional mobile bridge.
 
 - **Boards.** 2 to 10 per scenario. An `esp32` runs real firmware, from a sketch directory or a
   `.bin`; a `scripted` board is a traffic generator and needs only Deno. An ESP32's station MAC is
@@ -219,6 +220,14 @@ hertzbench: nodes[0].board: esp32c3 cannot do Wi-Fi networking in Phase 1: the C
 
 - **Presets.** `environment.preset` is `indoor_office` unless set. The others are `free_space`,
   `urban` and `rural`; see [docs/fidelity.md](docs/fidelity.md) for their numbers.
+- **Doors and noise.** A wall with an `id` is a door, and a timeline entry with `obstacle:` and that
+  `id` sets its attenuation for every later frame (0 opens it). `environment.interference` lists
+  noise sources (a microwave oven, a neighbour's access point) that raise the noise floor of the
+  receivers in their band, after the same path loss and walls, between `from` and `to` or when the
+  timeline switches them.
+  `deno task hertzbench run scenarios/examples/door-and-interference-scripted.yaml` shows `a` and
+  `b` cut off by a closed door, reunited when it opens, and `a->b` drowned by an oven next to `b`
+  until it switches off. Details: [docs/scenario-format.md](docs/scenario-format.md).
 - **Randomness.** Each frame draws from its own stream, keyed by the seed, the frame kind, the link
   and the frame's number on that link. The same seed gives the same outcome, and one link's draws do
   not shift another's.

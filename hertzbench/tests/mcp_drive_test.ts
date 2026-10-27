@@ -306,6 +306,53 @@ Deno.test("mcp drive: read, edit, add and remove nodes in a scenario file, check
   });
 });
 
+Deno.test("mcp drive: edit_scenario sets doors and interference, refuses a bad one by field", async () => {
+  await withServer(async (client, workspace) => {
+    await client.ok("create_scenario", { path: "pair.yaml", yaml: PAIR });
+    const edited = await client.ok("edit_scenario", {
+      path: "pair.yaml",
+      set: {
+        environment: {
+          obstacles: [{ id: "front-door", polygon: [[2, -5], [2, 5]], attenuation_db: 12 }],
+          interference: [{
+            id: "oven",
+            position: [3, 3],
+            power_dbm: 20,
+            band: "2.4ghz",
+            from: "1s",
+          }],
+        },
+        timeline: [{ at: "2s", obstacle: { id: "front-door", attenuation_db: 0 } }],
+      },
+    });
+    assertEquals(edited.scenario.nodes.length, 4);
+    const text = await Deno.readTextFile(`${workspace}/pair.yaml`);
+    assertStringIncludes(text, "front-door");
+    assertStringIncludes(text, "oven");
+
+    const before = await Deno.readTextFile(`${workspace}/pair.yaml`);
+    assertStringIncludes(
+      await client.refused("edit_scenario", {
+        path: "pair.yaml",
+        set: { timeline: [{ at: "2s", obstacle: { id: "back-door", attenuation_db: 0 } }] },
+      }),
+      "timeline[0].obstacle.id",
+    );
+    assertStringIncludes(
+      await client.refused("edit_scenario", {
+        path: "pair.yaml",
+        set: {
+          environment: {
+            interference: [{ id: "x", position: [0, 0], power_dbm: 1, band: "5ghz" }],
+          },
+        },
+      }),
+      "environment.interference[0].band",
+    );
+    assertEquals(await Deno.readTextFile(`${workspace}/pair.yaml`), before);
+  });
+});
+
 Deno.test("mcp drive: set_channel and set_radio change a live Wi-Fi run; start_phase marks it", async () => {
   await withServer(async (client) => {
     await client.ok("run_scenario", { path: LIVE });
@@ -318,11 +365,12 @@ Deno.test("mcp drive: set_channel and set_radio change a live Wi-Fi run; start_p
 
     const channel = await client.ok("set_channel", {
       path_loss_exponent: 4,
-      obstacles: [{ polygon: [[1, -50], [1, 50]], attenuation_db: 20 }],
+      obstacles: [{ id: "lobby-door", polygon: [[1, -50], [1, 50]], attenuation_db: 20 }],
       phase: "harsh",
     });
     assertEquals(channel.phase, "harsh");
     assertEquals(channel.changes.obstacles.length, 1);
+    assertEquals(channel.changes.obstacles[0].id, "lobby-door");
     const harsh = await client.ok("set_radio", { node: "c", tx_power_dbm: 25 });
     assert(rssi(harsh, "a") < rssi(louder, "a") - 20, "steeper path loss and a wall");
 

@@ -14,7 +14,13 @@ import {
   type MediumOptions,
   type VirtualGateway,
 } from "../engine/mod.ts";
-import { expandLinkRule, type LinkRule, type Scenario } from "../orchestrator/mod.ts";
+import {
+  applyTimelineAction,
+  expandLinkRule,
+  interferenceSchedule,
+  type LinkRule,
+  type Scenario,
+} from "../orchestrator/mod.ts";
 import { EspNowForkModel } from "../orchestrator/boards/espnow-fork-model.ts";
 
 export const GATEWAY_MAC = "02:68:7a:62:00:01";
@@ -148,6 +154,28 @@ export async function until(
 }
 
 /**
+ * What the runner does at time zero and on the clock, for a Medium on a manual
+ * clock: interference windows, then the timeline (moves, link rules, doors,
+ * interference switches). Time zero is clock zero.
+ */
+export function scheduleScenarioEvents(
+  clock: ManualClock,
+  medium: Medium,
+  scenario: Scenario,
+): void {
+  const ids = scenario.nodes.filter((n) => !n.internetGateway).map((n) => n.id);
+  for (const { id, on, atMs } of interferenceSchedule(scenario.interferenceWindows)) {
+    clock.schedule(atMs, () => medium.setInterference(id, on));
+  }
+  for (const event of scenario.timeline) {
+    clock.schedule(event.atMs, () => {
+      if (event.label !== null) medium.startPhase(event.label);
+      for (const action of event.actions) applyTimelineAction(medium, action, ids);
+    });
+  }
+}
+
+/**
  * Plays a scenario's geometry and timeline on a manual clock with synthetic UDP
  * traffic (every node pings every other node), so a scenario's metric
  * assertions can be checked without any board. Serial assertions cannot be.
@@ -177,14 +205,7 @@ export function simulateScenarioTraffic(
     );
   }
   const payload = new Uint8Array(options.payloadBytes).fill(0x61);
-  for (const event of scenario.timeline) {
-    clock.schedule(event.atMs, () => {
-      if (event.label !== null) medium.startPhase(event.label);
-      for (const action of event.actions) {
-        if (action.kind === "move") medium.moveNode(action.node, action.to);
-      }
-    });
-  }
+  scheduleScenarioEvents(clock, medium, scenario);
   for (let t = 0; t < scenario.durationMs; t += options.everyMs) {
     clock.advanceTo(t);
     for (const from of onMedium) {
@@ -266,9 +287,13 @@ export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic
       if (event.label !== null) medium.startPhase(event.label);
       for (const action of event.actions) {
         if (action.kind === "move") medium.moveNode(action.node, action.to);
-        else applyRule(action.rule);
+        else if (action.kind === "link") applyRule(action.rule);
+        else applyTimelineAction(medium, action, ids);
       }
     });
+  }
+  for (const { id, on, atMs } of interferenceSchedule(scenario.interferenceWindows)) {
+    clock.schedule(atMs, () => medium.setInterference(id, on));
   }
   const payload = buildEspNowBody(new TextEncoder().encode("reading:0"));
   for (const stream of traffic) {

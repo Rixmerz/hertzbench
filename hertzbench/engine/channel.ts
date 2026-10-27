@@ -16,11 +16,41 @@ export interface Position {
 
 export type Point2 = readonly [number, number];
 
-/** A wall: a line segment that costs `attenuationDb` when the direct path crosses it. */
+/**
+ * A wall: a line segment that costs `attenuationDb` when the direct path crosses it.
+ * A scenario may name a wall (`id`) so its timeline can change it later, as a door
+ * that opens; every segment of a polygon carries the polygon's id.
+ */
 export interface Obstacle {
+  id?: string;
   from: Point2;
   to: Point2;
   attenuationDb: number;
+}
+
+/** The radio bands an interference source can sit in, by the name a scenario gives them. */
+export const INTERFERENCE_BANDS = {
+  "2.4ghz": { minHz: 2400e6, maxHz: 2500e6 },
+  "868mhz": { minHz: 863e6, maxHz: 870e6 },
+} as const;
+
+export type InterferenceBand = keyof typeof INTERFERENCE_BANDS;
+
+export function isInterferenceBand(value: string): value is InterferenceBand {
+  return Object.hasOwn(INTERFERENCE_BANDS, value);
+}
+
+/**
+ * A noise source (a microwave oven, a neighbour's access point). While `active`
+ * it adds `powerDbm` of radiated power, after path loss and walls, to the noise
+ * of every receiver whose frequency is in `band`.
+ */
+export interface InterferenceSource {
+  id: string;
+  position: Position;
+  powerDbm: number;
+  band: InterferenceBand;
+  active: boolean;
 }
 
 export interface RadioConfig {
@@ -76,6 +106,35 @@ export interface Environment {
   /** Fixed latency added to every frame (driver and stack time the model does not simulate). */
   baseLatencyMs: number;
   obstacles: readonly Obstacle[];
+  interference: readonly InterferenceSource[];
+}
+
+/** The environment with every wall named `id` set to `attenuationDb`; null when no wall has that id. */
+export function withWallAttenuation(
+  env: Environment,
+  id: string,
+  attenuationDb: number,
+): Environment | null {
+  if (!env.obstacles.some((wall) => wall.id === id)) return null;
+  return {
+    ...env,
+    obstacles: env.obstacles.map((wall) => wall.id === id ? { ...wall, attenuationDb } : wall),
+  };
+}
+
+/** The environment with the source `id` switched on or off; null when there is no such source. */
+export function withSourceActive(
+  env: Environment,
+  id: string,
+  active: boolean,
+): Environment | null {
+  if (!env.interference.some((source) => source.id === id)) return null;
+  return {
+    ...env,
+    interference: env.interference.map((source) =>
+      source.id === id ? { ...source, active } : source
+    ),
+  };
 }
 
 export function environmentFromPreset(
@@ -89,6 +148,7 @@ export function environmentFromPreset(
     noiseFigureDb: 10,
     baseLatencyMs: 0,
     obstacles: [],
+    interference: [],
     ...overrides,
   };
 }
@@ -154,6 +214,33 @@ export function noiseFloorDbm(noiseFigureDb: number, bandwidthHz = 20e6): number
   return -174 + 10 * Math.log10(bandwidthHz) + noiseFigureDb;
 }
 
+/**
+ * How far the active interference sources in `rf`'s band raise a receiver's
+ * noise floor, in dB (0 with none). Each source reaches the receiver through
+ * the same log-distance loss and walls as a signal would; the powers add with
+ * the thermal floor in milliwatts. Like the budget's own RSSI, no shadowing.
+ * Sources do not select by channel: one in the band is heard across all of it.
+ */
+export function interferenceRiseDb(
+  env: Environment,
+  rx: Receiver,
+  rf: RfParams,
+  thermalFloorDbm: number,
+): number {
+  let milliwatts = 0;
+  for (const source of env.interference) {
+    if (!source.active) continue;
+    const band = INTERFERENCE_BANDS[source.band];
+    if (rf.frequencyHz < band.minHz || rf.frequencyHz > band.maxHz) continue;
+    const loss = pathLossDb(env, rf.frequencyHz, distanceM(source.position, rx.position)) +
+      obstacleLossDb(source.position, rx.position, env.obstacles);
+    milliwatts += 10 ** ((source.powerDbm + rx.antennaGainDbi - loss) / 10);
+  }
+  if (milliwatts === 0) return 0;
+  const thermal = 10 ** (thermalFloorDbm / 10);
+  return 10 * Math.log10((thermal + milliwatts) / thermal);
+}
+
 export interface LinkBudget {
   distanceM: number;
   pathLossDb: number;
@@ -203,7 +290,8 @@ export interface Receiver {
 
 /**
  * RSSI = txPower + gains - pathLoss - shadowing - obstacleLoss. `shadowingDb`
- * is the seeded Gaussian sample X-sigma, positive meaning extra loss.
+ * is the seeded Gaussian sample X-sigma, positive meaning extra loss. The noise
+ * floor is the thermal floor plus the scenario's active interference sources.
  */
 export function linkBudgetAt(
   env: Environment,
@@ -216,7 +304,8 @@ export function linkBudgetAt(
   const pl = pathLossDb(env, rf.frequencyHz, distance);
   const walls = obstacleLossDb(tx.position, rx.position, env.obstacles);
   const rssi = tx.txPowerDbm + tx.antennaGainDbi + rx.antennaGainDbi - pl - shadowingDb - walls;
-  const noise = noiseFloorDbm(rf.noiseFigureDb, rf.bandwidthHz);
+  const thermal = noiseFloorDbm(rf.noiseFigureDb, rf.bandwidthHz);
+  const noise = thermal + interferenceRiseDb(env, rx, rf, thermal);
   return {
     distanceM: distance,
     pathLossDb: pl,
