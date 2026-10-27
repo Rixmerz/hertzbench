@@ -462,11 +462,29 @@ export function udpTransport(
   });
 }
 
-/** The host's first non-loopback IPv4 address, or why it cannot be read. */
+// Adapters that only reach this host or its VMs: VirtualBox, VMware, Hyper-V/WSL, Docker, libvirt.
+// A phone on the LAN cannot reach them, so they are advertised only when nothing else exists.
+const VIRTUAL_NAME = /virtualbox|vbox|vmware|vmnet|vethernet|hyper-v|wsl|docker|^br-|^veth|virbr/i;
+const VIRTUAL_MAC = /^(0a:00:27|08:00:27|00:50:56|00:0c:29|00:05:69|00:1c:14|00:15:5d|02:42:)/i;
+
+function isVirtual(i: Deno.NetworkInterfaceInfo): boolean {
+  return VIRTUAL_NAME.test(i.name) || VIRTUAL_MAC.test(i.mac);
+}
+
+/**
+ * The host's LAN IPv4 address, or why it cannot be read: the first non-loopback one, skipping
+ * link-local (169.254/16) and virtual adapters unless nothing else is left.
+ */
 export function firstLanAddress(): string | Error {
   try {
-    const found = Deno.networkInterfaces().find((i) =>
+    const candidates = Deno.networkInterfaces().filter((i) =>
       i.family === "IPv4" && !i.address.startsWith("127.")
+    );
+    const rank = (i: Deno.NetworkInterfaceInfo) =>
+      (isVirtual(i) ? 2 : 0) + (i.address.startsWith("169.254.") ? 1 : 0);
+    const found = candidates.reduce<Deno.NetworkInterfaceInfo | undefined>(
+      (best, i) => (best === undefined || rank(i) < rank(best) ? i : best),
+      undefined,
     );
     return found ? found.address : new Error("the host has no non-loopback IPv4 address");
   } catch (error) {
