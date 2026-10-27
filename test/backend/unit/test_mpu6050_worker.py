@@ -278,8 +278,58 @@ class TestIntTimerCost:
         # the only other look is the end of a pulse it caught live. So at
         # least one pulse for every two takes, with room for the host.
         # Measured on the rig: 5,747 takes and 740 pulses a second before the
-        # floor, 522 and 225 with the floor alone, about 1,100 and 580 now.
+        # floor, 522 and 225 with the floor alone, about 1,000 and 750 now.
         assert pulses >= 0.4 * takes, f'{pulses:.0f} pulses for {takes:.0f} lock takes a second'
+
+    def test_a_pulse_that_starts_before_the_floor_waits_for_it(self, worker, monkeypatch):
+        """The guest stands still between the thread's looks. A look at the
+        end of a pulse lets the pad go; the next 8 kHz sample pulses 75 us
+        later, before the floor, and is owed to the look the floor allows.
+        The thread used to take the lock for it at once whenever it asked
+        while that pulse was under way: on a loaded host, where a round of
+        the compiled model's deadlines lasts about a sample period, that was
+        a take for nearly every sample."""
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        monkeypatch.setenv('BB_FAKE_BQL', '1')
+        w = worker(sensors=[record(int_pin=INT_GPIO)])
+        write_reg(w, INT_ENABLE, 0x01)     # DATA_RDY_EN; SMPLRT_DIV 0, DLPF off: 8 kHz
+        write_reg(w, PWR_MGMT_1, 0x00)     # awake at guest time 0
+        w.guest('clock', ns=1_000_010)     # inside the pulse of the sample at 1 ms
+        assert wait_levels(w, [0, 1]) == [0, 1]
+        w.guest('clock', ns=1_060_000)     # past its end: the pad lets go
+        assert wait_levels(w, [0, 1, 0]) == [0, 1, 0]
+        takes = w.guest('bql')['takes'].get(self.TAG, 0)
+        w.guest('clock', ns=1_130_000)     # inside the pulse of the sample at 1.125 ms
+        time.sleep(0.1)
+        assert int_levels(w) == [0, 1, 0], 'no look before the floor'
+        assert w.guest('bql')['takes'].get(self.TAG, 0) == takes
+        w.guest('clock', ns=2_070_000)     # past the floor, between two pulses
+        assert wait_levels(w, [0, 1, 0, 1, 0]) == [0, 1, 0, 1, 0], \
+            'the look the floor allows gives the guest one pulse for the samples since'
+
+    def test_a_pulse_found_over_by_the_next_one_ends_and_owes_it(self, worker, monkeypatch):
+        """The thread looks some time after it decides to: it can come to end
+        a pulse and find the next sample already pulsing. The pulse on the pad
+        ends there, and the new one waits for the floor. The look used to
+        change nothing (the pad was active, as the driver left it) and leave
+        the end due at once: under load the thread took the lock for nearly
+        every sample and delivered almost no pulse."""
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        monkeypatch.setenv('BB_FAKE_BQL', '1')
+        w = worker(sensors=[record(int_pin=INT_GPIO)])
+        write_reg(w, INT_ENABLE, 0x01)     # DATA_RDY_EN; SMPLRT_DIV 0, DLPF off: 8 kHz
+        write_reg(w, PWR_MGMT_1, 0x00)     # awake at guest time 0
+        w.guest('clock', ns=1_000_010)     # inside the pulse of the sample at 1 ms
+        assert wait_levels(w, [0, 1]) == [0, 1]
+        w.guest('clock', ns=1_130_000)     # inside the pulse of the sample at 1.125 ms
+        assert wait_levels(w, [0, 1, 0]) == [0, 1, 0], 'the pulse on the pad ends'
+        takes = w.guest('bql')['takes'].get(self.TAG, 0)
+        time.sleep(0.1)
+        assert int_levels(w) == [0, 1, 0], 'the new pulse waits for the floor'
+        assert w.guest('bql')['takes'].get(self.TAG, 0) == takes
+        w.guest('clock', ns=2_200_000)     # past the floor, between two pulses
+        assert wait_levels(w, [0, 1, 0, 1, 0]) == [0, 1, 0, 1, 0], \
+            'and the samples that pulsed after it get one pulse there'
 
     def _measure(self, w):
         seen = len(int_levels(w))    # levels of an earlier window

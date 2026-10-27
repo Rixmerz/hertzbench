@@ -3283,6 +3283,16 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
         then idle, for all of them: a sketch counting DATA_RDY interrupts
         gets one per look, as a slow ISR would. A latched INT is a level and
         needs none.
+
+        The thread looks some time after it decides to: on a loaded host the
+        compiled model's questions alone can last a sample period, so the
+        pad it finds is not always the one it woke for. A pulse that started
+        since the last look waits for the floor, even one under way when the
+        thread asks; the pulse on the pad ends at once when the thread finds
+        it over, whether the pad let go or another sample pulsed after it,
+        and those samples are owed to the next look. A look that found a new
+        pulse where it came to end one used to change nothing and leave the
+        end due at once: the thread took the lock for nearly every sample.
         """
 
         def __init__(self, slave, gpio: int) -> None:
@@ -3302,13 +3312,20 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             pad = self.slave.int_pad()
             if self._pulses is not None:
                 pulses = self.slave.int_pulses()
-                missed = pulses != self._pulses
+                if pulses != self._pulses:
+                    active, idle = self.slave.int_pad_levels()
+                    if active != idle:
+                        if self._last == active:
+                            # The pulse on the pad is over and others started
+                            # after it: it ends here, and they are owed a
+                            # pulse at the next look the floor allows.
+                            self._put(idle)
+                            return
+                        if pad == idle:
+                            # Pulses came and went between two looks: one of
+                            # them reaches the pad, so the guest sees the edge.
+                            self._put(active)
                 self._pulses = pulses
-                active, idle = self.slave.int_pad_levels()
-                if missed and pad == idle and active != idle:
-                    # Pulses came and went between two looks: one of them
-                    # reaches the pad, so the guest sees the edge.
-                    self._put(active)
             if pad != self._last:
                 self._put(pad)
 
@@ -3322,19 +3339,24 @@ def main() -> None:  # noqa: C901  (complexity OK for inline worker)
             _pads.chip_drive(self.gpio, self.owner, level)
 
         # The chip timer thread's view of it (see _chip_timer_thread). Asking
-        # the twin the time takes the samples due, so a pad that moved while
-        # the thread was asking is due at once.
+        # the twin the time takes the samples due, so the pulse on the pad is
+        # due at once when it is over while the thread asks: it ends on time.
         def next_timer_deadline(self):
-            if self.slave.int_pad() != self._last:
-                return 0
-            # Asking the time takes the samples due: one that pulsed since
-            # the pad was last looked at is owed a pulse, over or not, at the
-            # next look the floor allows.
             looked = self._looked_ns
-            if self._pulses is not None and self.slave.int_pulses() != self._pulses:
-                return 0 if looked is None else looked + _MPU_INT_LOOK_NS
-            return self.slave.int_wake_ns(
-                None if looked is None else looked + _MPU_INT_LOOK_NS)
+            floor = None if looked is None else looked + _MPU_INT_LOOK_NS
+            pad = self.slave.int_pad()
+            if self._pulses is None:
+                return 0 if pad != self._last else self.slave.int_wake_ns(floor)
+            moved = self.slave.int_pulses() != self._pulses
+            if pad == self._last and not moved:
+                return self.slave.int_wake_ns(floor)
+            active, idle = self.slave.int_pad_levels()
+            if floor is None or (self._last == active != idle):
+                return 0
+            # A pad that went active, or samples that pulsed since it was last
+            # looked at, are owed a pulse, over or not, at the next look the
+            # floor allows: a pulse that started before it is not due at once.
+            return floor
 
         def fire_due_timers(self) -> None:
             self._looked_ns = _chip_now_ns()
