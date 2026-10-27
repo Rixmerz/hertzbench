@@ -57,8 +57,9 @@ welcome; each one links the evidence.
       budget, and the drag waits for the map to settle at its box's size. `tests/view_browser_test.ts:115`
       times out with `timed out waiting for /DevTools listening on`: Chromium does not start in
       time on the runner. It passes locally and on macOS and Windows.
-- [ ] **ESP-NOW mesh test in `tests/cli_test.ts` is flaky on macOS CI.** It fails now and then
-      and passes on rerun.
+- [x] **ESP-NOW mesh test in `tests/cli_test.ts` is flaky on macOS CI.** Mitigated: the Wi-Fi
+      medium runs sub-millisecond deliveries without a timer tick (`orchestrator/medium-clock.ts`).
+      A stall of the whole process can still push an ACK past 10 ms.
 - [ ] **`test_mpu6050_worker.py::TestIntTimerCost` (compiled) fails on loaded CI runners.** It
       measured 3228 lock takes a second against a bound of 2200, even with three 1 s windows.
       That is too far over the bound to be jitter: likely timer catch-up bursts after the thread
