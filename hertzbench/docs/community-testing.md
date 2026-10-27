@@ -66,8 +66,8 @@ welcome; each one links the evidence.
   [`wip/ci-flakes`](https://github.com/Rixmerz/hertzbench/tree/wip/ci-flakes): a Chromium
   cold-start budget and a sub-tick clock for the medium. It was never verified; start from it or
   ignore it.
-- [ ] **Publish Docker Image fails on master.** The workflow has failed on its last runs; not
-      investigated.
+- [x] **Publish Docker Image fails on master.** It is Velxio's workflow and needs Velxio's Docker
+      Hub secrets and build license; it now runs only in the upstream repository.
 - [ ] **Dependency review always fails** because the repository's dependency graph is disabled.
 
 ## Done
