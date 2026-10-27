@@ -12,6 +12,9 @@ env:
 
 jobs:
   build-and-push-image:
+    # This publishes Velxio's image (Docker Hub credentials, a Velxio build license,
+    # velxio.dev sitemap pings): only the upstream repository has those secrets.
+    if: github.repository == 'davidmonterocrespo24/velxio'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,6 +23,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU (for multi-arch builds)
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3.7.0
