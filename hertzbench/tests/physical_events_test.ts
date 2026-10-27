@@ -688,7 +688,8 @@ Deno.test("example: the door and the oven each change delivery, and the same see
 
 Deno.test("example: without the door entry or the oven the assertions go red", async () => {
   const { scenario } = await loadScenario(EXAMPLE);
-  const text = await Deno.readTextFile(EXAMPLE);
+  // Windows checkouts get CRLF line endings, which the line regexes below do not expect.
+  const text = (await Deno.readTextFile(EXAMPLE)).replaceAll("\r\n", "\n");
   const failing = (yaml: string) => {
     const s = parseScenario(yaml);
     const rig = simulateScenarioTraffic(s, { everyMs: 100, payloadBytes: 10 });
