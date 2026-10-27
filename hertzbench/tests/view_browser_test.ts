@@ -5,6 +5,7 @@
 
 import { fileURLToPath } from "node:url";
 import { assert, assertAlmostEquals, assertEquals } from "@std/assert";
+import { BROWSER_START_TIMEOUT_MS, chromiumArgs } from "./chromium.ts";
 
 const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
 const LIVE = fileURLToPath(new URL("../scenarios/examples/live-3-scripted.yaml", import.meta.url));
@@ -138,28 +139,21 @@ Deno.test({
     }).spawn();
     const viewLog = new StderrWatch(view.stderr);
     const browser = new Deno.Command(CHROMIUM!, {
-      args: [
-        "--headless=new",
-        // Ubuntu 23.10+ (and its GitHub runners) forbid the unprivileged user namespaces
-        // Chromium's sandbox needs, and Chromium then exits with "No usable sandbox!".
-        // The page under test is the project's own, served on loopback.
-        "--no-sandbox",
-        "--remote-debugging-port=0",
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${dir}/profile`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--window-size=1280,900",
-        "about:blank",
-      ],
+      args: chromiumArgs(`${dir}/profile`),
       stdout: "null",
       stderr: "piped",
     }).spawn();
     const browserLog = new StderrWatch(browser.stderr);
     let cdp: Cdp | null = null;
     try {
-      const [, url] = await viewLog.waitFor(/view: (http:\/\/127\.0\.0\.1:\d+\/)/);
-      const [, devtools] = await browserLog.waitFor(/DevTools listening on (ws:\/\/\S+)/);
+      const [, url] = await viewLog.waitFor(
+        /view: (http:\/\/127\.0\.0\.1:\d+\/)/,
+        BROWSER_START_TIMEOUT_MS,
+      );
+      const [, devtools] = await browserLog.waitFor(
+        /DevTools listening on (ws:\/\/\S+)/,
+        BROWSER_START_TIMEOUT_MS,
+      );
       cdp = await Cdp.connect(devtools!);
       const { targetId } = await cdp.send("Target.createTarget", { url: url! });
       const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
@@ -168,9 +162,16 @@ Deno.test({
       const evaluate = async (expression: string) =>
         (await page("Runtime.evaluate", { expression, returnByValue: true })).result.value;
 
-      // Centre of each node on screen, once the page shows the run as running.
+      // Centre of each node on screen, once the page shows the run as running and has drawn the
+      // map at the size its box has. The first frame of a run is drawn at the box's earlier size
+      // and redrawn when the box settles, tens of ms later: the map's scale was 5.7 px/m in that
+      // frame and 9.3 after it, so coordinates taken in it put the press and the drop off.
       const centres = `(() => {
         if (document.getElementById("state").dataset.state !== "running") return null;
+        const box = document.getElementById("map-box").getBoundingClientRect();
+        const [, , width, height] = document.getElementById("map").getAttribute("viewBox")
+          .split(" ").map(Number);
+        if (Math.abs(width - box.width) > 0.5 || Math.abs(height - box.height) > 0.5) return null;
         const out = {};
         for (const node of document.querySelectorAll(".node")) {
           const r = node.querySelector("circle.node-dot").getBoundingClientRect();
@@ -178,14 +179,29 @@ Deno.test({
         }
         return Object.keys(out).length === 3 ? out : null;
       })()`;
-      let at: Record<string, [number, number]> | null = null;
+      type Centres = Record<string, [number, number]>;
       const deadline = performance.now() + 20_000;
-      while (!at) {
-        at = await evaluate(centres);
-        if (performance.now() > deadline) {
-          throw new Error("the page never showed three running nodes");
+      const settled = async (): Promise<Centres> => {
+        for (;;) {
+          const found: Centres | null = await evaluate(centres);
+          if (found) return found;
+          if (performance.now() > deadline) {
+            throw new Error("the page never showed three running nodes");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
-        if (!at) await new Promise((resolve) => setTimeout(resolve, 100));
+      };
+      const sameCentres = (x: Centres, y: Centres) =>
+        Object.entries(x).every(([id, [px, py]]) =>
+          Math.abs(px - y[id]![0]) < 0.5 && Math.abs(py - y[id]![1]) < 0.5
+        );
+      // A reading is taken as true when one more, a poll of the page (250 ms) later, agrees.
+      let at = await settled();
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const again = await settled();
+        if (sameCentres(at, again)) break;
+        at = again;
       }
       // a is at (0, 0) m and b at (8, 0) m: that fixes the map's scale and origin.
       const [ax, ay] = at.a!;
