@@ -53,7 +53,8 @@ These ran on one Linux host under QEMU ([e2e-esp32.md](e2e-esp32.md)). More host
 The project is now maintained by the community: these are known and unfixed. Pull requests are
 welcome; each one links the evidence.
 
-- [ ] **Browser drag test fails on GitHub's ubuntu-latest.** `tests/view_browser_test.ts:115`
+- [x] **Browser drag test fails on GitHub's ubuntu-latest.** Fixed: a 90 s Chromium cold-start
+      budget, and the drag waits for the map to settle at its box's size. `tests/view_browser_test.ts:115`
       times out with `timed out waiting for /DevTools listening on`: Chromium does not start in
       time on the runner. It passes locally and on macOS and Windows.
 - [ ] **ESP-NOW mesh test in `tests/cli_test.ts` is flaky on macOS CI.** It fails now and then
