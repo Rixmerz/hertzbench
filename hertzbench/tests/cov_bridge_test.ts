@@ -817,15 +817,20 @@ async function withInterfaces<T>(stub: Interfaces, fn: () => T | Promise<T>): Pr
   }
 }
 
-const iface = (family: "IPv4" | "IPv6", address: string): Deno.NetworkInterfaceInfo =>
+const iface = (
+  family: "IPv4" | "IPv6",
+  address: string,
+  name = "eth0",
+  mac = "",
+): Deno.NetworkInterfaceInfo =>
   ({
     family,
     address,
-    name: "eth0",
+    name,
     netmask: "",
     scopeid: null,
     cidr: "",
-    mac: "",
+    mac,
   }) as Deno.NetworkInterfaceInfo;
 
 Deno.test("mdns host address: the first non-loopback IPv4 address, or why there is none", async () => {
@@ -838,6 +843,22 @@ Deno.test("mdns host address: the first non-loopback IPv4 address, or why there 
     ]),
     "192.168.1.7",
   );
+  // Issue #38: a VirtualBox host-only adapter listed first was advertised instead of the Wi-Fi.
+  assertEquals(
+    await pick([
+      iface("IPv4", "192.168.56.1", "Ethernet 2", "0a:00:27:00:00:0c"),
+      iface("IPv4", "172.17.0.1", "docker0"),
+      iface("IPv4", "169.254.3.4", "Wi-Fi 2"),
+      iface("IPv4", "192.168.43.20", "Wi-Fi"),
+    ]),
+    "192.168.43.20",
+  );
+  // Only virtual or link-local adapters left: link-local beats virtual, and something is advertised.
+  assertEquals(
+    await pick([iface("IPv4", "10.0.2.1", "vboxnet0"), iface("IPv4", "169.254.3.4", "eth1")]),
+    "169.254.3.4",
+  );
+  assertEquals(await pick([iface("IPv4", "10.0.2.1", "vboxnet0")]), "10.0.2.1");
   const none = await pick([iface("IPv4", "127.0.0.1"), iface("IPv6", "::1")]);
   assertInstanceOf(none, Error);
   assertStringIncludes(none.message, "no non-loopback IPv4 address");
