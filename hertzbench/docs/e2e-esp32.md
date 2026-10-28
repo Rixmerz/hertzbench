@@ -102,9 +102,9 @@ Run on 2026-10-23, every scenario unmodified, with the setup above and the unpat
 | `bridge-ble-esp32.yaml` | `deno task hertzbench run scenarios/examples/bridge-ble-esp32.yaml --out /tmp/hzb-bble`, with the system `python3` (PyGObject) first on `PATH` | **PASS**, 2/2, step 1 only: the bridge mirrors the firmware's GATT and BlueZ advertises `hzb sensor` on `hci0`. No phone was used, so steps 2 and 3 are not run |
 | Velxio backend e2e (`.github/workflows/backend-e2e-tests.yml`) | `uvicorn app.main:app --port 8001` from `backend/` with `QEMU_ESP32_LIB` and `QEMU_RISCV32_LIB` set, then each `node test/backend/e2e/<test>.mjs` and `pytest test/esp32_cam/` | **PASS**: HC-SR04, DHT22, MPU-6050, MicroPython ESP32, MicroPython Pico, the four ngspice tests, and 13 ESP32-CAM tests |
 
-In the view: `udp-3-nodes.yaml`, `espnow-mesh-5-nodes.yaml`, `lora-gateway-6-nodes.yaml` and `ble-sensors-3-nodes.yaml` also pass when run with `hertzbench view` (2026-10-24, patched fork; 5/5, 7/7, 4/4 and 6/6).
+Dragging an ESP32 node in the view was run on 2026-10-27 (`tests/view_esp32_browser_test.ts`, see [view.md](view.md#with-real-firmware-esp32)). In the view: `udp-3-nodes.yaml`, `espnow-mesh-5-nodes.yaml`, `lora-gateway-6-nodes.yaml` and `ble-sensors-3-nodes.yaml` also pass when run with `hertzbench view` (2026-10-24, patched fork; 5/5, 7/7, 4/4 and 6/6).
 
-Not run: the scenarios through `hertzbench mcp` with ESP32 boards, dragging an ESP32 node in the view, a phone on either bridge, and LAN mDNS seen from another host. No nRF24 scenario has an ESP32 board.
+Not run: the scenarios through `hertzbench mcp` with ESP32 boards, a phone on either bridge, and LAN mDNS seen from another host. No nRF24 scenario has an ESP32 board.
 
 Three faults found on the way are fixed in this tree: the worker's NIC arguments (step 1), unicast between boards that the engine flooded as broadcast (step 2), and the BLE bridge handing BlueZ Bluedroid's GAP and GATT services (BLE bridge step 1). Two more are in the fork's Wi-Fi MAC and are fixed by a patch applied to the fork's source before building (ESP-NOW step 4).
 
