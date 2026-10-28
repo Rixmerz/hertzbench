@@ -187,6 +187,20 @@ h2 {
   stroke-linecap: round;
 }
 
+.wall.open {
+  stroke-dasharray: 2 10;
+}
+
+.source {
+  fill: none;
+  stroke: var(--hzb-strong);
+  stroke-width: 3;
+}
+
+.source.on {
+  fill: var(--hzb-strong);
+}
+
 .link {
   stroke-width: 4;
   stroke-linecap: round;

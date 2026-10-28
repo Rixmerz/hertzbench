@@ -2,7 +2,7 @@
 
 `hertzbench view` runs a scenario and draws it live in the browser:
 
-- a **2D map** of the nodes at their positions in metres, with the walls of the scenario;
+- a **2D map** of the nodes at their positions in metres, with the walls of the scenario, a door that stands open (a named wall at 0 dB) drawn dashed, and the interference sources as rings, filled while they are on;
 - a **line per pair of nodes**, each half colored by the sending side's **signal** (RSSI and the
   rate it allows) or by its **loss** over the last 2 s;
 - **drag a node** to move it while the run plays, or focus it and use the arrow keys (1 m a press,

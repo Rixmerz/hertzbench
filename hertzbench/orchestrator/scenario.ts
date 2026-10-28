@@ -7,6 +7,9 @@ import { parse as parseYaml } from "@std/yaml";
 import {
   type Environment,
   environmentFromPreset,
+  INTERFERENCE_BANDS,
+  type InterferenceSource,
+  isInterferenceBand,
   isPresetName,
   type Obstacle,
   type Point2,
@@ -93,7 +96,18 @@ export interface LinkRule {
 
 export type TimelineAction =
   | { kind: "move"; node: string; to: Position }
-  | { kind: "link"; rule: LinkRule };
+  | { kind: "link"; rule: LinkRule }
+  /** A wall named `id` takes this attenuation from now on: a door opening or closing. */
+  | { kind: "obstacle"; id: string; attenuationDb: number }
+  | { kind: "interference"; id: string; on: boolean };
+
+/** When an interference source is on, from its `from` and `to`. Times count from time zero. */
+export interface InterferenceWindow {
+  id: string;
+  fromMs: number;
+  /** null: until the end of the run. */
+  toMs: number | null;
+}
 
 export interface TimelineEvent {
   atMs: number;
@@ -198,7 +212,10 @@ export interface Scenario {
   phy: Phy;
   seed: number;
   durationMs: number;
+  /** Its interference sources start off: `interferenceWindows` and the timeline switch them on. */
   environment: Environment;
+  /** One per source of `environment.interference`, in the same order. */
+  interferenceWindows: InterferenceWindow[];
   retryLimit: number;
   /** Dotted prefix of the /24, e.g. "192.168.4". The gateway is .1, boards start at .11. */
   subnetPrefix: string;
@@ -294,6 +311,7 @@ function point2(value: unknown, path: string): Point2 {
 const ENVIRONMENT_FIELDS = [
   "preset",
   "obstacles",
+  "interference",
   "path_loss_exponent",
   "shadowing_sigma_db",
   "noise_figure_db",
@@ -304,7 +322,7 @@ const ENVIRONMENT_FIELDS = [
 function parseEnvironment(
   value: unknown,
   path: string,
-): { environment: Environment; retryLimit: number } {
+): { environment: Environment; retryLimit: number; interferenceWindows: InterferenceWindow[] } {
   const obj = value === undefined ? {} : record(value, path);
   known(obj, ENVIRONMENT_FIELDS, path);
   const presetName = obj.preset === undefined
@@ -316,11 +334,62 @@ function parseEnvironment(
       `unknown preset ${JSON.stringify(presetName)} (free_space, indoor_office, urban, rural)`,
     );
   }
-  const environment = environmentFromPreset(presetName, parseChannelChanges(obj, path));
+  const { sources, windows } = parseInterference(obj.interference, `${path}.interference`);
+  const environment = environmentFromPreset(presetName, {
+    ...parseChannelChanges(obj, path),
+    interference: sources,
+  });
   const retryLimit = obj.retry_limit === undefined
     ? 7
     : int(obj.retry_limit, `${path}.retry_limit`, 1, 32);
-  return { environment, retryLimit };
+  return { environment, retryLimit, interferenceWindows: windows };
+}
+
+const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+function identifier(value: unknown, path: string): string {
+  const id = text(value, path);
+  if (!IDENTIFIER.test(id)) {
+    fail(path, `${JSON.stringify(id)} may only use letters, digits, "_", "." and "-"`);
+  }
+  return id;
+}
+
+/** `environment.interference`: noise sources, off until their window (or the timeline) turns them on. */
+function parseInterference(
+  value: unknown,
+  path: string,
+): { sources: InterferenceSource[]; windows: InterferenceWindow[] } {
+  const sources: InterferenceSource[] = [];
+  const windows: InterferenceWindow[] = [];
+  list(value ?? [], path).forEach((raw, i) => {
+    const p = `${path}[${i}]`;
+    const obj = record(raw, p);
+    known(obj, ["id", "position", "power_dbm", "band", "from", "to"], p);
+    const id = identifier(obj.id, `${p}.id`);
+    if (sources.some((source) => source.id === id)) {
+      fail(`${p}.id`, `${JSON.stringify(id)} is already an interference source`);
+    }
+    const band = text(obj.band, `${p}.band`);
+    if (!isInterferenceBand(band)) {
+      fail(
+        `${p}.band`,
+        `unknown band ${JSON.stringify(band)} (${Object.keys(INTERFERENCE_BANDS).join(", ")})`,
+      );
+    }
+    const fromMs = obj.from === undefined ? 0 : parseDuration(obj.from, `${p}.from`);
+    const toMs = obj.to === undefined ? null : parseDuration(obj.to, `${p}.to`);
+    if (toMs !== null && toMs <= fromMs) fail(`${p}.to`, "must be after `from`");
+    sources.push({
+      id,
+      position: parsePosition(obj.position, `${p}.position`),
+      powerDbm: num(obj.power_dbm, `${p}.power_dbm`, -50, 60),
+      band,
+      active: false,
+    });
+    windows.push({ id, fromMs, toMs });
+  });
+  return { sources, windows };
 }
 
 /** The channel-model parameters an `environment` block may set, the preset aside. */
@@ -338,10 +407,16 @@ export const CHANNEL_FIELDS = [
  */
 export function parseChannelChanges(obj: Record<string, unknown>, path: string): ChannelChanges {
   const obstacles: Obstacle[] = [];
+  const ids = new Set<string>();
   list(obj.obstacles ?? [], `${path}.obstacles`).forEach((raw, i) => {
     const p = `${path}.obstacles[${i}]`;
     const wall = record(raw, p);
-    known(wall, ["polygon", "attenuation_db"], p);
+    known(wall, ["id", "polygon", "attenuation_db"], p);
+    const id = wall.id === undefined ? undefined : identifier(wall.id, `${p}.id`);
+    if (id !== undefined) {
+      if (ids.has(id)) fail(`${p}.id`, `${JSON.stringify(id)} is already an obstacle`);
+      ids.add(id);
+    }
     const vertices = list(wall.polygon, `${p}.polygon`).map((v, j) =>
       point2(v, `${p}.polygon[${j}]`)
     );
@@ -351,6 +426,7 @@ export function parseChannelChanges(obj: Record<string, unknown>, path: string):
     const edges = vertices.length === 2 ? 1 : vertices.length;
     for (let e = 0; e < edges; e++) {
       obstacles.push({
+        ...(id !== undefined ? { id } : {}),
         from: vertices[e] as Point2,
         to: vertices[(e + 1) % vertices.length] as Point2,
         attenuationDb,
@@ -739,14 +815,25 @@ export function parseLinkRule(value: unknown, path: string): LinkRule {
   };
 }
 
-function parseTimeline(value: unknown): TimelineEvent[] {
+/** What the timeline may name: the walls with an `id` and the interference sources. */
+interface TimelineTargets {
+  obstacles: ReadonlySet<string>;
+  interference: ReadonlySet<string>;
+}
+
+function unknownTarget(path: string, what: string, id: string, known: ReadonlySet<string>): never {
+  const declared = known.size === 0 ? `none declared` : [...known].join(", ");
+  return fail(path, `no ${what} with id ${JSON.stringify(id)} (${declared})`);
+}
+
+function parseTimeline(value: unknown, targets: TimelineTargets): TimelineEvent[] {
   // A phase is judged by its label, so two phases with one label would judge only the first.
   const labels = new Set<string>(["start"]);
   return list(value ?? [], "timeline")
     .map((raw, i): TimelineEvent => {
       const path = `timeline[${i}]`;
       const obj = record(raw, path);
-      known(obj, ["at", "label", "move", "link"], path);
+      known(obj, ["at", "label", "move", "link", "obstacle", "interference"], path);
       const actions: TimelineAction[] = [];
       if (obj.move !== undefined) {
         const move = record(obj.move, `${path}.move`);
@@ -760,8 +847,35 @@ function parseTimeline(value: unknown): TimelineEvent[] {
       if (obj.link !== undefined) {
         actions.push({ kind: "link", rule: parseLinkRule(obj.link, `${path}.link`) });
       }
+      if (obj.obstacle !== undefined) {
+        const door = record(obj.obstacle, `${path}.obstacle`);
+        known(door, ["id", "attenuation_db"], `${path}.obstacle`);
+        const id = text(door.id, `${path}.obstacle.id`);
+        if (!targets.obstacles.has(id)) {
+          unknownTarget(`${path}.obstacle.id`, "obstacle", id, targets.obstacles);
+        }
+        actions.push({
+          kind: "obstacle",
+          id,
+          attenuationDb: num(door.attenuation_db, `${path}.obstacle.attenuation_db`, 0),
+        });
+      }
+      if (obj.interference !== undefined) {
+        const source = record(obj.interference, `${path}.interference`);
+        known(source, ["id", "on"], `${path}.interference`);
+        const id = text(source.id, `${path}.interference.id`);
+        if (!targets.interference.has(id)) {
+          unknownTarget(`${path}.interference.id`, "interference source", id, targets.interference);
+        }
+        if (typeof source.on !== "boolean") {
+          fail(`${path}.interference.on`, "expected true or false");
+        }
+        actions.push({ kind: "interference", id, on: source.on });
+      }
       const label = obj.label === undefined ? null : text(obj.label, `${path}.label`);
-      if (actions.length === 0 && label === null) fail(path, "needs a move, a link or a label");
+      if (actions.length === 0 && label === null) {
+        fail(path, "needs a move, a link, an obstacle, an interference or a label");
+      }
       if (label !== null && labels.has(label)) {
         fail(
           `${path}.label`,
@@ -1090,7 +1204,7 @@ function checkReferences(scenario: Scenario): void {
             "the internet gateway is not on the medium and has no position to move",
           );
         }
-      } else {
+      } else if (action.kind === "link") {
         needPattern(action.rule.from, `timeline[${i}].link.from`);
         needPattern(action.rule.to, `timeline[${i}].link.to`);
       }
@@ -1178,7 +1292,10 @@ export function parseScenario(yamlText: string): Scenario {
   }
   const root = record(doc, "scenario");
   known(root, TOP_LEVEL, "scenario");
-  const { environment, retryLimit } = parseEnvironment(root.environment, "environment");
+  const { environment, retryLimit, interferenceWindows } = parseEnvironment(
+    root.environment,
+    "environment",
+  );
   const subnetPrefix = parseSubnet(root.network, "network");
   // Read in the order of the file's sections, so the first error reported is the first one there.
   const name = text(root.name, "name");
@@ -1201,11 +1318,15 @@ export function parseScenario(yamlText: string): Scenario {
     seed,
     durationMs,
     environment,
+    interferenceWindows,
     retryLimit,
     subnetPrefix,
     nodes,
     links: list(root.links ?? [], "links").map((l, i) => parseLinkRule(l, `links[${i}]`)),
-    timeline: parseTimeline(root.timeline),
+    timeline: parseTimeline(root.timeline, {
+      obstacles: new Set(environment.obstacles.flatMap((wall) => wall.id ? [wall.id] : [])),
+      interference: new Set(environment.interference.map((source) => source.id)),
+    }),
     assertions: list(root.assertions ?? [], "assertions").map((a, i) =>
       parseAssertion(a, `assertions[${i}]`)
     ),
@@ -1213,6 +1334,14 @@ export function parseScenario(yamlText: string): Scenario {
     bridge: parseBridge(root.bridge, phy, subnetPrefix),
   };
   if (scenario.durationMs <= 0) fail("duration", "must be positive");
+  scenario.interferenceWindows.forEach((window, i) => {
+    if (window.fromMs > scenario.durationMs) {
+      fail(`environment.interference[${i}].from`, "is after the end of the run");
+    }
+    if (window.toMs !== null && window.toMs > scenario.durationMs) {
+      fail(`environment.interference[${i}].to`, "is after the end of the run");
+    }
+  });
   checkBridge(scenario, record(root.bridge ?? {}, "bridge").radios !== undefined);
   checkReferences(scenario);
   return scenario;

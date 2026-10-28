@@ -7,13 +7,20 @@
 
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
-import type { ChipSignal, EngineEvent, LinkBudget, Position } from "../engine/mod.ts";
+import {
+  type ChipSignal,
+  type EngineEvent,
+  environmentFromPreset,
+  type LinkBudget,
+  type Position,
+} from "../engine/mod.ts";
 import { ToolError } from "../mcp/protocol.ts";
 import { Session } from "../mcp/session.ts";
 import {
   chipSignalQuality,
   LOSS_WINDOW_MS,
   lossQuality,
+  sceneInterference,
   sceneLinks,
   sceneObstacles,
   signalQuality,
@@ -42,7 +49,7 @@ class StubSession {
   get run() {
     return this.state === "idle"
       ? null
-      : { loaded: { scenario: { phy: "wifi", environment: { obstacles: [] } } } };
+      : { loaded: { scenario: { phy: "wifi", environment: { obstacles: [], interference: [] } } } };
   }
 
   status() {
@@ -961,4 +968,60 @@ Deno.test("scene: viewState on a session with no run, or no time zero, has no li
   const scene = viewState(stub as unknown as Session, -1);
   assertEquals(scene.scene!.links, []);
   assertEquals(scene.timeline, { entries: [], next_since: -1, truncated: false });
+});
+
+Deno.test("scene: a named wall keeps its id, an unnamed one has none, and sources carry their state", () => {
+  assertEquals(
+    sceneObstacles([
+      { id: "door", from: [0, 0], to: [0, 4], attenuationDb: 12 },
+      { from: [5, 0], to: [5, 4], attenuationDb: 6 },
+    ]),
+    [
+      { id: "door", from: [0, 0], to: [0, 4], attenuation_db: 12 },
+      { from: [5, 0], to: [5, 4], attenuation_db: 6 },
+    ],
+  );
+  assertEquals(
+    sceneInterference([
+      { id: "oven", position: { x: 3, y: 4 }, powerDbm: 20, band: "2.4ghz", active: true },
+      { id: "ap", position: { x: 1, y: 2, z: 3 }, powerDbm: -5, band: "868mhz", active: false },
+    ]),
+    [
+      { id: "oven", position: [3, 4], power_dbm: 20, band: "2.4ghz", active: true },
+      { id: "ap", position: [1, 2], power_dbm: -5, band: "868mhz", active: false },
+    ],
+  );
+});
+
+Deno.test("scene: the map draws the live model, so an open door and a running oven show as they are", () => {
+  const stub = new StubSession();
+  const scenario = environmentFromPreset("indoor_office", {
+    obstacles: [{ id: "door", from: [0, 0], to: [0, 4], attenuationDb: 12 }],
+    interference: [{
+      id: "oven",
+      position: { x: 3, y: 4 },
+      powerDbm: 20,
+      band: "2.4ghz",
+      active: false,
+    }],
+  });
+  const live = {
+    obstacles: [{ ...scenario.obstacles[0]!, attenuationDb: 0 }],
+    interference: [{ ...scenario.interference[0]!, active: true }],
+  };
+  const run = (environment: unknown, withLive: boolean) => ({
+    loaded: { scenario: { phy: "wifi", environment } },
+    ...(withLive ? { live: { environment: () => ({ ...scenario, ...live }) } } : {}),
+  });
+  const scene = (withLive: boolean) => {
+    Object.defineProperty(stub, "run", { value: run(scenario, withLive), configurable: true });
+    return viewState(stub as unknown as Session, -1).scene!;
+  };
+  // Before the run has a live handle, the file's own model.
+  assertEquals(scene(false).obstacles[0]!.attenuation_db, 12);
+  assertEquals(scene(false).interference[0]!.active, false);
+  // Once it has one, what the model is now.
+  assertEquals(scene(true).obstacles[0]!.attenuation_db, 0);
+  assertEquals(scene(true).obstacles[0]!.id, "door");
+  assertEquals(scene(true).interference[0]!.active, true);
 });

@@ -523,7 +523,19 @@ class FakeSession {
   durationMs = 60_000;
   elapsed: number | null = 5000;
   nodes: FakeNode[] = [];
-  obstacles: { from: [number, number]; to: [number, number]; attenuationDb: number }[] = [];
+  obstacles: {
+    id?: string;
+    from: [number, number];
+    to: [number, number];
+    attenuationDb: number;
+  }[] = [];
+  interference: {
+    id: string;
+    position: { x: number; y: number };
+    powerDbm: number;
+    band: string;
+    active: boolean;
+  }[] = [];
   problems: string[] = [];
   error: string | null = null;
   passed = true;
@@ -558,7 +570,12 @@ class FakeSession {
   get run() {
     if (this.state === "idle") return null;
     return {
-      loaded: { scenario: { phy: this.phy, environment: { obstacles: this.obstacles } } },
+      loaded: {
+        scenario: {
+          phy: this.phy,
+          environment: { obstacles: this.obstacles, interference: this.interference },
+        },
+      },
     };
   }
 
@@ -921,6 +938,9 @@ Deno.test({
       for (const [name, layout] of Object.entries(CLOSE_LAYOUTS)) {
         const session = new FakeSession().setNodes(layout);
         session.obstacles = [{ from: [25, -3], to: [25, 3], attenuationDb: 12 }];
+        session.interference = [
+          { id: "oven", position: { x: 20, y: 4 }, powerDbm: 20, band: "2.4ghz", active: true },
+        ];
         await serving(session, async (url) => {
           for (const { width, height } of VIEWPORTS) {
             await page.viewport(width, height);
@@ -935,6 +955,49 @@ Deno.test({
         });
       }
       assertEquals(failures, []);
+    });
+  },
+});
+
+Deno.test({
+  name:
+    "ui: a door that stands open and an interference source are drawn, named and told apart from walls and nodes",
+  ignore: CHROMIUM === null,
+  fn: async () => {
+    await withPage(async (page) => {
+      const session = new FakeSession().setNodes([["a", 0, 0], ["b", 10, 0]]);
+      session.obstacles = [
+        { id: "door", from: [5, -4], to: [5, 4], attenuationDb: 0 },
+        { from: [8, -4], to: [8, 4], attenuationDb: 6 },
+      ];
+      session.interference = [
+        { id: "oven", position: { x: 10, y: 3 }, powerDbm: 20, band: "2.4ghz", active: true },
+        { id: "ap", position: { x: 0, y: 3 }, powerDbm: -5, band: "868mhz", active: false },
+      ];
+      await serving(session, async (url) => {
+        await page.viewport(1280, 800);
+        await page.goto(url);
+        await page.waitFor(`document.querySelectorAll(".source").length === 2`, "the sources");
+        const drawn = await page.eval<Json>(`(() => ({
+          walls: [...document.querySelectorAll("#map line.wall")].map((el) => [el.getAttribute("class"), el.querySelector("title").textContent]),
+          wallLabels: [...document.querySelectorAll("#map text.wall-label")].map((el) => el.textContent),
+          sources: [...document.querySelectorAll("#map circle.source")].map((el) => [el.getAttribute("class"), el.querySelector("title").textContent]),
+        }))()`);
+        assertEquals(drawn.walls, [
+          ["wall open", "wall door, 0 dB (open)"],
+          ["wall", "wall, 6 dB"],
+        ]);
+        assert(drawn.wallLabels.includes("wall door 0 dB"), JSON.stringify(drawn.wallLabels));
+        assert(
+          drawn.wallLabels.includes("oven 20 dBm 2.4ghz on"),
+          JSON.stringify(drawn.wallLabels),
+        );
+        assertEquals(drawn.sources, [
+          ["source on", "interference oven: 20 dBm, 2.4ghz, on"],
+          ["source", "interference ap: -5 dBm, 868mhz, off"],
+        ]);
+        assertEquals(page.errors, []);
+      });
     });
   },
 });
@@ -976,7 +1039,14 @@ function richSession(): FakeSession {
     ["c", 10, 10],
     ["d", 0, 10],
   ]);
-  session.obstacles = [{ from: [5, -4], to: [5, 14], attenuationDb: 12 }];
+  session.obstacles = [
+    { from: [5, -4], to: [5, 14], attenuationDb: 12 },
+    { id: "door", from: [-4, 5], to: [14, 5], attenuationDb: 0 },
+  ];
+  session.interference = [
+    { id: "oven", position: { x: 12, y: -3 }, powerDbm: 20, band: "2.4ghz", active: true },
+    { id: "ap", position: { x: -3, y: -3 }, powerDbm: 10, band: "2.4ghz", active: false },
+  ];
   // a-b good, b-c fair, c-d poor, d-a bad, a-c and b-d fair/good by SNR.
   const snr: Record<string, number> = {
     "a>b": 30,
@@ -2995,6 +3065,8 @@ const GRAPHICS = String.raw`(() => {
   const map = document.getElementById("map");
   for (const el of document.querySelectorAll("#map line.link")) add("link " + el.getAttribute("class"), el, "stroke", map);
   for (const el of document.querySelectorAll("#map line.wall")) add("wall", el, "stroke", map);
+  for (const el of document.querySelectorAll("#map circle.source")) add("interference source " + el.getAttribute("class"), el, "stroke", map);
+  for (const el of document.querySelectorAll("#map circle.source.on")) add("interference source on", el, "fill", map);
   for (const el of document.querySelectorAll("#map line.scale-bar")) add("scale bar", el, "stroke", map);
   for (const el of document.querySelectorAll("#map circle.node-dot")) {
     add("node dot fill", el, "fill", map);

@@ -1,0 +1,52 @@
+# A door and a microwave oven, with scripted boards (no libqemu).
+#
+# `a` and `b` are 53 m apart with a closed door between them (12 dB). Four
+# phases of two seconds each:
+#   start      the door is closed: nothing crosses it
+#   door-open  the door opens at 2 s: both directions come back
+#   oven-on    an oven next to `b` switches on at 4 s: the noise floor at `b`
+#              rises, so a->b is lost while b->a (heard by `a`, far from the
+#              oven) is not
+#   oven-off   the oven switches off at 6 s: both directions are clean again
+# The wall and the oven are in `environment`: the oven starts on its own at 4 s
+# (`from`), the timeline opens the door and switches the oven off again.
+# Shadowing is off so the geometry alone decides each phase.
+name: door-and-interference-scripted
+seed: 7
+duration: 8s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+  obstacles:
+    - { id: front-door, polygon: [[26, -10], [26, 10]], attenuation_db: 12 }
+  interference:
+    - { id: oven, position: [55, 2], power_dbm: -20, band: 2.4ghz, from: 4s }
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: b, every: 100ms, count: 75, payload: ping }
+  - id: b
+    board: scripted
+    position: [53, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: a, every: 100ms, count: 75, payload: ping }
+timeline:
+  - { at: 2s, label: door-open, obstacle: { id: front-door, attenuation_db: 0 } }
+  - { at: 4s, label: oven-on }
+  - { at: 6s, label: oven-off, interference: { id: oven, on: false } }
+assertions:
+  # Door closed: 12 dB of wall leaves no rate that decodes.
+  - metric: { link: "*->*", phase: start, kind: udp, loss_pct: { gt: 90 } }
+  # Door open: the same link, 12 dB better, carries everything.
+  - metric: { link: "*->*", phase: door-open, kind: udp, loss_pct: { lt: 5 }, snr_db: { gt: 12 } }
+  # Oven on: the noise at b drowns a->b; b->a is as clean as before.
+  - metric: { link: "a->b", phase: oven-on, kind: udp, loss_pct: { gt: 90 }, snr_db: { lt: 0 } }
+  - metric: { link: "b->a", phase: oven-on, kind: udp, loss_pct: { lt: 5 } }
+  # Oven off: back to the door-open numbers.
+  - metric: { link: "*->*", phase: oven-off, kind: udp, loss_pct: { lt: 5 }, snr_db: { gt: 12 } }

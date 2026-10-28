@@ -115,6 +115,8 @@ export type EngineEvent =
   })
   /** Channel-model parameters changed while the run plays. */
   | (Stamped & { type: "channel"; changes: ChannelChanges })
+  /** An interference source switched on or off, by the scenario's schedule or its timeline. */
+  | (Stamped & { type: "interference"; id: string; active: boolean })
   /** A station's radio, as the medium models it, changed while the run plays. */
   | (Stamped & { type: "radio"; node: string; changes: Partial<RadioConfig> })
   | (Stamped & { type: "warning"; text: string })
@@ -140,6 +142,7 @@ const EVENT_TYPE_SET: Record<EngineEvent["type"], true> = {
   "espnow-send": true,
   "ble-link": true,
   channel: true,
+  interference: true,
   radio: true,
   warning: true,
   phase: true,

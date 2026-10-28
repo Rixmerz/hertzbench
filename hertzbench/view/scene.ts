@@ -7,6 +7,7 @@ import {
   chipPacketErrorRate,
   type ChipSignal,
   type EngineEvent,
+  type InterferenceSource,
   type LinkBudget,
   linkStats,
   type Obstacle,
@@ -255,6 +256,7 @@ function toEntry(event: EngineEvent): TimelineEntry | null {
     case "espnow-send":
     case "ble-link":
     case "channel":
+    case "interference":
     case "radio":
     case "warning":
       return null;
@@ -272,11 +274,14 @@ export function viewState(session: Session, since: number) {
   if (!run) return { status, scene: null, timeline: null };
   const events = session.events(run);
   const now = session.elapsedMs(run);
+  // The live model, so a door that opened shows as open and a source shows whether it is on.
+  const environment = run.live?.environment() ?? run.loaded.scenario.environment;
   return {
     status,
     scene: {
       phy: run.loaded.scenario.phy,
-      obstacles: sceneObstacles(run.loaded.scenario.environment.obstacles),
+      obstacles: sceneObstacles(environment.obstacles),
+      interference: sceneInterference(environment.interference),
       window_ms: LOSS_WINDOW_MS,
       links: now === null ? [] : sceneLinks(session.linkBudgets(run), events, now),
     },
@@ -286,7 +291,23 @@ export function viewState(session: Session, since: number) {
 
 /** Walls as segments in metres, for the map. */
 export function sceneObstacles(obstacles: readonly Obstacle[]) {
-  return obstacles.map((o) => ({ from: o.from, to: o.to, attenuation_db: o.attenuationDb }));
+  return obstacles.map((o) => ({
+    ...(o.id !== undefined ? { id: o.id } : {}),
+    from: o.from,
+    to: o.to,
+    attenuation_db: o.attenuationDb,
+  }));
+}
+
+/** Noise sources as points in metres, with whether each is on now. */
+export function sceneInterference(sources: readonly InterferenceSource[]) {
+  return sources.map((s) => ({
+    id: s.id,
+    position: [s.position.x, s.position.y],
+    power_dbm: s.powerDbm,
+    band: s.band,
+    active: s.active,
+  }));
 }
 
 function round(value: number): number {

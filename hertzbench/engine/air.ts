@@ -18,6 +18,8 @@ import {
   type Position,
   type RadioConfig,
   withInterference,
+  withSourceActive,
+  withWallAttenuation,
 } from "./channel.ts";
 import type { Clock } from "./clock.ts";
 import type { ChannelChanges, DropReason, EventLog, FrameKind } from "./events.ts";
@@ -171,6 +173,36 @@ export class AirMedium implements MediumControl {
   setEnvironment(changes: ChannelChanges): void {
     this.#environment = { ...this.#environment, ...changes };
     this.#opts.log.append({ type: "channel", t: this.#opts.clock.now(), changes });
+  }
+
+  setObstacleAttenuation(id: string, attenuationDb: number): void {
+    const next = withWallAttenuation(this.#environment, id, attenuationDb);
+    if (!next) return this.#warnUnknown("obstacle", id);
+    this.#environment = next;
+    this.#opts.log.append({
+      type: "channel",
+      t: this.#opts.clock.now(),
+      changes: { obstacles: next.obstacles },
+    });
+  }
+
+  setInterference(id: string, active: boolean): void {
+    const next = withSourceActive(this.#environment, id, active);
+    if (!next) return this.#warnUnknown("interference source", id);
+    this.#environment = next;
+    this.#opts.log.append({ type: "interference", t: this.#opts.clock.now(), id, active });
+  }
+
+  environment(): Environment {
+    return this.#environment;
+  }
+
+  #warnUnknown(what: string, id: string): void {
+    this.#opts.log.append({
+      type: "warning",
+      t: this.#opts.clock.now(),
+      text: `no ${what} named ${JSON.stringify(id)} any more; the change was ignored`,
+    });
   }
 
   /**

@@ -20,6 +20,7 @@ import {
   type Clock,
   computeMetrics,
   type EngineEvent,
+  type Environment,
   espnowToRadiotap,
   EventLog,
   type LinkBudget,
@@ -53,9 +54,11 @@ import {
   type BridgeSpec,
   GATEWAY_HOST,
   GATEWAY_MAC,
+  type InterferenceWindow,
   type LinkRule,
   matchesPattern,
   type Scenario,
+  type TimelineAction,
 } from "./scenario.ts";
 
 export interface OutputPaths {
@@ -103,6 +106,8 @@ export interface LiveRun {
   moveNode(id: string, to: Position): void;
   /** Channel-model parameters, changed now for every later frame and budget. */
   setEnvironment(changes: ChannelChanges): void;
+  /** The channel model as it is now: the walls (doors included) and which interference sources are on. */
+  environment(): Environment;
   /** A station's radio as the medium models it; the chip-level air takes only the antenna gain. */
   setRadio(id: string, changes: Partial<RadioConfig>): void;
   /** Applies the rule now; returns the directed pairs it set. */
@@ -331,6 +336,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
           whileActive();
           medium.moveNode(id, to);
         },
+        environment: () => medium.environment(),
         setEnvironment: (changes) => {
           whileActive();
           medium.setEnvironment(changes);
@@ -377,13 +383,15 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       };
       options.onUnderway(live);
     }
+    for (const { id, on, atMs } of interferenceSchedule(scenario.interferenceWindows)) {
+      // A source due at time zero is on before the first frame, not racing it.
+      if (atMs <= 0) medium.setInterference(id, on);
+      else clock.schedule(zeroMs + atMs, () => medium.setInterference(id, on));
+    }
     for (const event of scenario.timeline) {
       clock.schedule(zeroMs + event.atMs, () => {
         if (event.label !== null) medium.startPhase(event.label);
-        for (const action of event.actions) {
-          if (action.kind === "move") medium.moveNode(action.node, action.to);
-          else applyLinkRule(medium, action.rule, mediumIds);
-        }
+        for (const action of event.actions) applyTimelineAction(medium, action, mediumIds);
       });
     }
     await Promise.race([
@@ -535,6 +543,41 @@ function bridgeNode(spec: BridgeSpec, onMedium: { position: Position }): NodeRep
 function startupMessage(problems: readonly string[], cause?: string): string {
   const lines = [cause ?? "a board failed during start-up", ...problems.map((p) => `  ${p}`)];
   return `${lines.join("\n")}\n  (worker logs are in the output directory)`;
+}
+
+/** What a timeline action does to the medium; the timeline and the test rigs share it. */
+export function applyTimelineAction(
+  medium: MediumControl,
+  action: TimelineAction,
+  mediumIds: readonly string[],
+): void {
+  switch (action.kind) {
+    case "move":
+      return medium.moveNode(action.node, action.to);
+    case "link":
+      applyLinkRule(medium, action.rule, mediumIds);
+      return;
+    case "obstacle":
+      return medium.setObstacleAttenuation(action.id, action.attenuationDb);
+    case "interference":
+      return medium.setInterference(action.id, action.on);
+  }
+}
+
+/**
+ * The switches a scenario's `from`/`to` windows make, in time order. A source
+ * is off before its window and after it; the timeline can still switch it, and
+ * of two switches the later one wins.
+ */
+export function interferenceSchedule(
+  windows: readonly InterferenceWindow[],
+): { id: string; on: boolean; atMs: number }[] {
+  return windows
+    .flatMap((w) => [
+      { id: w.id, on: true, atMs: w.fromMs },
+      ...(w.toMs === null ? [] : [{ id: w.id, on: false, atMs: w.toMs }]),
+    ])
+    .sort((a, b) => a.atMs - b.atMs);
 }
 
 function applyLinkRule(

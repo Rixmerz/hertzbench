@@ -97,6 +97,7 @@ const view = {
 const layers = {
   grid: svg("g"),
   walls: svg("g"),
+  sources: svg("g"),
   links: svg("g"),
   nodes: svg("g"),
   // Above the nodes: a label near a node on a short link would be painted over by its ring.
@@ -222,7 +223,7 @@ function mapSize() {
   return { width: Math.max(box.width, 100), height: Math.max(box.height, 100) };
 }
 
-function growBounds(nodes, obstacles) {
+function growBounds(nodes, obstacles, sources) {
   if (view.drag) return; // the drag must not rescale the map under the pointer
   const xs = [];
   const ys = [];
@@ -234,6 +235,10 @@ function growBounds(nodes, obstacles) {
   for (const wall of obstacles) {
     xs.push(wall.from[0], wall.to[0]);
     ys.push(wall.from[1], wall.to[1]);
+  }
+  for (const source of sources) {
+    xs.push(source.position[0]);
+    ys.push(source.position[1]);
   }
   if (xs.length === 0) return;
   const b = view.bounds ?? { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
@@ -291,9 +296,9 @@ function render() {
   ui.window.textContent = data.scene ? fixed(data.scene.window_ms / 1000, 0) : "2";
 
   const nodes = status.nodes ?? [];
-  const scene = data.scene ?? { phy: "wifi", obstacles: [], links: [] };
+  const scene = data.scene ?? { phy: "wifi", obstacles: [], interference: [], links: [] };
   view.phy = scene.phy;
-  growBounds(nodes, scene.obstacles);
+  growBounds(nodes, scene.obstacles, scene.interference);
   const proj = projection();
   ui.map.setAttribute("viewBox", `0 0 ${proj.width} ${proj.height}`);
   // What a label must keep clear of: the scale, every node and name, then each label placed.
@@ -301,6 +306,7 @@ function render() {
   drawGrid(proj, taken);
   drawNodes(proj, nodes, data.board_images ?? {}, taken);
   drawWalls(proj, scene.obstacles, taken);
+  drawSources(proj, scene.interference, taken);
   drawLinks(proj, nodes, scene.links, taken);
   drawLegend();
   drawTable(scene.links, status, nodes);
@@ -355,12 +361,15 @@ function drawWalls(proj, obstacles, taken) {
   for (const wall of obstacles) {
     const [x1, y1] = proj.to(wall.from[0], wall.from[1]);
     const [x2, y2] = proj.to(wall.to[0], wall.to[1]);
-    const line = svg("line", { class: "wall", x1, y1, x2, y2 });
+    // A named wall at 0 dB is a door that stands open: drawn dashed, and still labelled.
+    const open = wall.id !== undefined && wall.attenuation_db === 0;
+    const line = svg("line", { class: open ? "wall open" : "wall", x1, y1, x2, y2 });
+    const name = wall.id === undefined ? "wall" : `wall ${wall.id}`;
     const title = svg("title");
-    title.textContent = `wall, ${wall.attenuation_db} dB`;
+    title.textContent = `${name}, ${wall.attenuation_db} dB${open ? " (open)" : ""}`;
     line.append(title);
     const label = svg("text", { class: "wall-label", "text-anchor": "middle" });
-    label.textContent = `wall ${wall.attenuation_db} dB`;
+    label.textContent = `${name} ${wall.attenuation_db} dB`;
     layers.walls.append(line, label);
     const w = widthOf(label);
     // Beside an end or the middle of the wall, to the right and below it, then to the left and above.
@@ -373,6 +382,34 @@ function drawWalls(proj, obstacles, taken) {
     label.setAttribute("x", spot[0]);
     label.setAttribute("y", spot[1] + 4);
     taken.push(boxAt(spot[0], spot[1], w, 16));
+  }
+}
+
+/** Interference sources: a ringed dot, filled while the source is on. */
+function drawSources(proj, sources, taken) {
+  layers.sources.replaceChildren();
+  for (const source of sources) {
+    const [cx, cy] = proj.to(source.position[0], source.position[1]);
+    const state = source.active ? "on" : "off";
+    const sentence = `interference ${source.id}: ${source.power_dbm} dBm, ${source.band}, ${state}`;
+    const dot = svg("circle", {
+      class: source.active ? "source on" : "source",
+      cx,
+      cy,
+      r: 9,
+    });
+    const title = svg("title");
+    title.textContent = sentence;
+    dot.append(title);
+    const label = svg("text", { class: "wall-label", "text-anchor": "middle" });
+    label.textContent = `${source.id} ${source.power_dbm} dBm ${source.band} ${state}`;
+    layers.sources.append(dot, label);
+    const w = widthOf(label);
+    const spots = [[cx, cy + 24], [cx, cy - 18], [cx + 14 + w / 2, cy], [cx - 14 - w / 2, cy]];
+    const spot = spots.find(([x, y]) => isFree(boxAt(x, y, w, 16), proj, taken)) ?? spots[0];
+    label.setAttribute("x", spot[0]);
+    label.setAttribute("y", spot[1] + 4);
+    taken.push(boxAt(spot[0], spot[1], w, 16), boxAt(cx, cy, 20, 20));
   }
 }
 
@@ -499,7 +536,10 @@ function placeName(proj, element, x, y, half, taken) {
   const w = widthOf(label);
   const h = 16;
   const [side, up] = [half[0] + 2 + w / 2, half[1] + 2 + h / 2];
-  const spots = [[0, 30], [0, -30], [side, 0], [-side, 0], [side, up], [-side, up], [side, -up], [-side, -up]];
+  const spots = [[0, 30], [0, -30], [side, 0], [-side, 0], [side, up], [-side, up], [side, -up], [
+    -side,
+    -up,
+  ]];
   let spot = spots.find(([dx, dy]) => isFree(boxAt(x + dx, y + dy, w, h), proj, taken));
   if (!spot) {
     const dx = Math.min(Math.max(x, w / 2), proj.width - w / 2) - x;

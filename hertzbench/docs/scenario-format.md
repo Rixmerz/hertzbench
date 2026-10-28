@@ -2,7 +2,7 @@
 
 A scenario is one YAML file. `hertzbench validate` checks it; every error names the field (`nodes[1].position: expected [x, y] or [x, y, z]`). Unknown fields are errors, not ignored. Durations need a unit: `500ms`, `60s`, `1.5s`, `2m`. A bare number is refused.
 
-Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE; [`bridge-web-scripted.yaml`](../scenarios/examples/bridge-web-scripted.yaml), [`bridge-web-esp32.yaml`](../scenarios/examples/bridge-web-esp32.yaml), [`bridge-ble-scripted.yaml`](../scenarios/examples/bridge-ble-scripted.yaml) and [`bridge-ble-esp32.yaml`](../scenarios/examples/bridge-ble-esp32.yaml) for the mobile bridge.
+Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE; [`bridge-web-scripted.yaml`](../scenarios/examples/bridge-web-scripted.yaml), [`bridge-web-esp32.yaml`](../scenarios/examples/bridge-web-esp32.yaml), [`bridge-ble-scripted.yaml`](../scenarios/examples/bridge-ble-scripted.yaml) and [`bridge-ble-esp32.yaml`](../scenarios/examples/bridge-ble-esp32.yaml) for the mobile bridge; [`door-and-interference-scripted.yaml`](../scenarios/examples/door-and-interference-scripted.yaml) (scripted) for a door that opens and a noise source that switches on and off.
 
 ```yaml
 name: udp-3-nodes            # required
@@ -17,6 +17,9 @@ environment:
   retry_limit: 7             # transmit attempts for a unicast frame, 1 to 32
   obstacles:                 # walls
     - { polygon: [[30, -20], [30, 20]], attenuation_db: 12 }
+    - { id: front-door, polygon: [[10, -5], [10, 5]], attenuation_db: 12 }   # a named wall: a door the timeline can change
+  interference:              # noise sources (a microwave oven, a neighbour's access point)
+    - { id: oven, position: [12, 3], power_dbm: 20, band: 2.4ghz, from: 30s, to: 45s }
 network:
   subnet: 192.168.4.0/24     # only a /24; the gateway is .1, boards start at .11
 nodes: [...]                 # 2 to 10 boards
@@ -26,6 +29,33 @@ assertions: [...]
 outputs: { metrics: ./out/metrics.json, pcap: ./out/air.pcap, events: ./out/events.jsonl }
 bridge: {...}                # optional: a real phone reaches the boards (see below)
 ```
+
+## `environment`: walls, doors and interference
+
+**Walls.** `obstacles` is a list of `{ polygon, attenuation_db }`. Two points are one wall; three or more are a closed outline. A frame pays a wall's attenuation once if the straight line between the stations crosses it.
+
+**Doors.** A wall may carry an `id` (letters, digits, `_`, `.`, `-`; unique among the walls). Every edge of a polygon carries the polygon's id. A `timeline` entry `obstacle: { id, attenuation_db }` sets the attenuation of every edge with that id from then on, so a door opens with `attenuation_db: 0` and closes with its old value. The medium reads the new value for every frame sent after the entry; a frame already on the air keeps what it was sent with. The entry names an id that no wall has: error `timeline[i].obstacle.id`. Like any entry, it starts a metrics phase only if it has a `label`.
+
+**Interference.** `interference` is a list of noise sources:
+
+```yaml
+interference:
+  - id: oven                # letters, digits, "_", "." and "-"; unique among the sources
+    position: [12, 3]       # metres: [x, y] or [x, y, z]
+    power_dbm: 20           # radiated power, -50 to 60
+    band: 2.4ghz            # 2.4ghz | 868mhz
+    from: 30s               # optional: when it switches on, from time zero. Default: time zero
+    to: 45s                 # optional: when it switches off. Default: the end of the run
+```
+
+- A source is on from `from` to `to` and **off before time zero**, so board start-up (DHCP, pairing) is not disturbed. One whose `from` is 0 or absent is on before the first frame of the run. `from` and `to` are at most `duration`, and `to` is after `from`.
+- A `timeline` entry `interference: { id, on: true | false }` switches a source on or off at its time, whatever its window said. Of two switches the later one wins: a window's own switches are events like the timeline's.
+- While on, a source raises the noise floor of every receiver in its band by its power **after the same path loss the signal would pay**: the log-distance model of the environment (`path_loss_exponent`, reference distance) from the source's position to the receiver, plus the walls between them (a door counts), plus the receiver's antenna gain. The received interference adds to the thermal noise in milliwatts, so one source that arrives at the thermal floor adds 3 dB, and one 20 dB above it adds about 20 dB. The SNR falls by as much and the RSSI does not move. It stacks with a link's `interference_db`, which raises the floor further.
+- `band` is compared with the receiver's centre frequency: `2.4ghz` is 2400 to 2500 MHz (Wi-Fi, ESP-NOW, nRF24 and BLE), `868mhz` is 863 to 870 MHz (LoRa at the 868 MHz settings). A LoRa radio at 433 or 915 MHz hears neither. Radios have no band setting of their own; this is the whole band-matching rule.
+- The frames it costs are lost by the reasons the PHY already has: `noise` on LoRa, nRF24 and BLE; `retry_exhausted` on Wi-Fi, UDP/TCP and ESP-NOW (the sender has used up its attempts at the lower SNR). No new reason.
+- Not modelled: duty cycle or modulation of the source (it is constant while on), selectivity between channels (a source in the band is heard across all of it, so a Wi-Fi access point on channel 1 hurts a node on channel 11 as much as one on channel 1), shadowing on the source's path, and the source hearing or being heard by anything. Collisions between stations are still the ones of [fidelity.md](fidelity.md).
+- Both are deterministic: a source adds no random draw, so the same seed gives the same run, and a scenario without sources or doors draws and decides exactly as before.
+- Both can be changed in a run in progress only through [MCP](mcp.md): `set_channel` replaces the walls (keep the `id`s the timeline names, or the entry is logged as a warning and ignored). Sources are fixed by the file; switch them with the timeline.
 
 ## `nodes`
 
@@ -159,9 +189,11 @@ Directional. `*` matches any run of characters. Both extras default to 0. Applie
   label: behind-wall                          # optional; starts a new metrics phase of this name
   move: { node: c, to: [42, 0] }              # optional; live move
   link: { from: c, to: a, extra_loss_pct: 50 }  # optional; chaos override from now on
+  obstacle: { id: front-door, attenuation_db: 0 }   # optional; a door opens (or closes again with its old value)
+  interference: { id: oven, on: false }      # optional; switch a noise source off or on
 ```
 
-Needs at least a `move`, a `link` or a `label`. Events past `duration` are an error. Metrics are reported for the whole run and per phase; the first phase is called `start`.
+Needs at least a `move`, a `link`, an `obstacle`, an `interference` or a `label`. Events past `duration` are an error. A door or source the entry names must exist in `environment`: `timeline[i].obstacle.id` and `timeline[i].interference.id` say which one does not. A door or source entry makes a phase only with a `label`. Metrics are reported for the whole run and per phase; the first phase is called `start`.
 
 ## `assertions`
 
@@ -187,7 +219,7 @@ One JSON event per line, in the order the engine logged them, with `t` in millis
 
 ## `metrics.json`
 
-`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). With a bridge, `metrics.json` also has `bridge`: `kind` (`ip` or `ble`), `id`, and either `endpoints` (each `node`, `port`, `service`, `listenPort`, `host`, `hostPort`) and `mdns` (one line: what was advertised, or why nothing was), or `mirror`, `adapter`, `name`, `services` (the discovered table) and `peripheral`. The bridge's station is the last entry of `nodes`, with `board: "bridge"`. `events.jsonl` has one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
+`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). With a bridge, `metrics.json` also has `bridge`: `kind` (`ip` or `ble`), `id`, and either `endpoints` (each `node`, `port`, `service`, `listenPort`, `host`, `hostPort`) and `mdns` (one line: what was advertised, or why nothing was), or `mirror`, `adapter`, `name`, `services` (the discovered table) and `peripheral`. The bridge's station is the last entry of `nodes`, with `board: "bridge"`. `events.jsonl` has a `channel` event (with the walls as they are now) each time a door changes, an `interference` event (`id`, `active`) each time a source switches, one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
 
 ## Exit status
 

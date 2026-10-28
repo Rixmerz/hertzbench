@@ -370,7 +370,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "edit_scenario",
       description:
-        "Change a scenario file inside the workspace in one step, checked before it is written: an invalid result is refused and the file stays as it was. `set` is a JSON merge patch on the top level (name, seed, duration, environment and its channel parameters, network, links with their loss, latency, jitter and interference, timeline, assertions, outputs, bridge): objects merge, null removes a key, arrays are replaced whole. `nodes` patches node entries by id the same way (position, board, firmware, radios, ...); null removes the node. `add` appends new node entries. A node made by `count:` is edited through its group's id. The file is rewritten from its data, so comments are lost. Takes effect on the next run_scenario; for the run in progress use move_node, inject_fault, set_channel and set_radio.",
+        "Change a scenario file inside the workspace in one step, checked before it is written: an invalid result is refused and the file stays as it was. `set` is a JSON merge patch on the top level (name, seed, duration, environment and its channel parameters, walls with an id that the timeline can open and close, and interference sources, network, links with their loss, latency, jitter and interference, timeline, assertions, outputs, bridge): objects merge, null removes a key, arrays are replaced whole. `nodes` patches node entries by id the same way (position, board, firmware, radios, ...); null removes the node. `add` appends new node entries. A node made by `count:` is edited through its group's id. The file is rewritten from its data, so comments are lost. Takes effect on the next run_scenario; for the run in progress use move_node, inject_fault, set_channel and set_radio.",
       inputSchema: {
         type: "object",
         properties: {
@@ -609,7 +609,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "set_channel",
       description:
-        "Change the channel model of the run in progress, now, for every later frame and link budget: path_loss_exponent, shadowing_sigma_db (scales each pair's seeded draw), noise_figure_db (Wi-Fi receivers; chip PHYs use their own), base_latency_ms, and obstacles (replaces every wall; scenario format: [{ polygon: [[x, y], ...], attenuation_db }]). Same units and ranges as the scenario's environment block. Logged as a channel event.",
+        "Change the channel model of the run in progress, now, for every later frame and link budget: path_loss_exponent, shadowing_sigma_db (scales each pair's seeded draw), noise_figure_db (Wi-Fi receivers; chip PHYs use their own), base_latency_ms, and obstacles (replaces every wall; scenario format: [{ id?, polygon: [[x, y], ...], attenuation_db }], an id naming a door the scenario's timeline changes). A door that the run's scenario opens or closes by id needs that id to stay on a wall here, or the change is logged as a warning and ignored. Same units and ranges as the scenario's environment block. Logged as a channel event.",
       inputSchema: {
         type: "object",
         properties: {
@@ -622,6 +622,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
             items: {
               type: "object",
               properties: {
+                id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*$" },
                 polygon: { type: "array", items: { type: "array", items: { type: "number" } } },
                 attenuation_db: { type: "number", minimum: 0 },
               },
