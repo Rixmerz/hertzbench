@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { ManualClock, WallClock } from "../engine/mod.ts";
 import { MediumClock } from "../orchestrator/medium-clock.ts";
 
@@ -49,12 +49,14 @@ Deno.test("medium clock: a delay of a tick or more is the base clock's, and time
 });
 
 Deno.test("medium clock: a sub-tick callback sees the time it was scheduled at, not a tick later", async () => {
-  const base = new WallClock();
+  // The base clock is manual, so time moves only when the test advances it: the callback must run
+  // on the microtask turn while the base clock still reads the scheduling time.
+  const base = new ManualClock();
   const clock = new MediumClock(base);
+  base.advanceTo(5);
   const start = clock.now();
-  const seen = await new Promise<number>((resolve) =>
-    clock.schedule(start + 0.3, () => resolve(clock.now()))
-  );
-  base.cancelAll();
-  assert(seen - start < 1, `the callback ran ${seen - start} ms later`);
+  let seen: number | undefined;
+  clock.schedule(start + 0.3, () => (seen = clock.now()));
+  await Promise.resolve();
+  assertEquals(seen, start, "the callback waited for the base clock instead of the microtask turn");
 });
