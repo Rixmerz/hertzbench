@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "avr8js": "^0.21.0",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.12"
   },
   "dependencies": {
     "eecircuit-engine": "^1.7.0"
