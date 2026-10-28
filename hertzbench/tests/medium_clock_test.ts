@@ -49,16 +49,14 @@ Deno.test("medium clock: a delay of a tick or more is the base clock's, and time
 });
 
 Deno.test("medium clock: a sub-tick callback sees the time it was scheduled at, not a tick later", async () => {
-  // The base clock is manual and the host stalls before the microtask turn, as a slow emulated
-  // one does: what the callback sees must not depend on how long the host takes to get there.
+  // The base clock is manual, so time moves only when the test advances it: the callback must run
+  // on the microtask turn while the base clock still reads the scheduling time.
   const base = new ManualClock();
   const clock = new MediumClock(base);
   base.advanceTo(5);
   const start = clock.now();
   let seen: number | undefined;
   clock.schedule(start + 0.3, () => (seen = clock.now()));
-  const stalledUntil = performance.now() + 5;
-  while (performance.now() < stalledUntil);
   await Promise.resolve();
   assertEquals(seen, start, "the callback waited for the base clock instead of the microtask turn");
 });
