@@ -116,6 +116,12 @@ function sketchSourcePath(name: string): string {
   );
 }
 
+// The sketches live outside frontend/ and were pruned from the repo
+// (cd3fdded), so a machine with arduino-cli but no sketches skips, not fails.
+function hasSketch(name: string): boolean {
+  return existsSync(sketchSourcePath(name));
+}
+
 /**
  * Compile a sketch.  Returns the artifact contents — `.hex` text for
  * AVR boards, base64 of `.bin` for RP2040.  Velxio's frontend follows
@@ -215,7 +221,7 @@ function runUntil(sim: AVRSimulator, budget: number, predicate: () => boolean): 
 
 // ─── 1. I2C scanner over a populated bus ─────────────────────────────────────
 
-describe.runIf(ARDUINO_CLI_AVAILABLE)(
+describe.runIf(ARDUINO_CLI_AVAILABLE && hasSketch('i2c_scanner_multi'))(
   'I2C scenario — scanner finds every registered device + NACKs the rest',
   () => {
     let HEX: string;
@@ -286,7 +292,7 @@ describe.runIf(ARDUINO_CLI_AVAILABLE)(
 
 // ─── 2. DS1307 RTC + LCD-I2C clock combo ─────────────────────────────────────
 
-describe.runIf(LIQUID_CRYSTAL_I2C_AVAILABLE)(
+describe.runIf(LIQUID_CRYSTAL_I2C_AVAILABLE && hasSketch('rtc_lcd_clock'))(
   'I2C scenario — RTC + LCD-I2C clock (two devices, same bus)',
   () => {
     let HEX: string;
@@ -372,7 +378,7 @@ describe.runIf(LIQUID_CRYSTAL_I2C_AVAILABLE)(
 
 // ─── 3. Multi-board BMP280 via bridge ────────────────────────────────────────
 
-describe.runIf(ARDUINO_CLI_AVAILABLE)(
+describe.runIf(ARDUINO_CLI_AVAILABLE && hasSketch('bmp280_bridge_reader'))(
   'I2C scenario — Uno reads BMP280 chip_id from a bridged peer bus',
   () => {
     let HEX: string;
@@ -422,7 +428,7 @@ describe.runIf(ARDUINO_CLI_AVAILABLE)(
 
 // ─── 4. PCF8574 bidirectional I/O on a single device ─────────────────────────
 
-describe.runIf(ARDUINO_CLI_AVAILABLE)(
+describe.runIf(ARDUINO_CLI_AVAILABLE && hasSketch('pcf8574_bidirectional'))(
   'I2C scenario — PCF8574 bidirectional read+write round-trips',
   () => {
     let HEX: string;
@@ -495,7 +501,7 @@ const RP2040_CORE_AVAILABLE = (() => {
   return r.status === 0 && /rp2040:rp2040/.test(r.stdout);
 })();
 
-describe.runIf(RP2040_CORE_AVAILABLE)(
+describe.runIf(RP2040_CORE_AVAILABLE && hasSketch('pico_i2c_master_reader'))(
   'I2C scenario — Pi Pico (real RP2040 firmware) reads BMP280 via bridge',
   () => {
     let BIN_B64: string;

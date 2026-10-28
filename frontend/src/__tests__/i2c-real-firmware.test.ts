@@ -130,6 +130,12 @@ function sketchSourcePath(name: string): string {
   );
 }
 
+// The sketches live outside frontend/ and were pruned from the repo
+// (cd3fdded), so a machine with arduino-cli but no sketches skips, not fails.
+function hasSketch(name: string): boolean {
+  return existsSync(sketchSourcePath(name));
+}
+
 /**
  * Compile a sketch with arduino-cli (subprocess), exactly like the
  * Velxio FastAPI backend does in services/arduino_cli.py:compile().
@@ -238,7 +244,7 @@ function runUntil(sim: AVRSimulator, budget: number, predicate: () => boolean): 
 
 // ─── EEPROM-demo tests (compile + load + run) ────────────────────────────────
 
-describe.runIf(ARDUINO_CLI_AVAILABLE)(
+describe.runIf(ARDUINO_CLI_AVAILABLE && hasSketch('i2c_eeprom_demo'))(
   'I2C E2E — Wire master at 0x50 (full Velxio compile flow)',
   () => {
     let HEX: string;
@@ -311,7 +317,7 @@ describe.runIf(ARDUINO_CLI_AVAILABLE)(
 
 // ─── LCD-I2C tests (need the LiquidCrystal_I2C library installed) ────────────
 
-describe.runIf(LIQUID_CRYSTAL_I2C_AVAILABLE)(
+describe.runIf(LIQUID_CRYSTAL_I2C_AVAILABLE && hasSketch('lcd_i2c_hello'))(
   'I2C E2E — LiquidCrystal_I2C → HD44780 decoder (full Velxio compile flow)',
   () => {
     let HEX: string;
