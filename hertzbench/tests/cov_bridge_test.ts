@@ -394,6 +394,40 @@ Deno.test("proxy: an address the host lacks, or may not use, names the fix", asy
   }
 });
 
+Deno.test("proxy: Deno's permission flags and the OS refusing a bind name different fixes", async () => {
+  const start = (refusal: Error) =>
+    new IpBridge({
+      spec: { ...IP_BASE, listen: "0.0.0.0", expose: [http(80, 8080)] },
+      nodes: new Map(),
+      clock: new ManualClock(),
+      rng: createRng(1),
+      log: () => {},
+      transmit: () => {},
+      listen: () => {
+        throw refusal;
+      },
+    }).start();
+
+  const flag = await assertRejects(
+    () => start(new Deno.errors.NotCapable("net")),
+    BridgeStartError,
+  );
+  assertStringIncludes(flag.message, "limited to 127.0.0.1");
+  assertStringIncludes(flag.message, "deno task lan");
+
+  // A reserved port on Windows (an excluded range, or http.sys holding it) is WSAEACCES, which
+  // Deno reports as PermissionDenied: telling that person to grant a flag sends them the wrong way.
+  const os = await assertRejects(
+    () => start(new Deno.errors.PermissionDenied("access denied (os error 10013)")),
+    BridgeStartError,
+  );
+  assertStringIncludes(os.message, "0.0.0.0:8080");
+  assertStringIncludes(os.message, "operating system refused");
+  assertStringIncludes(os.message, "os error 10013");
+  assertStringIncludes(os.message, "listen_port");
+  assertFalse(os.message.includes("deno task lan"));
+});
+
 Deno.test("proxy: the publisher gets the bound endpoints and its line is the report's mDNS", async () => {
   const published: BridgeEndpoint[][] = [];
   let closed = 0;
