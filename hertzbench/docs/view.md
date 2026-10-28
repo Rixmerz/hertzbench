@@ -154,3 +154,6 @@ picture (its ring and name stay, and it can still be dragged); nothing else fail
 - `tests/view_browser_test.ts`: headless Chromium over the DevTools protocol drags a node with real
   mouse events and checks that the engine moved it once, to where it was dropped. It is skipped when
   no Chromium is found; set `HERTZBENCH_CHROMIUM` to point at one.
+- `tests/view_esp32_browser_test.ts`: the same drag on three real ESP32 boards, away behind the wall
+  and back, checking the page's link table and the medium's deliveries. Skipped without a Chromium
+  or without `QEMU_ESP32_LIB`; the first run compiles the sketch.
