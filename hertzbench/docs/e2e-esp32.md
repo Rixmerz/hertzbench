@@ -86,6 +86,25 @@ export QEMU_ESP32_LIB=$HOME/.local/opt/velxio-qemu/libqemu-xtensa.so
 export HERTZBENCH_PYTHON=$HOME/.local/opt/velxio-venv/bin/python
 ```
 
+### Other Linux distributions
+
+Run on 2026-10-28 in the official `debian:stable-slim` (Debian 13, glibc 2.41, gcc 14) and `fedora:latest` (Fedora 44, glibc 2.43, gcc 16) Docker images, as root, by following the steps above on the fork's `picsimlab-esp32` commit with patch 3 applied. The four ESP32 families pass on both (UDP 5/5, ESP-NOW 7/7, LoRa 4/4, BLE 6/6, the commands of [Results](#results-on-real-firmware)). What differed from the CachyOS host:
+
+- **Build libqemu on the distribution that runs it.** A `libqemu-xtensa.so` built on a rolling distribution does not load on an older one: the CachyOS build stops on Debian 13 with ``version `GLIBC_2.43' not found``. At run time the library needs `libatomic.so.1` (Debian `libatomic1`, Fedora `libatomic`) besides glib, libgcrypt, libslirp and zlib (`ldd` on both builds lists it). A host that only runs a prebuilt library needs that package too.
+- **Debian 13 packages.** Step 1: `ca-certificates curl git gcc make flex bison pkg-config perl python3 python3-venv python3-pip libglib2.0-dev libpixman-1-dev zlib1g-dev libgcrypt20-dev libslirp-dev`. Before steps 2 to 4: `unzip xz-utils` (Deno's installer), and `libusb-1.0-0`: `install.sh esp32` unpacks `openocd-esp32`, which fails its own check with `libusb-1.0.so.0: cannot open shared object file` and is removed, so the install stops.
+- **Fedora 44 packages.** Step 1: `ca-certificates curl git gcc make flex bison pkgconf-pkg-config perl python3 python3-pip glib2-devel pixman-devel zlib-ng-compat-devel libgcrypt-devel libslirp-devel`. Before steps 2 to 4: `unzip xz which`. ESP-IDF needed nothing else.
+- **Fedora: libqemu fails to link.** Meson resolves glib's `-latomic` to the static `/usr/lib/gcc/x86_64-redhat-linux/<n>/libatomic.a`, and a shared object cannot take its non-PIC objects (`libatomic.a(cas_16_.o): relocation R_X86_64_32 ... can not be used when making a shared object`). `accel/tcg/cputlb.c` calls `__atomic_compare_exchange_16`, so the symbol is needed; `CFLAGS=-mcx16` does not remove the call (tried, same error). Point the link at the shared library: after applying the `sed` of step 1 add
+
+  ```bash
+  sed -i '/^  eval "\$CMD -ggdb @qemu-system-/i sed -i "s,/usr/lib/gcc/[^ ]*/libatomic[.]a,/usr/lib64/libatomic.so.1," qemu-system-*.rsp' ../build_libqemu-esp32-optimized.sh
+  ```
+
+  `ldd build/libqemu-xtensa.so` then lists `libatomic.so.1`, which `dnf install libatomic` provides. Debian did not need this.
+- **`export.sh` of ESP-IDF needs bash.** Sourced from `dash`, Debian's `sh`, it stops with `Could not detect IDF_PATH`; run the BLE build in `bash`, as the commands in [The BLE example](#the-ble-example) are written.
+- **Python.** The system Python of both images (3.13 and 3.14) was not used; step 2's `uv venv -p 3.12` venv did the compile and the worker on both.
+
+Not covered: the mobile bridges (the BLE one needs BlueZ and an adapter, which a container does not have), the view, and Deno's own test suite inside the containers (their DNS to `jsr.io` timed out, which the scenario runs did not need).
+
 ## Results on real firmware
 
 Run on 2026-10-23, every scenario unmodified, with the setup above and the unpatched fork. The rows dated 2026-10-24 ran on the same build with [patch 3](upstream-sync.md#patch-3-the-qemu-forks-wi-fi-mac-esp-now-receive-and-tx-done-outside-this-tree) applied, and the ESP-NOW one with the sensor sketch that waits for the gateway's beacon. The LoRa, BLE and bridge rows were not rerun on the patched library. Firmware compiled through `compile_sketch.py` (arduino-cli, esp32:esp32 2.0.17) except `ble-sensor` (ESP-IDF v5.3.6).
