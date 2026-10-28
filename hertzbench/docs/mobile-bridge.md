@@ -109,6 +109,11 @@ program the first time it listens beyond loopback; on macOS the system may ask t
 held by a daemon that does not share it, the report says `mDNS not advertised: <why>` and the run
 goes on; the host address always works.
 
+On Windows a port can also be refused by the system itself: it may sit in an excluded range or be
+held by `http.sys` (a Windows 10 test machine had 8080 that way). The run then stops with `the operating system refused it`;
+`netsh int ipv4 show excludedportrange protocol=tcp` lists the reserved ranges, and any
+`listen_port` outside them works.
+
 ## Tests
 
 | What | How | File |

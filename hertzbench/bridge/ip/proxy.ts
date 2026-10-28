@@ -51,6 +51,8 @@ export interface IpBridgeOptions {
   log(line: string): void;
   rng: Rng;
   publisher?: EndpointPublisher;
+  /** Opens a host listener; default `Deno.listen`. Tests inject the refusals an OS gives. */
+  listen?: (options: Deno.TcpListenOptions) => Deno.TcpListener;
 }
 
 export class BridgeStartError extends Error {
@@ -96,10 +98,11 @@ export class IpBridge implements RunningBridge {
   /** Open a host listener per exposed port, then announce them. */
   async start(): Promise<void> {
     const { spec } = this.#opts;
+    const listen = this.#opts.listen ?? ((options) => Deno.listen(options));
     for (const exposed of spec.expose) {
       let listener: Deno.TcpListener;
       try {
-        listener = Deno.listen({ hostname: spec.listen, port: exposed.listenPort });
+        listener = listen({ hostname: spec.listen, port: exposed.listenPort });
       } catch (error) {
         await this.close();
         throw new BridgeStartError(listenFailure(spec.listen, exposed.listenPort, error));
@@ -228,9 +231,15 @@ function closeQuietly(conn: Deno.Conn): void {
 /** What to tell the person when a host port cannot be opened. */
 function listenFailure(host: string, port: number, error: unknown): string {
   const where = `${host}:${port === 0 ? "<any port>" : port}`;
-  if (error instanceof Deno.errors.NotCapable || error instanceof Deno.errors.PermissionDenied) {
+  // Deno's own permission flags throw NotCapable; PermissionDenied is the OS refusing the bind
+  // (Windows answers WSAEACCES for a port in an excluded range or held by http.sys).
+  if (error instanceof Deno.errors.NotCapable) {
     return `the bridge may not listen on ${where}: Deno's network permission is limited to ` +
       `127.0.0.1. To reach it from a phone, run with \`deno task lan\` (see docs/mobile-bridge.md)`;
+  }
+  if (error instanceof Deno.errors.PermissionDenied) {
+    return `the bridge cannot listen on ${where}: the operating system refused it (${error.message}). ` +
+      `The port is reserved or held by another service: set another listen_port in the scenario`;
   }
   if (error instanceof Deno.errors.AddrInUse) {
     return `the bridge cannot listen on ${where}: the port is already in use`;
