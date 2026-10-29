@@ -105,6 +105,50 @@ Run on 2026-10-28 in the official `debian:stable-slim` (Debian 13, glibc 2.41, g
 
 Not covered: the mobile bridges (the BLE one needs BlueZ and an adapter, which a container does not have), the view, and Deno's own test suite inside the containers (their DNS to `jsr.io` timed out, which the scenario runs did not need).
 
+### macOS
+
+**Status: untested on macOS.** No libqemu build and no ESP32 run on a Mac is recorded for hertzbench. The macOS job in `.github/workflows/hertzbench-ci.yml` (`macos-latest`) runs lint, the type check and the test suite without `QEMU_ESP32_LIB`, so no CI run has loaded `libqemu-xtensa` on macOS. Points marked **[unverified]** below come from reading the code or other docs, not from a run.
+
+**What the code says about a `.dylib`.** The loader accepts it:
+
+- `orchestrator/boards/qemu-esp32.ts` takes `QEMU_ESP32_LIB` as given. Any existing file is accepted, whatever its name. On Linux, `resolveQemuLibrary()` returned a path ending in `.dylib`, and a missing `.dylib` path was refused with `libqemu-xtensa not found at ...`.
+- With the variable unset, the default on macOS is `backend/app/services/libqemu-xtensa.dylib` (`.dylib` for `darwin`, `.so` on Linux, `.dll` on Windows). **[unverified]** on a Mac: read from the code, not run.
+- The worker (`backend/app/services/esp32_worker.py`) loads the file with `ctypes.CDLL(lib_path)` and passes `-L` the library's own directory, so the ROM files go beside the library. Nothing in the worker branches on the platform.
+- The fork's `build_libqemu-esp32.sh` names its Darwin output `libqemu-xtensa.dylib` and `libqemu-riscv32.dylib` (`-dynamiclib -o ...`). It does not write `.so` there. Velxio's `docs/BUILD-QEMU.md` says the script writes `.so` on macOS and must be renamed; that does not match the fork's script. The steps below use the fork's names.
+
+**Known blockers, from the code and docs:**
+
+1. **Nothing has been run on macOS.** That the fork builds there, and that the library loads, is unproven.
+2. **Signing.** Whether the fork's unsigned dylib loads in an arm64 Python, or needs a signature first, is **[unverified]**. The fork's Darwin branch skips the last line of the ninja response file, which is where its own signing step sits.
+3. **ESP-NOW needs the fork's patch 3** ([upstream-sync.md](upstream-sync.md#patch-3-the-qemu-forks-wi-fi-mac-esp-now-receive-and-tx-done-outside-this-tree)), which is written as a Linux `git apply` heredoc. Whether it applies unchanged on a Mac is **[unverified]**.
+4. **The Linux notes do not carry over.** The glibc, `libatomic` and `ldd` steps in "Other Linux distributions" are Linux-only. On a Mac, `otool -L` lists a library's dependencies. **[unverified]**
+5. **GNU sed.** Velxio's `docs/BUILD-QEMU.md` says QEMU's own build needs GNU `sed` first on `PATH`. Whether this fork's build needs it too is **[unverified]**.
+
+**Build outline (best effort, unverified).** The Homebrew list and the `PATH` line come from Velxio's `docs/BUILD-QEMU.md`. The venv with `distlib` is an adaptation of that note, not a tested recipe.
+
+```bash
+brew install gnu-sed coreutils ninja pkg-config meson glib pixman libgcrypt libslirp
+export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+export OBJC=clang OBJCXX=clang++
+python3 -m venv ~/.local/opt/qemu-build-venv
+~/.local/opt/qemu-build-venv/bin/pip install meson ninja distlib
+git clone --depth 1 -b picsimlab-esp32 https://github.com/lcgamboa/qemu ~/.local/src/lcgamboa-qemu
+cd ~/.local/src/lcgamboa-qemu
+# patch 3 for ESP-NOW: see the link in blocker 3
+sed 's/--enable-debug --enable-debug-info/--enable-debug-info/' build_libqemu-esp32.sh > ../build_libqemu-esp32-optimized.sh
+PATH="$HOME/.local/opt/qemu-build-venv/bin:$PATH" bash ../build_libqemu-esp32-optimized.sh
+mkdir -p ~/.local/opt/velxio-qemu
+cp build/libqemu-xtensa.dylib build/libqemu-riscv32.dylib ~/.local/opt/velxio-qemu/
+cp pc-bios/esp32-v3-rom.bin pc-bios/esp32-v3-rom-app.bin pc-bios/esp32c3-rom.bin pc-bios/esp32s3_rev0_rom.bin ~/.local/opt/velxio-qemu/
+export QEMU_ESP32_LIB=$HOME/.local/opt/velxio-qemu/libqemu-xtensa.dylib
+```
+
+The `sed` line was run on the fork's `build_libqemu-esp32.sh` on Linux: it removes `--enable-debug` and keeps `--enable-debug-info` (line 20). It does not use `sed -i`, so BSD `sed` is fine. The four ROM files exist in the fork's `pc-bios/`. The Python venv for the worker and the compile helper, and arduino-cli, are the steps 2 and 3 of the Linux setup, which should apply unchanged **[unverified]**.
+
+Two checks, both **[unverified]** on a Mac: `otool -L "$QEMU_ESP32_LIB"` should list the Homebrew libraries, and the worker's `worker-<node>.stderr.log` holds a `Loading library: <path> (<bytes> bytes)` line, which names the file it tried. A load failure also arrives as `Cannot load DLL: ...` on the worker's stdout. Then run `scenarios/examples/udp-3-nodes.yaml` as in [Run it](#run-it).
+
+**Reports wanted.** If you build or run this on a Mac, please post on [issue #54](https://github.com/Rixmerz/hertzbench/issues/54) with: `uname -m`, `sw_vers`, the last 50 lines of the build output, `otool -L` on the library, the worker's stderr log from a run, and the output of `deno task test` from `hertzbench/`. A failure report is as useful as a pass.
+
 ## Results on real firmware
 
 Run on 2026-10-23, every scenario unmodified, with the setup above and the unpatched fork. The rows dated 2026-10-24 ran on the same build with [patch 3](upstream-sync.md#patch-3-the-qemu-forks-wi-fi-mac-esp-now-receive-and-tx-done-outside-this-tree) applied, and the ESP-NOW one with the sensor sketch that waits for the gateway's beacon. The LoRa, BLE and bridge rows were not rerun on the patched library. Firmware compiled through `compile_sketch.py` (arduino-cli, esp32:esp32 2.0.17) except `ble-sensor` (ESP-IDF v5.3.6).

@@ -63,7 +63,7 @@ distributions (below). More hosts are welcome.
       firmware, 8/8: Debian 13 (`debian:stable-slim`) and Fedora 44 (`fedora:latest`) containers, run
       as root, with libqemu built in each container. The distribution-specific differences are in
       [e2e-esp32.md](e2e-esp32.md#other-linux-distributions). Containers only; not a desktop install.
-- [ ] **ESP32 scenarios on macOS.** Same.
+- [ ] **ESP32 scenarios on macOS.** Same. Untested so far; the blockers and a best-effort build outline are in [e2e-esp32.md](e2e-esp32.md#macos).
 - [ ] **Dragging a node that runs real ESP32 firmware** in `hertzbench view`: links and loss follow
       the new position and the firmware keeps running.
 
