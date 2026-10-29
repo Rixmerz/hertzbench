@@ -62,7 +62,7 @@ interference:
 ```yaml
 - id: sensor                 # letters, digits, "_", "." and "-"
   count: 4                   # optional; expands to sensor-1 .. sensor-4 and needs a grid position
-  board: esp32               # esp32 | esp32-devkit-v1 (same board) | scripted
+  board: esp32               # esp32 | esp32-devkit-v1 (same board) | scripted | android
   firmware: ./fw/udp-node    # esp32: a sketch directory, or a .bin flash image. Relative to the scenario file
   position: [0, 0]           # metres: [x, y] or [x, y, z]. Walls ignore z
   # position: { grid: { origin: [10, 0], step: [8, 0] } }    # for count > 1
@@ -103,6 +103,37 @@ interference:
   Ports are distinct, 1 to 65535. Serial lines: `tcp listening on <port> (<protocol>)`, `http <METHOD> <path> from <ip>`, `ws open <path> from <ip>`, `ws rx "<text>" from <ip>`, `ws closed from <ip>`, `mqtt connect <client id> from <ip>`, `mqtt subscribe <filter> from <client id>`, `mqtt publish <topic> "<payload>" from <client id>`.
 
   Frames go one at a time, each waiting for its ACK or, if none comes, for the fork's 10 ms timeout plus a 30 ms allowance for the loopback hops (a failed send is logged about 40 ms after it). The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.
+
+### `board: android`: an app in the Android emulator, on Wi-Fi
+
+An `android` node is an Android Virtual Device booted headless under the Android emulator, with an app installed and launched. Its Wi-Fi is one more station on the medium: it gets a DHCP lease from the virtual gateway, and its ARP, UDP, TCP and broadcast traffic pay the channel model from its position, like an ESP32's. The node takes the usual `id`, `position`, `radios` (Wi-Fi only) and `ip`; it takes no `firmware` and no `count`.
+
+```yaml
+- id: phone
+  board: android
+  position: [6, 0]
+  radios: [{ phy: wifi, channel: 5 }]
+  mac: 02:15:d0:00:00:00         # optional; default: the MAC the AVD gives wlan0
+  android:
+    avd: pixel8                  # an existing AVD; Hertzbench never creates or downloads one
+    apk: ./app/build/app-debug.apk   # relative to the scenario file
+    package: dev.example.iotapp
+    activity: .MainActivity      # optional; default: the launcher activity
+    extras: { board_url: "http://192.168.4.11/" }   # optional: --es key value on launch
+    logcat: [HZB]                # tags whose lines become the node's serial lines; default [HZB]
+    boot_timeout: 120s           # default 120s
+    install_timeout: 60s         # default 60s
+    launch_timeout: 20s          # default 20s
+```
+
+- `avd`, `apk` and `package` are required. The section is refused on any other board, and a second `android` node is refused: one AVD cold-boots with one MAC.
+- A BLE or other chip radio is refused. The app reaches BLE nodes through the mobile bridge, not as a node.
+- **Start-up.** The node's start resolves only once the app is running (boot, `adb install`, logcat, `am start -W`), so time zero comes after the app, and the emulator's boot time (about 30 s for `pixel8`) is spent before it. Each step has its own timeout, named in its failure. The emulator's last output goes to `<out>/<node>-emulator.log`.
+- **Logcat.** Every line the app logs under one of the `logcat` tags is a `serial` line of the node, so `- serial: { node: phone, contains: "got temp", within: 20s }` works unchanged. Times are host arrival times, good to about 100 ms.
+- **MAC.** The gateway leases by MAC and skips an unknown one, and the medium needs the MAC before the guest boots. The emulator derives `wlan0`'s MAC from its console port: `02:<port high byte>:<port low byte>:00:00:00` (port 5554 gives `02:15:b2:00:00:00`, port 5584 gives `02:15:d0:00:00:00`; seen with emulator 37.1.11). The default `mac:` is `02:15:d0:00:00:00`, and the launcher starts the emulator on console port 5584 to match; if that port is taken the run stops and says so. A `mac:` of that shape picks its own port (even, 5554 to 5682); any other `mac:` says the guest was set to it by other means and gets a free port. Either way the run checks the source MAC of the first frame the emulator sends and, if it differs, stops naming both MACs.
+- **Host.** Linux with KVM (`/dev/kvm` usable), and `emulator` and `adb` found on `PATH`, in `$ANDROID_HOME`, `$ANDROID_SDK_ROOT` or `~/Android`. A missing tool, KVM or AVD stops the run with exit status 2 and the reason.
+- **Undocumented flag.** The emulator is started with `-feature -WiFiPacketStream -wifi-socket connect=127.0.0.1:<port>`. Without the feature flag netsim owns the guest's Wi-Fi and the socket stays silent. The flag is not a documented API; it was verified with emulator 37.1.11, and a failure on another build says so.
+- ESP-NOW frames share the medium, but an app cannot send or receive them.
 
 ### BLE radios
 

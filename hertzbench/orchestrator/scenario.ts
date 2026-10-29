@@ -17,13 +17,14 @@ import {
 } from "../engine/channel.ts";
 import type { ChannelChanges, FrameKind } from "../engine/events.ts";
 import { ipToBytes, macToBytes } from "../engine/packet.ts";
+import { DEFAULT_TIMEOUTS } from "./boards/android/tooling.ts";
 import { DEFAULT_WIFI, type NodeRadio, parseNodeRadio, type Phy } from "./radios.ts";
 
 export class ScenarioError extends Error {
   override name = "ScenarioError";
 }
 
-export type BoardKind = "esp32" | "scripted";
+export type BoardKind = "esp32" | "scripted" | "android";
 
 export interface ScriptedSend {
   /**
@@ -57,9 +58,26 @@ export interface BleScript {
   scan: boolean;
 }
 
+/** What an `android` node runs: an existing AVD and the app installed on it (docs/android-device-plan.md, section 1). */
+export interface AndroidSpec {
+  avd: string;
+  package: string;
+  /** Absent: the package's launcher activity starts. */
+  activity?: string;
+  /** Passed to the app as `--es key value` on launch. */
+  extras: Record<string, string>;
+  /** Logcat tags whose lines become the node's serial lines. */
+  logcat: string[];
+  bootTimeoutMs: number;
+  installTimeoutMs: number;
+  launchTimeoutMs: number;
+}
+
 export type FirmwareSpec =
   | { kind: "sketch"; path: string }
   | { kind: "binary"; path: string }
+  /** An android node's app, from `android.apk`. */
+  | { kind: "apk"; path: string }
   | {
     kind: "script";
     send: ScriptedSend[];
@@ -81,6 +99,8 @@ export interface ScenarioNode {
   mac: string;
   /** Keeps SLIRP: the board reaches the host network but is not on the medium. */
   internetGateway: boolean;
+  /** Present exactly when `board` is "android". */
+  android?: AndroidSpec;
 }
 
 export interface LinkRule {
@@ -477,12 +497,15 @@ const NODE_FIELDS = [
   "radios",
   "ip",
   "internet_gateway",
+  "mac",
+  "android",
 ] as const;
 
 /** The names a scenario may give each board kind. */
 export const BOARD_NAMES: Record<BoardKind, readonly string[]> = {
   esp32: ["esp32", "esp32-devkit-v1"],
   scripted: ["scripted"],
+  android: ["android"],
 };
 
 function parseBoard(value: unknown, path: string): BoardKind {
@@ -662,6 +685,109 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
   };
 }
 
+/**
+ * The MAC the AVD gives `wlan0` when its console port is 5584 (the launcher picks that port
+ * for it). The runner compares it with the first frame the emulator sends.
+ */
+export const ANDROID_DEFAULT_MAC = "02:15:d0:00:00:00";
+
+const ANDROID_FIELDS = [
+  "avd",
+  "apk",
+  "package",
+  "activity",
+  "extras",
+  "logcat",
+  "boot_timeout",
+  "install_timeout",
+  "launch_timeout",
+] as const;
+
+const AVD_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const ANDROID_PACKAGE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
+const ANDROID_ACTIVITY = /^\.?[A-Za-z_][A-Za-z0-9_.]*$/;
+const EXTRA_KEY = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+const LOGCAT_TAG = /^[A-Za-z0-9_.-]+$/;
+
+function requiredText(obj: Obj, key: string, path: string): string {
+  if (obj[key] === undefined) fail(`${path}.${key}`, "is required on an android node");
+  return text(obj[key], `${path}.${key}`);
+}
+
+function positiveDuration(value: unknown, fallbackMs: number, path: string): number {
+  if (value === undefined) return fallbackMs;
+  const ms = parseDuration(value, path);
+  if (ms <= 0) fail(path, "must be positive");
+  return ms;
+}
+
+/** The `android:` section of a node, and the app's path (resolved against the scenario file by the loader). */
+function parseAndroid(
+  value: unknown,
+  path: string,
+): { spec: AndroidSpec; firmware: FirmwareSpec } {
+  if (value === undefined) {
+    fail(path, "board android needs an android section with avd, apk and package");
+  }
+  const obj = record(value, path);
+  known(obj, ANDROID_FIELDS, path);
+  const avd = requiredText(obj, "avd", path);
+  if (!AVD_NAME.test(avd)) fail(`${path}.avd`, `not an AVD name: ${JSON.stringify(avd)}`);
+  const apk = requiredText(obj, "apk", path);
+  if (!apk.endsWith(".apk")) fail(`${path}.apk`, "expected the path of an .apk file");
+  const pkg = requiredText(obj, "package", path);
+  if (!ANDROID_PACKAGE.test(pkg)) {
+    fail(`${path}.package`, `not an application id like dev.example.app: ${JSON.stringify(pkg)}`);
+  }
+  let activity: string | undefined;
+  if (obj.activity !== undefined) {
+    activity = text(obj.activity, `${path}.activity`);
+    if (!ANDROID_ACTIVITY.test(activity)) {
+      fail(`${path}.activity`, `not an activity class name: ${JSON.stringify(activity)}`);
+    }
+  }
+  const extras: Record<string, string> = {};
+  if (obj.extras !== undefined) {
+    for (const [key, extra] of Object.entries(record(obj.extras, `${path}.extras`))) {
+      if (!EXTRA_KEY.test(key)) fail(`${path}.extras.${key}`, "not an intent extra name");
+      extras[key] = text(extra, `${path}.extras.${key}`);
+    }
+  }
+  const tags = obj.logcat === undefined
+    ? ["HZB"]
+    : list(obj.logcat, `${path}.logcat`).map((tag, i) => {
+      const name = text(tag, `${path}.logcat[${i}]`);
+      if (!LOGCAT_TAG.test(name)) {
+        fail(`${path}.logcat[${i}]`, `not a logcat tag: ${JSON.stringify(name)}`);
+      }
+      return name;
+    });
+  if (tags.length === 0) fail(`${path}.logcat`, "needs at least one tag");
+  const spec: AndroidSpec = {
+    avd,
+    package: pkg,
+    ...(activity !== undefined ? { activity } : {}),
+    extras,
+    logcat: tags,
+    bootTimeoutMs: positiveDuration(
+      obj.boot_timeout,
+      DEFAULT_TIMEOUTS.bootMs,
+      `${path}.boot_timeout`,
+    ),
+    installTimeoutMs: positiveDuration(
+      obj.install_timeout,
+      DEFAULT_TIMEOUTS.installMs,
+      `${path}.install_timeout`,
+    ),
+    launchTimeoutMs: positiveDuration(
+      obj.launch_timeout,
+      DEFAULT_TIMEOUTS.launchMs,
+      `${path}.launch_timeout`,
+    ),
+  };
+  return { spec, firmware: { kind: "apk", path: apk } };
+}
+
 function parseFirmware(
   board: BoardKind,
   value: unknown,
@@ -704,6 +830,20 @@ export function macForIndex(index: number): string {
   return mac;
 }
 
+/** An android node's MAC: the AVD's own unless the scenario says the guest was set to another. */
+function androidMac(value: unknown, path: string): string {
+  if (value === undefined) return ANDROID_DEFAULT_MAC;
+  const mac = text(value, path).toLowerCase();
+  let bytes: Uint8Array;
+  try {
+    bytes = macToBytes(mac);
+  } catch {
+    return fail(path, `not a MAC address: ${JSON.stringify(value)}`);
+  }
+  if ((bytes[0]! & 1) !== 0) fail(path, "a station cannot have a multicast MAC");
+  return mac;
+}
+
 const FIRST_HOST = 11;
 
 /** A board address the DHCP server may hand out: inside the /24, and not the network, gateway or broadcast address. */
@@ -736,6 +876,22 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
     const count = obj.count === undefined ? 1 : int(obj.count, `${path}.count`, 1, 10);
     const board = parseBoard(obj.board, `${path}.board`);
     const radio = parseNodeRadio(READERS, obj.radios, `${path}.radios`);
+    if (board === "android") {
+      if (radio.phy === "ble") {
+        fail(
+          `${path}.board`,
+          "the app reaches BLE nodes through `bridge: { kind: ble, peripheral: netsim }`; an android node is a Wi-Fi station",
+        );
+      }
+      if (radio.phy !== "wifi") fail(`${path}.radios`, "an android node has a Wi-Fi radio only");
+      if (count !== 1) fail(`${path}.count`, "cannot be set on an android node");
+      if (obj.firmware !== undefined) {
+        fail(`${path}.firmware`, "is not used by an android node; the app is android.apk");
+      }
+    } else {
+      if (obj.android !== undefined) fail(`${path}.android`, "is only for board: android");
+      if (obj.mac !== undefined) fail(`${path}.mac`, "is only for board: android");
+    }
     const internetGateway = obj.internet_gateway === true;
     if (obj.internet_gateway !== undefined && typeof obj.internet_gateway !== "boolean") {
       fail(`${path}.internet_gateway`, "expected true or false");
@@ -760,15 +916,19 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
       }
       if (explicitIp !== null) checkHostAddress(explicitIp, subnetPrefix, `${path}.ip`);
       const id = count === 1 ? baseId : `${baseId}-${k + 1}`;
+      const android = board === "android" ? parseAndroid(obj.android, `${path}.android`) : null;
       nodes.push({
         id,
         board,
-        firmware: parseFirmware(board, obj.firmware, `${path}.firmware`, radio.phy, id),
+        firmware: android
+          ? android.firmware
+          : parseFirmware(board, obj.firmware, `${path}.firmware`, radio.phy, id),
         position: positionFor(obj.position, k, count, `${path}.position`),
         radio,
         ip: explicitIp ?? `${subnetPrefix}.${FIRST_HOST + index - 1}`,
-        mac: macForIndex(index),
+        mac: board === "android" ? androidMac(obj.mac, `${path}.mac`) : macForIndex(index),
         internetGateway,
+        ...(android ? { android: android.spec } : {}),
       });
     }
   });
@@ -777,6 +937,11 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
   }
   const ids = new Set<string>();
   const ips = new Set<string>();
+  const macs = new Set<string>();
+  // One AVD cold-boots with one MAC; several nodes need the snapshot boot of a later piece.
+  if (nodes.filter((n) => n.board === "android").length > 1) {
+    fail("nodes", "a run has at most one android node");
+  }
   for (const node of nodes) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(node.id)) {
       fail(
@@ -788,6 +953,8 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
     ids.add(node.id);
     if (ips.has(node.ip)) fail("nodes", `two nodes share the address ${node.ip}`);
     ips.add(node.ip);
+    if (macs.has(node.mac)) fail("nodes", `two nodes share the MAC ${node.mac}`);
+    macs.add(node.mac);
   }
   if (nodes.filter((n) => n.internetGateway).length > 1) {
     fail("nodes", "at most one node can be the internet gateway");

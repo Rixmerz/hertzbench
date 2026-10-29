@@ -2,7 +2,7 @@
 // SDK and no emulator are needed. Each step's timeout fires and names the step, and
 // a failed install quotes adb. The scripts are POSIX sh, so these tests skip on Windows.
 
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import {
   AndroidStepError,
@@ -12,49 +12,10 @@ import {
   listAvds,
   type RunningEmulator,
 } from "../orchestrator/boards/android/tooling.ts";
+import { fakeSdk } from "./android_fake_sdk.ts";
 import { skipOnWindows } from "./platform.ts";
 
 const androidTest = skipOnWindows("the fake emulator and adb are sh scripts");
-
-/** A temp dir holding fake tools; `adbCase` is the body of the fake adb's `case "$cmd"`. */
-async function fakeSdk(
-  adbCases: string,
-  emulatorBody = 'echo "$@" > "$DIR/emulator-args"; echo $$ > "$DIR/emulator-pid"; exec sleep 60',
-): Promise<{ dir: string; restore(): Promise<void> }> {
-  const dir = await Deno.makeTempDir({ prefix: "hzb-android-" });
-  await Deno.writeTextFile(
-    join(dir, "emulator"),
-    `#!/bin/sh
-DIR="$(dirname "$0")"
-if [ "$1" = "-list-avds" ]; then printf 'INFO | Storing crashdata\\npixel8\\ntablet\\n'; exit 0; fi
-${emulatorBody}
-`,
-  );
-  // adb -s SERIAL <cmd> ...: the command is the word after the serial.
-  await Deno.writeTextFile(
-    join(dir, "adb"),
-    `#!/bin/sh
-DIR="$(dirname "$0")"
-echo "$@" >> "$DIR/adb-calls"
-shift 2
-cmd="$1"; shift
-case "$cmd" in
-${adbCases}
-esac
-`,
-  );
-  await Deno.chmod(join(dir, "emulator"), 0o755);
-  await Deno.chmod(join(dir, "adb"), 0o755);
-  const oldPath = Deno.env.get("PATH") ?? "";
-  Deno.env.set("PATH", `${dir}${delimiter}${oldPath}`);
-  return {
-    dir,
-    async restore() {
-      Deno.env.set("PATH", oldPath);
-      await Deno.remove(dir, { recursive: true });
-    },
-  };
-}
 
 const BOOTED = `shell) echo 1 ;;
 wait-for-device) exit 0 ;;
@@ -108,9 +69,47 @@ androidTest("falls back to $ANDROID_HOME when PATH has neither tool", async () =
   }
 });
 
-Deno.test("kvmProblem names the device it could not open", () => {
+Deno.test("kvmProblem names the device it could not open", async () => {
   if (Deno.build.os !== "linux") return;
-  assertStringIncludes(kvmProblem("/dev/hzb-no-such-kvm") ?? "", "/dev/hzb-no-such-kvm");
+  // Not under /dev: Deno refuses every /dev path without --allow-all, whatever is there.
+  const dir = await Deno.makeTempDir({ prefix: "hzb-kvm-" });
+  try {
+    const device = join(dir, "no-such-kvm");
+    assertStringIncludes(kvmProblem(device) ?? "", device);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// Linux only: Deno's refusal of /dev paths is what this probes, and on macOS and Windows
+// kvmProblem answers before opening anything ("only wired for Linux").
+Deno.test({
+  name: `kvmProblem does not mistake Deno's own permission wall for a missing KVM${
+    Deno.build.os === "linux" ? "" : " [skipped: Deno's /dev permission wall is Linux-only]"
+  }`,
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    // The CLI task has no --allow-all, and Deno refuses /dev/kvm without it; a process with no
+    // permission at all meets the same refusal.
+    const dir = await Deno.makeTempDir({ prefix: "hzb-kvm-" });
+    try {
+      const module = new URL("../orchestrator/boards/android/tooling.ts", import.meta.url).href;
+      const script = join(dir, "probe.ts");
+      await Deno.writeTextFile(
+        script,
+        `import { kvmProblem } from ${
+          JSON.stringify(module)
+        };\nconsole.log(kvmProblem("/dev/kvm"));\n`,
+      );
+      const { stdout, success, stderr } = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "--no-prompt", script],
+      }).output();
+      assert(success, new TextDecoder().decode(stderr));
+      assertEquals(new TextDecoder().decode(stdout).trim(), "null");
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });
 
 androidTest("launches with the headless flags, boots, installs, launches and kills", async () => {
@@ -123,7 +122,11 @@ logcat) if [ "$1" = "-c" ]; then exit 0; fi; echo "HZB got temp 21.5"; exec slee
     const logcat = await emulator.logcat(["HZB"], (line) => lines.push(line));
     await emulator.install("/tmp/app.apk", 5000);
     await emulator.launch(
-      { package: "dev.example", activity: ".Main", extras: { board_url: "http://x/" } },
+      {
+        package: "dev.example",
+        activity: ".Main",
+        extras: { board_url: "http://x/", note: "a b'c;" },
+      },
       5000,
     );
     for (let i = 0; i < 100 && lines.length === 0; i++) {
@@ -139,7 +142,8 @@ logcat) if [ "$1" = "-c" ]; then exit 0; fi; echo "HZB got temp 21.5"; exec slee
     assertStringIncludes(calls, `-s ${emulator.serial} install -r -t /tmp/app.apk`);
     assertStringIncludes(
       calls,
-      "shell am start -W -n dev.example/.Main --es board_url http://x/",
+      // the device's shell sees each value as one word, whatever it contains
+      "shell am start -W -n dev.example/.Main --es board_url 'http://x/' --es note 'a b'\\''c;'",
     );
     assertStringIncludes(calls, "logcat -v raw -s HZB:V");
     await emulator.kill();

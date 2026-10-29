@@ -44,6 +44,7 @@ import {
   type PeerInfo,
   type RunningBoard,
 } from "./boards/board.ts";
+import { createAndroidLauncher, VERIFIED_EMULATOR_VERSION } from "./boards/android.ts";
 import { createEsp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
 import { MediumClock } from "./medium-clock.ts";
@@ -180,6 +181,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   const launchers: Record<BoardKind, BoardLauncher> = {
     esp32: createEsp32Launcher(),
     scripted: scriptedLauncher,
+    android: createAndroidLauncher(),
     ...options.launchers,
   };
   const progress = options.progress ?? (() => {});
@@ -212,6 +214,12 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   // Nobody awaits these when the run ends normally.
   interrupted.catch(() => {});
   startupFailed.catch(() => {});
+  // A fault that makes the rest of the run meaningless, found at any moment of it: the run stops.
+  let failRun: (error: BoardError) => void = () => {};
+  const runFailed = new Promise<never>((_, reject) => {
+    failRun = reject;
+  });
+  runFailed.catch(() => {});
   const reportProblem = (message: string) => {
     problems.push(message);
     if (!startupOver) failStartup(new BoardError(startupMessage(problems)));
@@ -222,8 +230,32 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     epochMs: Date.now(),
     onProblem: (id: string, message: string) => reportProblem(`${id}: ${message}`),
   };
+  // The gateway leases by MAC and skips an unknown one, so an Android guest whose MAC is not the
+  // one the node was given would never get an address and nothing would say why.
+  const guestMacs = new Map(
+    scenario.nodes.filter((n) => n.board === "android").map((n) => [n.id, n.mac]),
+  );
+  // Settled by the guest's first frame. With the feature flag ignored, netsim keeps the Wi-Fi
+  // and the socket stays silent: only the absence of this frame tells.
+  const guestFrames = new Map(
+    [...guestMacs.keys()].map((id) => [id, Promise.withResolvers<void>()]),
+  );
+  const checkFirstFrame = (id: string, sourceMac: string) => {
+    guestFrames.get(id)?.resolve();
+    const expected = guestMacs.get(id);
+    if (expected === undefined || sourceMac === expected) return;
+    const message = `${id}: the guest's Wi-Fi MAC is ${sourceMac}, but the scenario gives this ` +
+      `node ${expected}; the gateway would ignore it and no lease would arrive. ` +
+      `Set mac: ${sourceMac} on the node.`;
+    problems.push(message);
+    failRun(new BoardError(message));
+  };
   const network = scenario.phy === "wifi"
-    ? wifiNetwork(scenario, gatewayIp, { ...networkContext, hooks: options.bridge ?? {} })
+    ? wifiNetwork(scenario, gatewayIp, {
+      ...networkContext,
+      hooks: options.bridge ?? {},
+      onFirstFrame: checkFirstFrame,
+    })
     : createAirNetwork(scenario, { ...networkContext, hooks: options.bridge ?? {} });
   const { medium, ports } = network;
 
@@ -291,7 +323,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       boards.set(node.id, board);
       clocks.set(node.id, board.clockDescription);
     }));
-    const started = await Promise.race([startAll, interrupted, startupFailed]);
+    const started = await Promise.race([startAll, interrupted, startupFailed, runFailed]);
     for (const outcome of started) if (outcome.status === "rejected") throw outcome.reason;
 
     const startupTimeout = options.startupTimeoutMs ?? 30_000;
@@ -300,12 +332,38 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
         Promise.all(boardIds.map((id) => network.waitConnected(id, startupTimeout))),
         interrupted,
         startupFailed,
+        runFailed,
       ]);
     } catch (error) {
       if (error instanceof RunInterrupted || error instanceof BoardError) throw error;
       throw new BoardError(
         startupMessage(problems, error instanceof Error ? error.message : String(error)),
       );
+    }
+    const silenceTimers: ReturnType<typeof setTimeout>[] = [];
+    try {
+      await Promise.race([
+        Promise.all([...guestFrames].map(([id, frame]) =>
+          Promise.race([
+            frame.promise,
+            new Promise<never>((_, reject) => {
+              silenceTimers.push(setTimeout(() =>
+                reject(
+                  new BoardError(
+                    `${id}: the emulator sent no Wi-Fi frames within ${startupTimeout} ms of its ` +
+                      `app running: netsim Wi-Fi may be on. -feature -WiFiPacketStream was ` +
+                      `verified with emulator ${VERIFIED_EMULATOR_VERSION}.`,
+                  ),
+                ), startupTimeout));
+            }),
+          ])
+        )),
+        interrupted,
+        startupFailed,
+        runFailed,
+      ]);
+    } finally {
+      silenceTimers.forEach(clearTimeout);
     }
     startupOver = true;
     zeroMs = clock.now();
@@ -397,6 +455,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     await Promise.race([
       new Promise<void>((resolve) => clock.schedule(zeroMs + scenario.durationMs, resolve)),
       interrupted,
+      runFailed,
     ]);
   } finally {
     endLive();
@@ -451,6 +510,7 @@ function wifiNetwork(
     epochMs: number;
     onProblem(nodeId: string, message: string): void;
     hooks: BridgeHooks;
+    onFirstFrame(nodeId: string, sourceMac: string): void;
   },
 ): NetworkSetup {
   const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
@@ -476,7 +536,11 @@ function wifiNetwork(
       if (dot11) dot11Pcap.addFrame(tMs, dot11);
     },
   });
-  const adapter = new QemuWifiL2Adapter((id, frame) => medium.transmit(id, frame), ctx.onProblem);
+  const adapter = new QemuWifiL2Adapter(
+    (id, frame) => medium.transmit(id, frame),
+    ctx.onProblem,
+    ctx.onFirstFrame,
+  );
   const ports = new Map<string, number>();
   for (const node of onMedium) {
     if (node.radio.phy !== "wifi") throw new Error(`${node.id}: not a Wi-Fi node`);
