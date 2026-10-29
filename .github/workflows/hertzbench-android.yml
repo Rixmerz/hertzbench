@@ -1,0 +1,153 @@
+name: Hertzbench Android E2E
+
+# Opt-in: boots an Android emulator, so it runs by hand and nightly, never on a pull request.
+# It builds the example app (hertzbench/examples/android/iot-app), creates the `pixel8` AVD the
+# example scenario names, and runs hertzbench/scenarios/examples/android-web-scripted.yaml: the
+# app in the emulator polls a scripted web board over the simulated Wi-Fi. It then runs a copy of
+# the scenario with one assertion inverted and requires exit status 1, so a green first run means
+# something. The ESP32 variant needs libqemu, which no CI image has, and is not run here.
+# Design and open assumptions (A8): hertzbench/docs/android-device-plan.md, section 5.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hertzbench-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Where ubuntu-24.04 runner images keep the Android SDK. Fixed here so the system image cache
+  # below can name the directory; Hertzbench itself finds the SDK through $ANDROID_HOME.
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  SYSTEM_IMAGE: system-images;android-36;google_apis;x86_64
+
+jobs:
+  android-e2e:
+    name: android-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: hertzbench
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # /dev/kvm is there on the 2-vCPU and 4-vCPU Linux runners but not accessible to the runner
+      # user until this rule is applied (GitHub changelog, 2024-04-02).
+      - name: Enable KVM
+        working-directory: .
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
+        with:
+          deno-version: v2.x
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The tree has no Gradle wrapper; the example app is built with Gradle 8.13.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Cache the system image
+        id: image-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_HOME }}/system-images/android-36
+          key: android-image-android-36-google_apis-x86_64-v1
+
+      - name: Install the emulator, the platform and the system image
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true # `yes` ends with SIGPIPE
+          "$sdkmanager" --install "emulator" "platform-tools" "platforms;android-35" \
+            "build-tools;35.0.0" "$SYSTEM_IMAGE"
+
+      # Hertzbench never creates an AVD. `echo no` answers avdmanager's "custom hardware profile?"
+      # prompt on stdin; the command has no flag to skip it.
+      - name: Create the pixel8 AVD
+        run: |
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd \
+            --force --name pixel8 --device pixel_8 --package "$SYSTEM_IMAGE"
+          "$ANDROID_HOME/emulator/emulator" -list-avds
+
+      # The plan verified `-feature -WiFiPacketStream` on emulator 37.1.11; this prints the build
+      # a run uses, so a red job after an emulator update names the version. `sed` reads all of the
+      # emulator's output: `head` would close the pipe early and, under pipefail, fail the step.
+      - name: Emulator version and acceleration
+        run: |
+          "$ANDROID_HOME/emulator/emulator" -version | sed -n 1p
+          "$ANDROID_HOME/emulator/emulator-check" accel
+
+      - name: Build the example app
+        working-directory: hertzbench/examples/android/iot-app
+        run: gradle --no-daemon assembleDebug
+
+      - name: Validate the scenario
+        run: deno task hertzbench validate scenarios/examples/android-web-scripted.yaml
+
+      - name: Run the scenario (must pass)
+        run: deno task hertzbench run scenarios/examples/android-web-scripted.yaml --out "$RUNNER_TEMP/android-green"
+
+      # The same scenario asking the app for a status it never logs. Exit status 1 alone is not
+      # enough: it also means "a board reported a problem", and 2 is an environment problem (no
+      # emulator, boot timeout). So the report must show that assertion, and only that one, as FAIL.
+      - name: Run the scenario with its app assertion inverted (must fail)
+        run: |
+          inverted=scenarios/examples/android-web-scripted.inverted.yaml
+          report="$RUNNER_TEMP/android-red-report.txt"
+          sed 's/contains: "status ok 200"/contains: "status ok 999"/' \
+            scenarios/examples/android-web-scripted.yaml > "$inverted"
+          if cmp -s scenarios/examples/android-web-scripted.yaml "$inverted"; then
+            echo "the sed did not change the scenario: the assertion text moved" >&2
+            exit 1
+          fi
+          if deno task hertzbench run "$inverted" --out "$RUNNER_TEMP/android-red" > "$report"; then
+            code=0
+          else
+            code=$?
+          fi
+          cat "$report"
+          echo "inverted scenario exit status: $code"
+          if [ "$code" -ne 1 ]; then
+            echo "expected exit status 1 (an assertion failed), got $code" >&2
+            exit 1
+          fi
+          if ! grep -qF 'FAIL  serial phone contains "status ok 999"' "$report"; then
+            echo "the report does not show the inverted assertion as FAIL" >&2
+            exit 1
+          fi
+          if [ "$(grep -c '^  FAIL ' "$report")" -ne 1 ]; then
+            echo "an assertion other than the inverted one failed too" >&2
+            exit 1
+          fi
+
+      - name: Upload run outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-e2e-run
+          path: |
+            ${{ runner.temp }}/android-green
+            ${{ runner.temp }}/android-red
+            ${{ runner.temp }}/android-red-report.txt
+          if-no-files-found: ignore
+          retention-days: 7
