@@ -51,7 +51,7 @@ jobs:
           ls -l /dev/kvm
 
       - name: Setup Deno
-        uses: denoland/setup-deno@v2
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
         with:
           deno-version: v2.x
 
@@ -63,7 +63,7 @@ jobs:
 
       # The tree has no Gradle wrapper; the example app is built with Gradle 8.13.
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
         with:
           gradle-version: '8.13'
 
