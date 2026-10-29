@@ -34,7 +34,7 @@ import type { Clock } from "./clock.ts";
 import { ESPNOW_ACK_TIMEOUT_MS, type EspNowFrame, parseEspNow } from "./espnow.ts";
 import type { ChannelChanges, DropReason, EspNowOutcome, EventLog, FrameKind } from "./events.ts";
 import type { VirtualGateway } from "./gateway.ts";
-import { classifyFrame, isGroupMac, parseEthernet, parseIpv4 } from "./packet.ts";
+import { classifyFrame, isGroupMac, macToBytes, parseEthernet, parseIpv4 } from "./packet.ts";
 import { substream } from "./rng.ts";
 
 export interface MediumNode {
@@ -296,7 +296,14 @@ export class Medium {
     }
 
     const group = isGroupMac(eth.dst);
-    const targetId = group ? undefined : this.#idByMac.get(eth.dst) ?? this.#leaseHolderOf(frame);
+    const ownerId = group ? undefined : this.#idByMac.get(eth.dst);
+    const holderId = group || ownerId !== undefined ? undefined : this.#leaseHolderOf(frame);
+    const targetId = ownerId ?? holderId;
+    // A station accepts only frames addressed to its own MAC. The one that
+    // went by its lease carries the fork's AP MAC instead, so it is readdressed
+    // here; an Android guest drops it otherwise, and its TCP handshake never
+    // completes.
+    const delivered = holderId === undefined ? frame : this.#readdressed(frame, holderId);
     // Group addresses and addresses nobody owns reach every other station on
     // the air, the way a broadcast does. Neither is acknowledged.
     const unacked = group || targetId === undefined;
@@ -306,7 +313,7 @@ export class Medium {
       this.#crossLink(
         sender,
         this.#requireNode(toId),
-        frame,
+        delivered,
         kind,
         unacked,
         targetId !== undefined,
@@ -327,6 +334,13 @@ export class Medium {
     if (!ip) return undefined;
     const mac = this.#opts.gateway?.stationForIp(ip.dst);
     return mac === undefined ? undefined : this.#idByMac.get(mac);
+  }
+
+  /** A copy of `frame` addressed to the station of node `id`. */
+  #readdressed(frame: Uint8Array, id: string): Uint8Array {
+    const copy = frame.slice();
+    copy.set(macToBytes(this.#requireNode(id).mac), 0);
+    return copy;
   }
 
   #replyFromGateway(to: NodeState, reply: Uint8Array): void {
