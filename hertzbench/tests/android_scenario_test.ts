@@ -230,7 +230,7 @@ const refusals: [string, string, string][] = [
   ],
   [
     "a snapshot flag that is not a boolean",
-    scenarioWith(PHONE.replace("}", ", snapshot: yes please }")),
+    scenarioWith(PHONE.replaceAll("}", ", snapshot: yes please }")),
     "nodes[1].android.snapshot: expected true or false",
   ],
   [
