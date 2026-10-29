@@ -50,13 +50,22 @@ assertions:
   # Unicast from every side of the wall, and the gateway's broadcast back.
   - serial: { node: gw, contains: "from sensor-4", within: 30s }
   - serial: { node: sensor-1, contains: "espnow rx beacon", within: 30s }
+  # acked_pct counts frames, and the driver resends an unacked one every 10 ms.
+  # Seed 42 leaves sensor-4 75.6% to 90% acked before the move, by how many
+  # readings fall in "start" (when the sensors boot), and 18% at most after it.
+  # A host that does not schedule the gateway's QEMU for a while gets no ACK out
+  # of it in time: on a loaded host one stall cost sensor-4 17 frames, what the
+  # engine gives for 200 ms. The bars hold for a 200 ms gateway stall in each
+  # phase when the sensors send by 22.5 s (tests/espnow_test.ts). Longer
+  # stalls, later boots or a gateway that resets on its watchdog mid-run still
+  # fail them: past 200 ms the start phase sinks toward the far one.
   - metric: {
       link: "sensor-*->gw",
       phase: start,
       kind: espnow,
-      acked_pct: { gt: 75 },
+      acked_pct: { gt: 40 },
       ack_rtt_p95_ms: { lt: 10 },
       latency_p95_ms: { lt: 5 },
     }
-  - metric: { link: "sensor-4->gw", phase: far, kind: espnow, acked_pct: { lt: 50 } }
-  - metric: { link: "sensor-1->gw", phase: far, kind: espnow, acked_pct: { gt: 90 } }
+  - metric: { link: "sensor-4->gw", phase: far, kind: espnow, acked_pct: { lt: 30 } }
+  - metric: { link: "sensor-1->gw", phase: far, kind: espnow, acked_pct: { gt: 70 } }

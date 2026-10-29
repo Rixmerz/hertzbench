@@ -87,9 +87,23 @@ welcome; each one links the evidence.
   [`wip/ci-flakes`](https://github.com/Rixmerz/hertzbench/tree/wip/ci-flakes): a Chromium
   cold-start budget and a sub-tick clock for the medium. It was never verified; start from it or
   ignore it.
-- [ ] **ESP-NOW mesh on real firmware is intermittent.** `espnow-mesh-5-nodes.yaml` passed 10 of 13
-      runs. The failures trace to the QEMU fork. The scenario and the fork patch
-      are described in [e2e-esp32.md](e2e-esp32.md#the-esp-now-example).
+- [x] **ESP-NOW mesh on real firmware is intermittent.** Mitigated in the scenario's bars; the
+      simulator's accounting was right. `espnow-mesh-5-nodes.yaml` passed 10 of 13 runs, each failure
+      an `acked_pct` bar. The engine's loss draws are fixed by the seed, and they left sensor-4
+      between 75.6% and 90% acked before the move (by how many readings fall before it), against a
+      bar of 75. The fork answers an ACK from inside the gateway's QEMU, so when the host does not
+      schedule that process for 10 ms the ACK is late, and the driver resends every 10 ms meanwhile:
+      one missed ACK failed the run, and one stall on a loaded host cost sensor-4 17 frames, what
+      the engine gives for 200 ms. The bars now hold for a 200 ms gateway stall in each phase when
+      the sensors send by 22.5 s, which `tests/espnow_test.ts` checks on the engine alone. On
+      2026-10-29 the scenario passed 13 of 13 on an idle host with the old bars and 2 of 2 with the
+      new ones. Still failing: a longer stall (a 600 ms one with a late boot did, beside 10 busy
+      loops on 14 cores), or a gateway that resets on its watchdog mid-run; past 200 ms no bar that
+      counts frames tells the start phase from the far one. Details in
+      [e2e-esp32.md](e2e-esp32.md#results-on-real-firmware). The macOS flake in the 15 ms ACK test
+      (`tests/espnow_test.ts`) is the same mechanism: in both failed CI runs (2026-10-28) some of
+      the 20 sends ended `no_ack` instead of `ack_timeout`, because the receiver's ACK reached the
+      engine only after the sender's next frame. That test is unchanged.
 - [x] **Publish Docker Image fails on master.** It is Velxio's workflow and needs Velxio's Docker
       Hub secrets and build license; it now runs only in the upstream repository.
 - [ ] **Dependency review always fails** because the repository's dependency graph is disabled.
