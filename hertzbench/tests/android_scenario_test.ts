@@ -280,7 +280,11 @@ emu) kill "$(cat "$DIR/emulator-pid")" ;;`;
 async function runWithFakeGuest(
   guestMac: string,
   phoneExtra = "",
-  { guest = FAKE_GUEST, startupTimeoutMs }: { guest?: string; startupTimeoutMs?: number } = {},
+  { guest = FAKE_GUEST, startupTimeoutMs, routeTimeoutMs }: {
+    guest?: string;
+    startupTimeoutMs?: number;
+    routeTimeoutMs?: number;
+  } = {},
 ) {
   const sdk = await fakeGuestSdk(ADB, guestMac, guest);
   const work = await Deno.makeTempDir({ prefix: "hzb-android-run-" });
@@ -292,7 +296,12 @@ async function runWithFakeGuest(
       runScenario(loaded.scenario, {
         outDir: loaded.outDir,
         outputs: loaded.outputs,
-        launchers: { android: createAndroidLauncher({ checkKvm: () => null }) },
+        launchers: {
+          android: createAndroidLauncher({
+            checkKvm: () => null,
+            ...(routeTimeoutMs !== undefined ? { routeTimeoutMs } : {}),
+          }),
+        },
         ...(startupTimeoutMs !== undefined ? { startupTimeoutMs } : {}),
       });
     return { sdk, work, run, outDir: loaded.outDir };
@@ -343,6 +352,47 @@ androidRun(
     }
   },
 );
+
+// Issue #70: Android keeps eth0 (mobile data) as the default network unless data is disabled.
+androidRun(
+  "android run: mobile data is disabled and the route to a board is checked before the app starts",
+  async () => {
+    const { sdk, work, run } = await runWithFakeGuest(ANDROID_DEFAULT_MAC);
+    try {
+      const result = await run();
+      assertEquals(result.problems, []);
+      const calls = (await Deno.readTextFile(join(sdk.dir, "adb-calls"))).split("\n");
+      const at = (needle: string) => calls.findIndex((c) => c.includes(needle));
+      assert(at("shell svc data disable") >= 0, "svc data disable was never issued");
+      assert(at("shell ip route get 192.168.4.") >= 0, "the route was never checked");
+      assert(at("shell svc data disable") < at("shell am start"), "disable comes before the app");
+      assert(at("shell ip route get") < at("shell am start"), "the check comes before the app");
+    } finally {
+      await sdk.restore();
+      await Deno.remove(work, { recursive: true });
+    }
+  },
+);
+
+const ETH0_ROUTE = "192.168.4.11 via 10.0.2.2 dev eth0 table 1015 src 10.0.2.15 uid 2000";
+
+androidRun("android run: a route through eth0 stops the run quoting the route line", async () => {
+  const { sdk, work, run } = await runWithFakeGuest(ANDROID_DEFAULT_MAC, "", {
+    routeTimeoutMs: 600,
+  });
+  try {
+    await Deno.writeTextFile(join(sdk.dir, "route"), ETH0_ROUTE);
+    const error = await assertRejects(run, BoardError);
+    assertStringIncludes(error.message, "phone");
+    assertStringIncludes(error.message, "wlan0");
+    assertStringIncludes(error.message, ETH0_ROUTE);
+    const calls = await Deno.readTextFile(join(sdk.dir, "adb-calls"));
+    assert(!calls.includes("am start"), "the app must not start on the wrong network");
+  } finally {
+    await sdk.restore();
+    await Deno.remove(work, { recursive: true });
+  }
+});
 
 Deno.test("the console port that gives the guest a MAC is read back from the MAC", () => {
   assertEquals(consolePortForMac("02:15:d0:00:00:00"), 5584);
@@ -488,7 +538,7 @@ const SNAPSHOT_NODES = `
     android: { avd: pixel8, apk: ./app.apk, package: dev.example.app, snapshot: true }`;
 
 /** Run two snapshot android nodes, `phone` and `tablet`, against a fake AVD home holding `marker`. */
-async function runSnapshotNodes(marker: { emulator: string } | null) {
+async function runSnapshotNodes(marker: { emulator: string } | null, routeTimeoutMs?: number) {
   const avd = await fakeAvdHome("pixel8", marker);
   const work = await Deno.makeTempDir({ prefix: "hzb-android-run-" });
   const oldHome = Deno.env.get("ANDROID_AVD_HOME");
@@ -506,7 +556,12 @@ async function runSnapshotNodes(marker: { emulator: string } | null) {
     return await runScenario(loaded.scenario, {
       outDir: loaded.outDir,
       outputs: loaded.outputs,
-      launchers: { android: createAndroidLauncher({ checkKvm: () => null }) },
+      launchers: {
+        android: createAndroidLauncher({
+          checkKvm: () => null,
+          ...(routeTimeoutMs !== undefined ? { routeTimeoutMs } : {}),
+        }),
+      },
     });
   } finally {
     if (oldHome === undefined) Deno.env.delete("ANDROID_AVD_HOME");
@@ -549,6 +604,26 @@ androidRun(
       }
       assertEquals(new Set(leases).size, 2);
       assertEquals(new Set(ports).size, 2, "two emulators on one console port");
+    } finally {
+      await sdk.restore();
+    }
+  },
+);
+
+androidRun(
+  "android run: a snapshot boot gets the same wlan0 route check and stops on eth0",
+  async () => {
+    const sdk = await fakeSnapshotSdk(SNAPSHOT_ADB);
+    try {
+      await Deno.writeTextFile(join(sdk.dir, "route"), ETH0_ROUTE);
+      const error = await assertRejects(
+        () => runSnapshotNodes({ emulator: FAKE_EMULATOR_VERSION }, 600),
+        BoardError,
+      );
+      assertStringIncludes(error.message, ETH0_ROUTE);
+      const calls = await Deno.readTextFile(join(sdk.dir, "adb-calls"));
+      assertStringIncludes(calls, "shell svc data disable");
+      assert(!calls.includes("am start"));
     } finally {
       await sdk.restore();
     }

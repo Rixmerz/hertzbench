@@ -202,8 +202,12 @@ The app addresses boards by IP (`192.168.4.11`) or by mDNS once Hertzbench answe
 medium. Android validates a new Wi-Fi network by probing the internet, which this one has not; it
 may then mark `wlan0` "no internet" and keep the default route on `eth0`. An app talking to
 `192.168.4.0/24` should still use `wlan0`, because that is the connected route (A3, piece 2 checks
-it). If Android prefers `eth0` for the
-/24, the launcher disables mobile data with `adb shell svc data disable`.
+it). Android does not: it keeps `eth0` (the emulator's mobile data) as the default network, so
+an unbound `Socket()` leaves through `eth0` (issue #70). After boot, on cold and snapshot boots
+alike, the launcher runs `adb shell svc data disable` and then checks that
+`adb shell ip route get <a board's IP on the medium>` names `wlan0`, polling for up to 10 s while
+the lease arrives. If it still does not, the run stops quoting the route line, before the app
+starts. This was checked against the fake adb only, never against a real emulator.
 
 ## 3. BLE: what can be bridged, and the realistic scope
 
