@@ -71,6 +71,10 @@ SNR     = RSSI - noise
 - The 802.11 association and beacon exchange. Each board associates with the access point that is part of its own QEMU; the engine models the hop between stations.
 - Firmware-visible RSSI. The RSSI the firmware sees is a random number (`hw/misc/esp32_wifi.c:327`). The RSSI in the report comes from the engine.
 
+## Not modelled: sensors
+
+- **DHT11 and DHT22** (the Adafruit `DHT sensor library`, and any single-wire sensor read by a timed busy-wait). No such part is attached. On hardware the library gives up after about a millisecond and returns NaN. Under QEMU on the wall clock (Wi-Fi on) its `expectPulse` loop runs with interrupts disabled long enough to trip the interrupt watchdog, so the board reboots on its first reading, again and again. The report recognises this: two or more `rst:0x8 (TG1WDT_SYS_RESET)` or `rst:0x7 (TG0WDT_SYS_RESET)` lines in an `esp32` node's serial produce a warning naming an interrupt watchdog reset loop as a fidelity limit (`orchestrator/board-limits.ts`, tested in `board_limits_test.ts`). To get past it, read a fixed value in the scenario's sketch instead of calling the sensor.
+
 ## Addressing
 
 A QEMU socket netdev has no DHCP, ARP or DNS peer (SLIRP provided them). The engine hosts a **virtual gateway** on the switch, at `.1` of the subnet (default `192.168.4.0/24`), with MAC `02:68:7a:62:00:01`:

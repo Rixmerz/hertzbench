@@ -37,6 +37,7 @@ import {
   WallClock,
 } from "../engine/mod.ts";
 import { createAirNetwork, declaredMismatches, type NetworkSetup } from "./air-network.ts";
+import { boardLimitWarnings } from "./board-limits.ts";
 import { type AssertionResult, evaluateAssertions } from "./assertions.ts";
 import {
   BoardError,
@@ -551,7 +552,11 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
 
   const events = log.events.map((event) => ({ ...event, t: event.t - zeroMs }));
   const metrics = computeMetrics(events, scenario.durationMs);
-  metrics.warnings.push(...network.warnings, ...declaredMismatches(scenario, events));
+  metrics.warnings.push(
+    ...network.warnings,
+    ...declaredMismatches(scenario, events),
+    ...boardLimitWarnings(scenario.nodes, events),
+  );
   const assertions = evaluateAssertions(scenario.assertions, events, metrics.phases);
   const nodes = scenario.nodes.map((node): NodeReport => ({
     id: node.id,
