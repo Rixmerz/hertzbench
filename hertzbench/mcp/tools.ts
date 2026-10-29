@@ -17,12 +17,15 @@ import { EVENT_TYPES } from "../engine/mod.ts";
 import {
   BOARD_NAMES,
   CHANNEL_FIELDS,
+  MQTT_PORT,
+  mqttTopic,
   parseChannelChanges,
   parseLinkRule,
   parsePosition,
   parseScenario,
   type Scenario,
   ScenarioError,
+  UDP_PORT,
 } from "../orchestrator/scenario.ts";
 import { type ResourceDefinition, type ToolDefinition, ToolError } from "./protocol.ts";
 import { editScenarioText, type ScenarioEdit } from "./scenario-edit.ts";
@@ -112,6 +115,21 @@ function serialBytes(args: Args): Uint8Array {
   if (bytes.length === 0) throw new ToolError("nothing to send");
   if (bytes.length > MAX_SERIAL_BYTES) {
     throw new ToolError(`at most ${MAX_SERIAL_BYTES} bytes per call, got ${bytes.length}`);
+  }
+  return bytes;
+}
+
+/** Most bytes one mqtt_publish or send_payload call carries; each transport may allow less. */
+const MAX_PAYLOAD_BYTES = 4096;
+
+/** A payload argument as bytes. `allowEmpty`: an empty retained MQTT message clears its topic. */
+function payloadBytes(args: Args, allowEmpty: boolean): Uint8Array {
+  const payload = args.payload;
+  if (typeof payload !== "string") throw new ToolError("payload must be a string");
+  const bytes = new TextEncoder().encode(payload);
+  if (bytes.length === 0 && !allowEmpty) throw new ToolError("payload must be a non-empty string");
+  if (bytes.length > MAX_PAYLOAD_BYTES) {
+    throw new ToolError(`at most ${MAX_PAYLOAD_BYTES} bytes per call, got ${bytes.length}`);
   }
   return bytes;
 }
@@ -715,6 +733,87 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
           known(args, ["node", "text", "newline", "data_base64"]);
           const node = requiredText(args, "node");
           return session.sendSerial(node, serialBytes(args));
+        }),
+    },
+    {
+      name: "mqtt_publish",
+      description:
+        "Publish an MQTT message through a scripted broker node (one whose firmware serves mqtt) while the run plays, as if a client had published it: it reaches every client subscribed to a matching filter, the scripted boards' subscriptions and phones on the IP bridge alike, and the broker logs `mqtt publish <topic> \"<payload>\" from mcp` in get_serial. With retain, the broker also keeps it for clients that subscribe later; an empty payload with retain clears the topic's. Refused when the node is not a scripted broker. Returns delivered_to: how many client sessions the broker wrote it to, whatever the links then do with the frames.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          node: { type: "string", description: "The broker node" },
+          topic: { type: "string", description: "A topic name; no + or # wildcard" },
+          payload: { type: "string", description: "The message, UTF-8; at most 4096 bytes" },
+          retain: { type: "boolean", description: "Keep it for later subscribers. Default false" },
+          port: {
+            type: "integer",
+            minimum: 1,
+            maximum: 65535,
+            description: "Which MQTT service, when the node serves more than one",
+          },
+        },
+        required: ["node", "topic", "payload"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["node", "topic", "payload", "retain", "port"]);
+          const node = requiredText(args, "node");
+          const topic = mqttTopic(args.topic, "topic", false);
+          const payload = payloadBytes(args, true);
+          const retain = optionalBoolean(args, "retain") ?? false;
+          const port = optionalInt(args, "port", 1, 65535);
+          return session.mqttPublish(node, { topic, payload, retain, port });
+        }),
+    },
+    {
+      name: "send_payload",
+      description:
+        'Make a scripted Wi-Fi or BLE board send one message now, while the run plays, over a path its script could use: `udp` (a datagram to a node, port 5000 unless given), `espnow` (a frame to a node, or to "broadcast"; the ACK result shows in get_serial as `espnow tx ok|fail to <peer>`) or `mqtt` (a publish to a broker node, with `topic`; the board opens its session first if its script had none) or, on a BLE board, `gatt` (a notification from a peripheral, or a write from a central, on its connection to the node `to`; at most 20 bytes; refused when they are not connected). The payload goes as given, without the ":<sequence>" a scheduled send adds. To publish from the broker itself use mqtt_publish. Scripted LoRa and nRF24 boards and ESP32 boards refuse.',
+      inputSchema: {
+        type: "object",
+        properties: {
+          node: { type: "string", description: "The sending board" },
+          to: { type: "string", description: 'The receiving node; "broadcast" for ESP-NOW' },
+          via: { type: "string", enum: ["udp", "espnow", "mqtt", "gatt"] },
+          payload: {
+            type: "string",
+            description: "The message, UTF-8; at most 4096 bytes (ESP-NOW 250, UDP 1472, GATT 20)",
+          },
+          topic: { type: "string", description: "mqtt only: the topic published to" },
+          port: {
+            type: "integer",
+            minimum: 1,
+            maximum: 65535,
+            description: "udp: the port both ends use (default 5000). mqtt: the broker's (1883)",
+          },
+        },
+        required: ["node", "to", "via", "payload"],
+        additionalProperties: false,
+      },
+      call: (args) =>
+        expected(() => {
+          known(args, ["node", "to", "via", "payload", "topic", "port"]);
+          const node = requiredText(args, "node");
+          const to = requiredText(args, "to");
+          const via = oneOf(args, "via", ["udp", "espnow", "mqtt", "gatt"] as const);
+          const payload = payloadBytes(args, false);
+          const port = optionalInt(args, "port", 1, 65535);
+          if (via === "mqtt") {
+            return session.sendPayload(node, {
+              via,
+              to,
+              payload,
+              port: port ?? MQTT_PORT,
+              topic: mqttTopic(args.topic, "topic", false),
+            });
+          }
+          if (args.topic !== undefined) throw new ToolError("topic needs via: mqtt");
+          if ((via === "espnow" || via === "gatt") && port !== null) {
+            throw new ToolError(`${via === "gatt" ? "GATT" : "ESP-NOW"} has no ports`);
+          }
+          return session.sendPayload(node, { via, to, payload, port: port ?? UDP_PORT });
         }),
     },
     {

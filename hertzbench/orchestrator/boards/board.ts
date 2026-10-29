@@ -35,11 +35,42 @@ export interface BoardContext {
   onProblem(message: string): void;
 }
 
+/** A message a live tool has a scripted MQTT broker publish, as if a client had sent it. */
+export interface LiveMqttPublish {
+  topic: string;
+  payload: Uint8Array;
+  /** Keep it for clients that subscribe later; an empty retained payload clears the topic's. */
+  retain: boolean;
+  /** Which of the node's MQTT services; null when it serves exactly one. */
+  port: number | null;
+}
+
+/** One send a live tool asks of a scripted Wi-Fi or BLE board, the way its own `send` entries do. */
+export interface LiveSend {
+  via: "udp" | "espnow" | "mqtt" | "gatt";
+  /** A node id; "broadcast" for ESP-NOW to every station on the channel. */
+  to: string;
+  /** The bytes as given: unlike a scheduled send, no ":<sequence>" is appended. */
+  payload: Uint8Array;
+  /** UDP: the port both ends use. MQTT: the broker's port. Unused by ESP-NOW and GATT. */
+  port: number;
+  /** MQTT only: the topic published to. */
+  topic?: string;
+}
+
 export interface RunningBoard {
   /** Which clock the board's time follows, for the report. */
   readonly clockDescription: string;
   /** Bytes into the board's serial console (UART0). Absent where the board has none. */
   writeSerial?(bytes: Uint8Array): Promise<void>;
+  /**
+   * Publishes through the MQTT broker this board serves, to every client subscribed to a matching
+   * filter; returns how many client sessions it was written to. Absent where the board runs no broker
+   * the simulation can reach. Throws BoardError when it cannot.
+   */
+  publishMqtt?(publish: LiveMqttPublish): number;
+  /** Sends once over a network path the board's script could use. Absent where it cannot. */
+  sendPayload?(send: LiveSend): Promise<void>;
   stop(): Promise<void>;
 }
 

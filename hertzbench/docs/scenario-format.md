@@ -97,10 +97,10 @@ interference:
   ```yaml
   serve:
     - { port: 80, protocol: http }      # one plain-text line per request, "<node>: GET /path"; a WebSocket upgrade echoes messages
-    - { port: 1883, protocol: mqtt }    # an MQTT 3.1.1 broker at QoS 0: subscribe (+ and #), publish, ping
+    - { port: 1883, protocol: mqtt }    # an MQTT 3.1.1 broker at QoS 0: subscribe (+ and #), publish, retained messages, ping
   ```
 
-  Ports are distinct, 1 to 65535. Serial lines: `tcp listening on <port> (<protocol>)`, `http <METHOD> <path> from <ip>`, `ws open <path> from <ip>`, `ws rx "<text>" from <ip>`, `ws closed from <ip>`, `mqtt connect <client id> from <ip>`, `mqtt subscribe <filter> from <client id>`, `mqtt publish <topic> "<payload>" from <client id>`.
+  Ports are distinct, 1 to 65535. Serial lines: `tcp listening on <port> (<protocol>)`, `http <METHOD> <path> from <ip>`, `ws open <path> from <ip>`, `ws rx "<text>" from <ip>`, `ws closed from <ip>`, `mqtt connect <client id> from <ip>`, `mqtt subscribe <filter> from <client id>`, `mqtt publish <topic> "<payload>" from <client id>`. A PUBLISH with the RETAIN flag is kept, one message per topic (an empty one clears it), and sent to a client when it subscribes to a matching filter. The `mqtt_publish` [MCP tool](mcp.md) publishes through the broker too, as client `mcp`.
 
   With `via: mqtt` the board is an MQTT 3.1.1 client of a broker node (a scripted node that `serve`s `mqtt`, or an ESP32 running one) and publishes periodically; `subscribe` lists the topics it listens on:
 
@@ -115,7 +115,7 @@ interference:
   - `subscribe` entries are `{ to, topic, port }`: `to` the broker node, `topic` a filter (`+` for one level, `#` as the whole last level), `port` default 1883. Each message that arrives is a serial line `mqtt rx <topic> <payload>`. Wi-Fi only.
   - `to` must be a node on the medium other than the board itself. If it is a scripted node, it must `serve` `mqtt` on that port (`<node> serves no MQTT broker on port <port>` otherwise); any other board is taken at its word.
   - One connection per broker (node and port) carries all the board's publishes and subscriptions to it. It connects as soon as the board has its lease, with the board's id as client id, a clean session and a 10 s keep-alive. The `start` of a publish counts from the first time the session is up, so the handshake does not eat the first publish; later publishes keep the `every` cadence, and one that falls while the session is down is skipped and logged as `mqtt tx <topic> skipped: not connected to <node>`.
-  - **Reconnection.** If the TCP connection closes or resets, or the broker says nothing for 15 s (1.5 keep-alives, with a PINGREQ every 10 s), the board connects again after 1 s and subscribes again; the same retry covers a broker that is not listening yet. No QoS above 0, retained messages, will or authentication: the broker of `serve` has none either.
+  - **Reconnection.** If the TCP connection closes or resets, or the broker says nothing for 15 s (1.5 keep-alives, with a PINGREQ every 10 s), the board connects again after 1 s and subscribes again; the same retry covers a broker that is not listening yet. The board never sets RETAIN on its own publishes. No QoS above 0, will or authentication: the broker of `serve` has none either.
   - Serial lines: `mqtt connected to <node>`, `mqtt disconnected from <node>`, `mqtt rx <topic> <payload>`, `mqtt tx <topic> skipped: not connected to <node>`. On the broker node, `mqtt connect|subscribe|publish ...` as for any client, so a phone on the [bridge](#bridge) that exposes the broker sees the same topics.
 
   Frames go one at a time, each waiting for its ACK or, if none comes, for the fork's 10 ms timeout plus a 30 ms allowance for the loopback hops (a failed send is logged about 40 ms after it). The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.

@@ -26,7 +26,7 @@
 import { LOOPBACK } from "../../adapters/loopback-ports.ts";
 import { OP, STATUS } from "../../adapters/ble-hci/hci.ts";
 import type { BleScript, ScriptedSend } from "../scenario.ts";
-import type { BoardContext, RunningBoard } from "./board.ts";
+import { type BoardContext, BoardError, type LiveSend, type RunningBoard } from "./board.ts";
 import { advertisedName, HciHost } from "./drivers/hci-host.ts";
 import { ATT, GattServer, PROPERTY } from "./drivers/att.ts";
 
@@ -46,6 +46,8 @@ const ATT_INDICATE = 0x1d;
 const ATT_CONFIRM = 0x1e;
 const ATT_WRITE_CMD = 0x52;
 const ATT_REQUEST_NOT_SUPPORTED = 0x06;
+/** What one ATT notification or write carries at the default MTU of 23: 3 bytes go to opcode and handle. */
+const ATT_MAX_VALUE_BYTES = 20;
 
 class ScriptedBleBoard implements RunningBoard {
   readonly clockDescription = "wall clock (scripted board, no guest time)";
@@ -253,7 +255,6 @@ class ScriptedBleBoard implements RunningBoard {
     const ready = this.#ctx.clock.now();
     const firmware = this.#ctx.node.firmware;
     const sends: ScriptedSend[] = firmware.kind === "script" ? firmware.send : [];
-    const opcode = this.#script.connect ? ATT_WRITE_CMD : ATT_NOTIFY;
     for (const send of sends) {
       const to = send.to as string;
       for (let seq = 0; seq < send.count; seq++) {
@@ -264,21 +265,42 @@ class ScriptedBleBoard implements RunningBoard {
             this.#ctx.onSerial(`ble tx ${text} to ${to} skipped: not connected`);
             return;
           }
-          const value = new TextEncoder().encode(text);
-          this.#gatt?.setValue(value);
-          this.#host.sendAtt(
-            handle,
-            Uint8Array.from([
-              opcode,
-              SCRIPTED_ATT_HANDLE & 0xff,
-              SCRIPTED_ATT_HANDLE >> 8,
-              ...value,
-            ]),
-          );
-          this.#ctx.onSerial(`ble tx ${text} to ${to}`);
+          this.#transmit(handle, to, text);
         });
       }
     }
+  }
+
+  /** A notification (peripheral) or write command (central) carrying `text` on the connection. */
+  #transmit(handle: number, to: string, text: string): void {
+    const value = new TextEncoder().encode(text);
+    this.#gatt?.setValue(value);
+    this.#host.sendAtt(
+      handle,
+      Uint8Array.from([
+        this.#script.connect ? ATT_WRITE_CMD : ATT_NOTIFY,
+        SCRIPTED_ATT_HANDLE & 0xff,
+        SCRIPTED_ATT_HANDLE >> 8,
+        ...value,
+      ]),
+    );
+    this.#ctx.onSerial(`ble tx ${text} to ${to}`);
+  }
+
+  sendPayload(send: LiveSend): Promise<void> {
+    const { id } = this.#ctx.node;
+    if (send.via !== "gatt") {
+      throw new BoardError(`${id} is a BLE board: it sends via: gatt, not ${send.via}`);
+    }
+    const handle = this.#handles.get(send.to);
+    if (handle === undefined) throw new BoardError(`${id} is not connected to ${send.to}`);
+    if (send.payload.length > ATT_MAX_VALUE_BYTES) {
+      throw new BoardError(
+        `a GATT value carries at most ${ATT_MAX_VALUE_BYTES} bytes at the default MTU, got ${send.payload.length}`,
+      );
+    }
+    this.#transmit(handle, send.to, new TextDecoder().decode(send.payload));
+    return Promise.resolve();
   }
 }
 

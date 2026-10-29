@@ -532,6 +532,8 @@ const RUN_TOOLS: [string, Record<string, unknown>][] = [
   ["set_radio", { node: "a", antenna_gain_dbi: 2 }],
   ["start_phase", { label: "late" }],
   ["send_serial", { node: "a", text: "hi" }],
+  ["mqtt_publish", { node: "a", topic: "t", payload: "x" }],
+  ["send_payload", { node: "a", to: "b", via: "udp", payload: "x" }],
   ["stop", {}],
 ];
 

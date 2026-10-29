@@ -19,6 +19,7 @@ import {
   DHCPDISCOVER,
   DHCPREQUEST,
   ESPNOW_ACK_TIMEOUT_MS,
+  ESPNOW_MAX_PAYLOAD_BYTES,
   ipToString,
   parseEspNowBody,
   parseEthernet,
@@ -28,7 +29,15 @@ import {
 } from "../../engine/mod.ts";
 import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2/mod.ts";
 import { BROADCAST_TARGET, type ScriptedSend } from "../scenario.ts";
-import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
+import {
+  type BoardContext,
+  BoardError,
+  type BoardLauncher,
+  type LiveMqttPublish,
+  type LiveSend,
+  type PeerInfo,
+  type RunningBoard,
+} from "./board.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "./espnow-fork-model.ts";
 import { startScriptedBleBoard } from "./scripted-ble.ts";
 import { startScriptedRadioBoard } from "./scripted-radio.ts";
@@ -46,6 +55,10 @@ const DHCP_MAX_TRIES = 10;
  * ever exceed it; the real fix would hand the board the engine's outcome.
  */
 const ESPNOW_HOP_ALLOWANCE_MS = 30;
+/** How long a live MQTT send waits for a session it had to open: a few reconnect rounds. */
+const MQTT_LIVE_SESSION_WAIT_MS = 5000;
+/** Largest UDP payload one Ethernet frame carries (1500 minus the IP and UDP headers). */
+const UDP_MAX_PAYLOAD_BYTES = 1472;
 const DHCPOFFER = 2;
 const DHCPACK = 5;
 
@@ -80,6 +93,10 @@ class ScriptedBoard implements RunningBoard {
   #espnowInFlight: string | null = null;
   /** Once bound: the TCP the `serve` entries listen on and the MQTT clients connect from. */
   #tcp: TcpHost | null = null;
+  /** The brokers this board runs, by port, once its lease has started them. */
+  readonly #brokers = new Map<number, MqttBroker>();
+  /** ESP-NOW header field for live sends, kept clear of the ones scheduled sends derive. */
+  #liveRandom = 0x800000;
   /** One MQTT session per broker (node and port), shared by the sends and subscriptions to it. */
   readonly #mqtt = new Map<string, { client: MqttClient; onFirstUp: (() => void)[] }>();
   /** Addresses learned from the frames that arrive, for TCP replies. */
@@ -239,11 +256,27 @@ class ScriptedBoard implements RunningBoard {
   }
 
   #startTcp(ip: string): void {
-    const { node, clock } = this.#ctx;
+    const { node } = this.#ctx;
     if (node.firmware.kind !== "script") return;
     const { serve, send, subscribe } = node.firmware;
     if (serve.length === 0 && subscribe.length === 0 && !send.some((s) => s.via === "mqtt")) return;
-    const tcp = new TcpHost({
+    const tcp = this.#openTcp(ip);
+    const ctx = { node: node.id, onSerial: (line: string) => this.#ctx.onSerial(line) };
+    for (const service of serve) {
+      if (service.protocol === "http") tcp.listen(service.port, (conn) => serveHttp(conn, ctx));
+      else {
+        const broker = new MqttBroker(ctx);
+        this.#brokers.set(service.port, broker);
+        tcp.listen(service.port, (conn) => broker.serve(conn));
+      }
+      this.#ctx.onSerial(`tcp listening on ${service.port} (${service.protocol})`);
+    }
+  }
+
+  /** The board's TCP, bound to its lease; made when a service or a client first needs it. */
+  #openTcp(ip: string): TcpHost {
+    const { node, clock } = this.#ctx;
+    this.#tcp ??= new TcpHost({
       mac: node.mac,
       ip,
       clock,
@@ -253,16 +286,7 @@ class ScriptedBoard implements RunningBoard {
         this.#neighbors.get(peer) ?? this.#ctx.peers.find((p) => p.ip === peer)?.mac ?? null,
       rng: createRng(`scripted-tcp:${node.id}`),
     });
-    const ctx = { node: node.id, onSerial: (line: string) => this.#ctx.onSerial(line) };
-    for (const service of serve) {
-      if (service.protocol === "http") tcp.listen(service.port, (conn) => serveHttp(conn, ctx));
-      else {
-        const broker = new MqttBroker(ctx);
-        tcp.listen(service.port, (conn) => broker.serve(conn));
-      }
-      this.#ctx.onSerial(`tcp listening on ${service.port} (${service.protocol})`);
-    }
-    this.#tcp = tcp;
+    return this.#tcp;
   }
 
   /**
@@ -324,22 +348,9 @@ class ScriptedBoard implements RunningBoard {
         const payload = new TextEncoder().encode(`${send.payload}:${seq}`);
         if (send.via === "espnow") {
           // The random field of the ESP-NOW header, made from the node and sequence for a stable capture.
-          const random = Number.parseInt(node.mac.slice(-2), 16) << 24 | seq;
-          this.#espnowSend(
-            peer?.mac ?? BROADCAST_MAC,
-            peer?.id ?? BROADCAST_TARGET,
-            buildEspNowBody(payload, random),
-          );
-        } else if (peer && this.#ip !== null) {
-          this.#send(buildUdp({
-            srcMac: node.mac,
-            dstMac: peer.mac,
-            srcIp: this.#ip,
-            dstIp: peer.ip,
-            srcPort: send.port,
-            dstPort: send.port,
-            payload,
-          }));
+          this.#sendEspNow(peer, payload, Number.parseInt(node.mac.slice(-2), 16) << 24 | seq);
+        } else if (peer) {
+          this.#sendUdp(peer, send.port, payload);
         }
       };
       // One timer at a time: the next one is scheduled when this one goes.
@@ -352,6 +363,129 @@ class ScriptedBoard implements RunningBoard {
       this.#schedule(bound + send.startMs, () => sendNext(0));
     }
     this.#startMqttSubscriptions();
+  }
+
+  #sendEspNow(peer: PeerInfo | null, payload: Uint8Array, random: number): void {
+    this.#espnowSend(
+      peer?.mac ?? BROADCAST_MAC,
+      peer?.id ?? BROADCAST_TARGET,
+      buildEspNowBody(payload, random),
+    );
+  }
+
+  /** A datagram from this board's lease; nothing goes before it has one. */
+  #sendUdp(peer: PeerInfo, port: number, payload: Uint8Array): void {
+    if (this.#ip === null) return;
+    this.#send(buildUdp({
+      srcMac: this.#ctx.node.mac,
+      dstMac: peer.mac,
+      srcIp: this.#ip,
+      dstIp: peer.ip,
+      srcPort: port,
+      dstPort: port,
+      payload,
+    }));
+  }
+
+  publishMqtt({ topic, payload, retain, port }: LiveMqttPublish): number {
+    const { node } = this.#ctx;
+    const served = node.firmware.kind === "script"
+      ? node.firmware.serve.filter((s) => s.protocol === "mqtt").map((s) => s.port)
+      : [];
+    if (served.length === 0) {
+      throw new BoardError(
+        `${node.id} serves no MQTT broker: its firmware needs serve: [{ port: 1883, protocol: mqtt }]`,
+      );
+    }
+    const chosen = port ?? (served.length === 1 ? served[0] : undefined);
+    if (chosen === undefined) {
+      throw new BoardError(`${node.id} serves MQTT on ports ${served.join(", ")}: give port`);
+    }
+    if (!served.includes(chosen)) {
+      throw new BoardError(
+        `${node.id} serves no MQTT broker on port ${chosen} (its MQTT ports: ${served.join(", ")})`,
+      );
+    }
+    const broker = this.#brokers.get(chosen);
+    if (broker === undefined) {
+      throw new BoardError(
+        `${node.id}'s broker is not up: the board has no DHCP lease yet, so nothing is listening`,
+      );
+    }
+    return broker.publish(topic, payload, retain, "mcp");
+  }
+
+  async sendPayload(send: LiveSend): Promise<void> {
+    const { node, peers } = this.#ctx;
+    if (send.via === "gatt") {
+      throw new BoardError(`${node.id} is a Wi-Fi board: it sends udp, espnow or mqtt, not gatt`);
+    }
+    const peer = send.to === BROADCAST_TARGET ? null : peers.find((p) => p.id === send.to);
+    if (peer === undefined) {
+      throw new BoardError(`${node.id}: ${send.to} is not a node on its medium`);
+    }
+    if (send.via === "espnow") {
+      if (send.payload.length > ESPNOW_MAX_PAYLOAD_BYTES) {
+        throw new BoardError(
+          `an ESP-NOW payload carries at most ${ESPNOW_MAX_PAYLOAD_BYTES} bytes, got ${send.payload.length}`,
+        );
+      }
+      this.#sendEspNow(
+        peer,
+        send.payload,
+        (Number.parseInt(node.mac.slice(-2), 16) << 24) | this.#liveRandom++,
+      );
+      return;
+    }
+    if (peer === null) throw new BoardError(`"${BROADCAST_TARGET}" needs via: espnow`);
+    if (this.#ip === null) {
+      throw new BoardError(`${node.id} has no DHCP lease yet: it cannot send over IP`);
+    }
+    if (send.via === "udp") {
+      if (send.payload.length > UDP_MAX_PAYLOAD_BYTES) {
+        throw new BoardError(
+          `a UDP payload carries at most ${UDP_MAX_PAYLOAD_BYTES} bytes in one frame, got ${send.payload.length}`,
+        );
+      }
+      this.#sendUdp(peer, send.port, send.payload);
+      return;
+    }
+    await this.#publishAsClient(this.#ip, peer, send.port, send.topic as string, send.payload);
+  }
+
+  /**
+   * Publishes through this board's MQTT session to a broker. A session the script already holds is
+   * used as it is; one this call opens is waited for, since the first send would otherwise always
+   * race the handshake.
+   */
+  async #publishAsClient(
+    ip: string,
+    broker: PeerInfo,
+    port: number,
+    topic: string,
+    payload: Uint8Array,
+  ): Promise<void> {
+    const fresh = !this.#mqtt.has(`${broker.id}:${port}`);
+    this.#openTcp(ip);
+    let up = () => {};
+    const opened = new Promise<void>((resolve) => (up = resolve));
+    const client = this.#mqttClient(broker.id, port, fresh ? up : undefined);
+    if (client === null) {
+      throw new BoardError(`${this.#ctx.node.id} cannot open an MQTT session to ${broker.id}`);
+    }
+    if (fresh) {
+      let giveUp: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<void>((resolve) => {
+        giveUp = setTimeout(resolve, MQTT_LIVE_SESSION_WAIT_MS);
+      });
+      await Promise.race([opened, timeout]).finally(() => clearTimeout(giveUp));
+    }
+    if (!client.publish(topic, payload)) {
+      throw new BoardError(
+        `${this.#ctx.node.id} is not connected to the broker ${broker.id}:${port}; ` +
+          (fresh ? "its session did not come up" : "its session is down and reconnecting"),
+      );
+    }
   }
 
   #startMqttSubscriptions(): void {

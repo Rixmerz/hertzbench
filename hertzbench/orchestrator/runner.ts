@@ -41,6 +41,8 @@ import { type AssertionResult, evaluateAssertions } from "./assertions.ts";
 import {
   BoardError,
   type BoardLauncher,
+  type LiveMqttPublish,
+  type LiveSend,
   type PeerInfo,
   type RunningBoard,
 } from "./boards/board.ts";
@@ -118,6 +120,13 @@ export interface LiveRun {
   bridge(): BridgeReport | null;
   /** Bytes into a board's serial console. Throws BoardError when the board has none. */
   writeSerial(id: string, bytes: Uint8Array): Promise<void>;
+  /**
+   * Publishes through the MQTT broker a scripted node serves; returns how many client sessions
+   * it was written to. Throws BoardError when the node is not such a broker.
+   */
+  publishMqtt(id: string, publish: LiveMqttPublish): number;
+  /** One send from a scripted Wi-Fi or BLE node. Throws BoardError when the node cannot make it. */
+  sendPayload(id: string, send: LiveSend): Promise<void>;
   /**
    * A capture of the run so far, as the run writes it at the end: `pcap` the
    * air (air.pcap), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi only),
@@ -383,6 +392,22 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       const whileActive = () => {
         if (!live.active) throw new Error("the run has ended");
       };
+      /** The board `id`, if it can do `capability`: a refusal names what the node is and what would work. */
+      const liveBoard = (
+        id: string,
+        capability: "publishMqtt" | "sendPayload",
+        needs: string,
+      ): RunningBoard => {
+        const board = boards.get(id);
+        if (!board) throw new BoardError(`${id} is not a board of this run`);
+        if (!board[capability]) {
+          const node = scenario.nodes.find((n) => n.id === id);
+          throw new BoardError(
+            `${id} is a ${node?.board} board on ${node?.radio.phy}: this needs ${needs}`,
+          );
+        }
+        return board;
+      };
       const live: { active: boolean } & LiveRun = {
         active: true,
         elapsedMs: () => clock.now() - zeroMs,
@@ -424,6 +449,16 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
             );
           }
           return board.writeSerial(bytes);
+        },
+        publishMqtt: (id, publish) => {
+          whileActive();
+          return liveBoard(id, "publishMqtt", "a scripted Wi-Fi board serving MQTT").publishMqtt!(
+            publish,
+          );
+        },
+        sendPayload: (id, send) => {
+          whileActive();
+          return liveBoard(id, "sendPayload", "a scripted Wi-Fi or BLE board").sendPayload!(send);
         },
         capture: (kind, node) => {
           const writer = kind === "pcap"

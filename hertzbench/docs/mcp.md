@@ -108,6 +108,22 @@ still `starting`. `phase?` starts a metrics phase with that label at the same in
 | `set_radio`    | `node`, `channel?`, `tx_power_dbm?`, `antenna_gain_dbi?`, `phase?`                                              | Changes a station's radio as the medium models it. Wi-Fi: the channel the medium hears it on, its transmit power and antenna gain. LoRa, nRF24 and BLE: the antenna gain only, because the chip's channel and power are in its registers, where the firmware put them. The firmware is not told. Returns the new RSSI and SNR from that station. |
 | `start_phase`  | `label`                                                                                                         | Starts a metrics phase now without changing anything, for something that happens by itself (firmware behaviour, a serial command).                                                                                                                                                                                                |
 | `send_serial`  | `node`, `text` and `newline?`, or `data_base64`                                                                 | Types into a board's serial console (UART0). On an ESP32 the bytes go to QEMU's UART through the worker's `uart_send`, with its RX interrupt, as from a terminal; the answer shows in `get_serial`. A newline is added to `text` unless `newline: false`. At most 4096 bytes per call. Scripted boards have no console and refuse.       |
+| `mqtt_publish` | `node`, `topic`, `payload`, `retain?`, `port?`                                                                  | Publishes through a scripted broker node (one whose firmware `serve`s `mqtt`) as if a client had: every client subscribed to a matching filter gets it, the scripted boards' subscriptions (serial line `mqtt rx <topic> <payload>`) and a phone on the [IP bridge](mobile-bridge.md) alike, and the broker logs `mqtt publish <topic> "<payload>" from mcp`. Returns `delivered_to`, the number of client sessions the broker wrote it to: it counts sessions, not frames that arrived, so a session behind a faulty link still counts and `get_serial` or `get_metrics` shows what got through. `retain: true` also keeps it for clients that subscribe later; an empty `payload` with `retain` clears the topic's. `port` picks the service when the node serves more than one MQTT port. A node that is not a scripted broker (an ESP32, a BLE or LoRa board, the bridge, a node with no `serve: mqtt`) refuses and says why. `payload` is UTF-8, at most 4096 bytes; the topic takes no `+` or `#`. |
+| `send_payload` | `node`, `to`, `via`, `payload`, `topic?`, `port?`                                                                | Makes a scripted Wi-Fi or BLE board send one message now, over a path its `send` entries could use. `via: udp`: a datagram to the node `to` (port 5000 unless `port`; at most 1472 bytes). `via: espnow`: a frame to `to`, or to `broadcast` (at most 250 bytes); its ACK result shows in `get_serial` as `espnow tx ok\|fail to <peer>`. `via: mqtt`: a publish to the broker node `to` (`topic` required, `port` default 1883); the board opens its session first if its script had none, and waits up to 5 s for it. `via: gatt` (BLE boards): a notification from a peripheral, or a write from a central, on its connection to the node `to`; at most 20 bytes at the default MTU, and refused while the two are not connected. The payload goes out as given, without the `:<n>` a scheduled send adds. Scripted LoRa and nRF24 boards and ESP32 boards refuse: their sends are inside the driver or the firmware. To publish from the broker node itself, use `mqtt_publish`. |
+
+Both tools act when the call arrives, like the others here, and are refused while the run is
+`starting`. They are the way to make a simulated node emit an application message on demand, for
+example to trigger an event in a live demo and check that a phone on the bridge receives it:
+
+1. `run_scenario {"path": "<repo>/hertzbench/scenarios/examples/mqtt-clients-scripted.yaml"}`, then
+   `get_status` until `running`.
+2. `mqtt_publish {"node": "broker", "topic": "riego/cmd", "payload": "OPEN"}` answers
+   `{"node": "broker", "topic": "riego/cmd", "bytes": 4, "retain": false, "delivered_to": 1, ...}`:
+   `valve` is the one client subscribed to `riego/cmd`.
+3. `get_serial {"node": "valve"}` ends with `mqtt rx riego/cmd OPEN`. A phone connected to the
+   bridge's MQTT endpoint and subscribed to `riego/#` receives the same message.
+4. Combine it with `inject_fault` on a node's links, publish again, and compare what the
+   subscribers print in `get_serial` and what `get_metrics` counts as dropped.
 
 Nodes cannot be added to or removed from a run in progress: the runner starts every board before
 time zero. Change the scenario file and run it again.
@@ -247,11 +263,12 @@ first, so no QEMU worker is left behind.
 
 ### Reproducibility
 
-A move, a fault, a channel or radio change or a serial line sent with a live tool happens at the
-moment the call arrives, on the wall clock. A run with live actions is therefore **not reproducible
+A move, a fault, a channel or radio change, a serial line, a published MQTT message or a payload
+sent with a live tool happens at the moment the call arrives, on the wall clock. A run with live actions is therefore **not reproducible
 from its seed alone**. To replay an experiment, write the moves and link rules into the scenario's
 `timeline` (`move`, `link`, `label`) once you have found them; channel and radio changes go into
-the scenario's `environment` and `radios` with `edit_scenario`.
+the scenario's `environment` and `radios` with `edit_scenario`; a message you sent becomes a `send`
+entry of the board's script (`via: mqtt` with a `topic` for a publish).
 
 ## Running the ESP32 example
 

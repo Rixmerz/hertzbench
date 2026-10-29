@@ -13,7 +13,12 @@ import {
   type Position,
   type RadioConfig,
 } from "../engine/mod.ts";
-import { BoardError, type BoardLauncher } from "../orchestrator/boards/board.ts";
+import {
+  BoardError,
+  type BoardLauncher,
+  type LiveMqttPublish,
+  type LiveSend,
+} from "../orchestrator/boards/board.ts";
 import { resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { checkFirmwareFiles, type LoadedScenario, loadScenario } from "../orchestrator/load.ts";
 import { linkJson, metricsDocument } from "../orchestrator/report.ts";
@@ -24,7 +29,12 @@ import {
   type RunResult,
   runScenario,
 } from "../orchestrator/runner.ts";
-import type { BoardKind, LinkRule, Scenario } from "../orchestrator/scenario.ts";
+import {
+  type BoardKind,
+  BROADCAST_TARGET,
+  type LinkRule,
+  type Scenario,
+} from "../orchestrator/scenario.ts";
 import { ToolError } from "./protocol.ts";
 
 /** The shipped example scenarios: readable (never writable), as the examples/* resources already are. */
@@ -528,13 +538,60 @@ export class Session {
     }
     this.#node(run.loaded.scenario, node);
     const at = run.live!.elapsedMs();
-    try {
-      await run.live!.writeSerial(node, bytes);
-    } catch (error) {
-      if (error instanceof BoardError) throw new ToolError(error.message);
-      throw error;
-    }
+    await boardRefusal(() => run.live!.writeSerial(node, bytes));
     return { node, bytes: bytes.length, at_ms: round(at) };
+  }
+
+  /** A message published through a scripted broker node, to the clients subscribed in the simulation. */
+  async mqttPublish(node: string, publish: LiveMqttPublish) {
+    const run = this.#underway("mqtt_publish");
+    if (run.loaded.scenario.bridge?.id === node) {
+      throw new ToolError(`${node} is the mobile bridge: it runs no MQTT broker`);
+    }
+    this.#node(run.loaded.scenario, node);
+    const at = run.live!.elapsedMs();
+    const delivered = await boardRefusal(() => run.live!.publishMqtt(node, publish));
+    return {
+      node,
+      topic: publish.topic,
+      bytes: publish.payload.length,
+      retain: publish.retain,
+      delivered_to: delivered,
+      at_ms: round(at),
+    };
+  }
+
+  /** One send from a scripted Wi-Fi node: a UDP datagram, an ESP-NOW frame or an MQTT publish. */
+  async sendPayload(node: string, send: LiveSend) {
+    const run = this.#underway("send_payload");
+    const { scenario } = run.loaded;
+    if (scenario.bridge?.id === node) {
+      throw new ToolError(`${node} is the mobile bridge: it is not a scripted board`);
+    }
+    this.#node(scenario, node);
+    if (send.to === node) throw new ToolError("a node cannot send to itself");
+    if (send.to === BROADCAST_TARGET) {
+      if (send.via !== "espnow") throw new ToolError(`"${BROADCAST_TARGET}" needs via: espnow`);
+    } else if (scenario.bridge?.id !== send.to) {
+      const target = this.#node(scenario, send.to);
+      // A scripted target must serve MQTT on the port; an ESP32 sketch is taken at its word.
+      if (
+        send.via === "mqtt" && target.firmware.kind === "script" &&
+        !target.firmware.serve.some((s) => s.protocol === "mqtt" && s.port === send.port)
+      ) {
+        throw new ToolError(`${send.to} serves no MQTT broker on port ${send.port}`);
+      }
+    }
+    const at = run.live!.elapsedMs();
+    await boardRefusal(() => run.live!.sendPayload(node, send));
+    return {
+      node,
+      to: send.to,
+      via: send.via,
+      bytes: send.payload.length,
+      ...(send.topic !== undefined ? { topic: send.topic } : {}),
+      at_ms: round(at),
+    };
   }
 
   /**
@@ -655,6 +712,16 @@ export class Session {
       throw new ToolError(`no node named ${JSON.stringify(id)} (nodes: ${names.join(", ")})`);
     }
     return node;
+  }
+}
+
+/** A board's refusal is the caller's to read; anything else is a bug. */
+async function boardRefusal<T>(call: () => Promise<T> | T): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof BoardError) throw new ToolError(error.message);
+    throw error;
   }
 }
 

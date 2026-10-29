@@ -18,7 +18,7 @@ const INSTRUCTIONS = `${PRODUCT.displayName} simulates the radio network between
   "create_scenario (or read_scenario and edit_scenario, add_node, remove_node), " +
   "validate_scenario, run_scenario, poll get_status until running. While it runs: move_node, " +
   "inject_fault (loss, latency, jitter, interference), set_channel, set_radio, start_phase, " +
-  "send_serial; read get_serial, get_metrics, get_events, get_view_state and export_capture. " +
+  "send_serial, mqtt_publish and send_payload (an application message on demand); read get_serial, get_metrics, get_events, get_view_state and export_capture. " +
   "The run ends by itself at its duration (then get_report), or call stop. open_view gives a " +
   "person a live map. Boards marked fidelity none (scripted) are traffic generators, not " +
   "firmware. No tool runs host commands.";

@@ -55,7 +55,7 @@ serves until Ctrl-C, and its scenario runs for two minutes.
 | Orchestrator and CLI: `hertzbench run`, `validate`                                                     | done, tested through the real CLI                                                                                                                                                                                                                                                                                                             |
 | `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                                                                                                                                                                                                          |
 | ESP32 boards under QEMU                                                                                | **run on real firmware** (2026-10-23) with a libqemu built from the public QEMU fork, no root or Docker: UDP between three boards passes, and ESP-NOW between five passes with a patch to the fork (2026-10-24); see [docs/e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware) for every scenario, its result and the exact commands    |
-| MCP server: `hertzbench mcp`, 23 tools, examples and fidelity table as resources, live move and fault  | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run (the ESP32 runs used the CLI)                                                                                                                                                                                                          |
+| MCP server: `hertzbench mcp`, 25 tools, examples and fidelity table as resources, live move and fault  | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run (the ESP32 runs used the CLI)                                                                                                                                                                                                          |
 | View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards, dragging a node included; **on real firmware** (2026-10-24) `udp-3-nodes`, `espnow-mesh-5-nodes`, `lora-gateway-6-nodes` and `ble-sensors-3-nodes` pass in the view; dragging an ESP32 node not tried                                                                   |
 | `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                                                                                                                                                                                                   |
 | ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and with scripted boards; **`espnow-mesh-5-nodes.yaml` passes 7/7 on real firmware** (2026-10-24) with a small patch to the fork's Wi-Fi MAC (its 20-frame injection queue never resumed reading, [docs/upstream-sync.md](docs/upstream-sync.md) patch 3), see [ESP-NOW](#esp-now) |
@@ -415,7 +415,7 @@ is tested are in [docs/mobile-bridge.md](docs/mobile-bridge.md). No Velxio file 
 claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project
 ```
 
-The agent gets 23 tools, grouped here as in [docs/mcp.md](docs/mcp.md):
+The agent gets 25 tools, grouped here as in [docs/mcp.md](docs/mcp.md):
 
 ```
 Boards and scenario files (7)
@@ -423,8 +423,9 @@ Boards and scenario files (7)
   edit_scenario  add_node  remove_node
 Running (4)
   run_scenario  get_status  get_report  stop
-Changing a run while it plays (6)
+Changing a run while it plays (8)
   move_node  inject_fault  set_channel  set_radio  start_phase  send_serial
+  mqtt_publish  send_payload
 Reading a run (4)
   get_serial  get_metrics  get_events  export_capture
 The view (2)
