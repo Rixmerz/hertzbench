@@ -176,6 +176,18 @@ export function buildArp(message: ArpMessage): Uint8Array {
   return buildEthernet(dst, message.senderMac, ETHERTYPE_ARP, body);
 }
 
+/** The is-at reply from a station owning `ip`/`mac`, or null when `request` is not a who-has for `ip`. */
+export function arpReplyFor(request: ArpMessage, mac: string, ip: string): Uint8Array | null {
+  if (request.operation !== 1 || request.targetIp !== ip) return null;
+  return buildArp({
+    operation: 2,
+    senderMac: mac,
+    senderIp: ip,
+    targetMac: request.senderMac,
+    targetIp: request.senderIp,
+  });
+}
+
 export interface UdpSpec {
   srcMac: string;
   dstMac: string;

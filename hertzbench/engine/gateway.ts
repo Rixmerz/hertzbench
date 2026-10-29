@@ -9,7 +9,7 @@
 // boot instead of losing UDP datagrams.
 
 import {
-  buildArp,
+  arpReplyFor,
   buildEthernet,
   ETHERTYPE_IPV4,
   internetChecksum,
@@ -119,17 +119,12 @@ export class VirtualGateway {
   handle(frame: Uint8Array): GatewayResult | null {
     const arp = parseArp(frame);
     if (arp) {
-      if (arp.operation !== 1 || arp.targetIp !== this.ip) return null;
+      const reply = arpReplyFor(arp, this.mac, this.ip);
+      if (!reply) return null;
       return {
         service: "arp",
         detail: `${this.ip} is-at ${this.mac} for ${arp.senderIp}`,
-        replies: [buildArp({
-          operation: 2,
-          senderMac: this.mac,
-          senderIp: this.ip,
-          targetMac: arp.senderMac,
-          targetIp: arp.senderIp,
-        })],
+        replies: [reply],
       };
     }
     const ip = parseIpv4(frame);

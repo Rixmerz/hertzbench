@@ -11,6 +11,7 @@
 // esp32 board for anything that claims to be about firmware.
 
 import {
+  arpReplyFor,
   BROADCAST_MAC,
   buildDhcpClientMessage,
   buildEspNowBody,
@@ -21,6 +22,7 @@ import {
   ESPNOW_ACK_TIMEOUT_MS,
   ESPNOW_MAX_PAYLOAD_BYTES,
   ipToString,
+  parseArp,
   parseEspNowBody,
   parseEthernet,
   parseIpv4,
@@ -215,7 +217,8 @@ class ScriptedBoard implements RunningBoard {
     const ip = parseIpv4(frame);
     const eth = parseEthernet(frame);
     if (ip && eth && ip.src !== "0.0.0.0") this.#neighbors.set(ip.src, eth.src);
-    if (this.#tcp?.receive(frame)) return;
+    if (this.#tcp?.receive(frame)) return; // it answers ARP for the lease itself when it serves
+    if (this.#answerArp(frame)) return;
     if (!ip) return;
     const udp = parseUdp(frame, ip);
     if (!udp) return;
@@ -235,6 +238,15 @@ class ScriptedBoard implements RunningBoard {
         payload: new TextEncoder().encode(`pong${text.slice(4)}`),
       }));
     }
+  }
+
+  /** Who-has for the leased address: a guest cannot send to a board that never says where it is. */
+  #answerArp(frame: Uint8Array): boolean {
+    const arp = parseArp(frame);
+    const reply = arp && this.#ip !== null ? arpReplyFor(arp, this.#ctx.node.mac, this.#ip) : null;
+    if (!reply) return false;
+    this.#send(reply);
+    return true;
   }
 
   #onDhcp(bootp: Uint8Array): void {
