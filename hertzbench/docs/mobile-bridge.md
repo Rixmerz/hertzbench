@@ -41,6 +41,8 @@ deno task lan run scenarios/examples/bridge-web-scripted.yaml   # edit listen: 0
 
 The report and the progress lines say where each service is: `bridge phone: http web:80 at 0.0.0.0:8080`. From the phone, on the same Wi-Fi as the host: `http://<host address>:8080/status`. Open the host's firewall for those ports if it has one. A release binary has no `lan` command and needs none: it is built with the same permissions, so `./hertzbench-<os> run <scenario>` listens beyond loopback as is.
 
+**Android emulator.** The emulator reaches the host's loopback at `10.0.2.2`, so the default `listen: 127.0.0.1` is enough: no `listen: 0.0.0.0`, no `deno task lan`, no LAN access. An app in the emulator connects to `10.0.2.2:<listen_port>`, for example `tcp://10.0.2.2:1883` for MQTT when the expose entry has `listen_port: 1883`. Set `listen_port` explicitly for that case: with the default `0` the OS picks the port and the emulator cannot know it. The report then says `bridge phone: mqtt web:1883 at 127.0.0.1:1883`, which is the same port the emulator uses.
+
 **mDNS.** With `listen` other than loopback, the bridge advertises each endpoint as a DNS-SD service: `web-80._http._tcp.local`, SRV to `hzb-web.local:8080`, A to the host's first non-loopback IPv4 address, skipping link-local and virtual adapters (VirtualBox, VMware, Hyper-V, WSL, Docker, libvirt) while a real one exists (or `advertise_ip`, or `listen` when it is a specific address), TXT `node=web port=80 via=hertzbench`. It announces at start, withdraws with TTL 0 at the end, and answers multicast, QU and legacy unicast queries. A service browser (`avahi-browse -art` on Linux, a DNS-SD browser app on the phone) lists them; whether the phone's browser resolves `hzb-web.local` depends on its OS, so the host address always works as well. `_ws._tcp` is a convention, not an IANA-registered type. If the socket cannot open (no permission, or port 5353 held by a daemon that does not share it), the report says `mDNS not advertised: <why>` and the run goes on. No probing or conflict resolution: the names carry `hzb-` and the node id.
 
 ## 5b: the BLE bridge
@@ -101,6 +103,10 @@ The BLE bridge (5b) needs BlueZ, which exists only on Linux. On Windows and macO
 - **macOS: a Linux VM or machine** with a USB adapter passed through. CoreBluetooth has no
   equivalent of BlueZ's GATT application API that the helper could use, so a native port would be a
   new helper, not a change to this one.
+- **macOS: the IP bridge (5a) for MQTT or WebSocket.** An app on a Mac that needs to talk to the
+  simulated board can use the IP bridge instead of the BLE bridge: expose the node's port with
+  `service: mqtt` or `service: websocket` and point the app at the host's address. Without `listen: 0.0.0.0`
+  only the Mac itself can reach it.
 - **Use the IP bridge (5a)** with a Wi-Fi radio instead: it works on every system. For BLE
   behaviour without a phone, use the scripted BLE scenarios, which need no adapter.
 
