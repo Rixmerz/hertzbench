@@ -2316,7 +2316,7 @@ Deno.test("load: firmware checks name what is missing and what has the wrong kin
   });
 });
 
-Deno.test("load: every example scenario parses, and only unbuilt ESP-IDF binaries are missing", async () => {
+Deno.test("load: every example scenario parses, and only unbuilt ESP-IDF binaries and Android apps are missing", async () => {
   const dir = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
   const files = [...Deno.readDirSync(dir)].filter((e) => e.name.endsWith(".yaml")).map((e) =>
     e.name
@@ -2327,8 +2327,13 @@ Deno.test("load: every example scenario parses, and only unbuilt ESP-IDF binarie
     const loaded = await loadScenario(`${dir}${name}`);
     assert(loaded.scenario.nodes.length >= 2, name);
     for (const line of await checkFirmwareFiles(loaded.scenario)) {
-      // ESP-IDF projects are committed as sources; their build/ output is made by `idf.py build`.
-      assert(/[\\/]build[\\/][^\\/]+\.bin does not exist$/.test(line), `${name}: ${line}`);
+      // ESP-IDF projects and the example app are committed as sources; their build/ output is made
+      // by `idf.py build` and `gradle assembleDebug`.
+      assert(
+        /[\\/]build[\\/](?:[^\\/]+\.bin|outputs[\\/]apk[\\/]debug[\\/]app-debug\.apk) does not exist$/
+          .test(line),
+        `${name}: ${line}`,
+      );
     }
   }
 });

@@ -1,0 +1,51 @@
+# An Android app in the emulator, a station on the simulated Wi-Fi, polling a web board with
+# GET /status once a second (examples/android/iot-app). The board is scripted, so the Android
+# emulator is all this needs: no libqemu.
+#
+# `web` serves HTTP on port 80. The phone stands 6 m from it and the app's GETs succeed. At 30 s
+# the phone moves 200 m away, past where the medium delivers anything, so every frame it sends is
+# lost, the GETs time out and the app logs `status failed: ...` lines.
+#
+# Needs Linux with KVM, the Android SDK (in ~/Android or $ANDROID_HOME) and an AVD named pixel8.
+# Build the app, then run the scenario (more in examples/android/iot-app/README.md):
+#   cd examples/android/iot-app && gradle assembleDebug
+#   cd ../.. && deno task hertzbench run scenarios/examples/android-web-scripted.yaml
+#
+# Nodes take their IP in order: the board is 192.168.4.11, the address the app is given in
+# `extras`, and the phone 192.168.4.12. android-web-esp32.yaml is the same layout with an ESP32.
+name: android-web-scripted
+seed: 11
+duration: 60s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: web
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      serve:
+        - { port: 80, protocol: http }
+  - id: phone
+    board: android
+    position: [6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    android:
+      avd: pixel8
+      apk: ../../examples/android/iot-app/app/build/outputs/apk/debug/app-debug.apk
+      package: dev.hertzbench.iotapp
+      activity: .MainActivity
+      extras: { board_url: "http://192.168.4.11/" }
+timeline:
+  - at: 30s
+    label: out-of-range
+    move: { node: phone, to: [200, 0] }
+assertions:
+  - serial: { node: web, contains: "tcp listening on 80 (http)", within: 10s }
+  # What the app saw, and what the board saw of the same request, independent of the app's log.
+  - serial: { node: phone, contains: "status ok 200", within: 25s }
+  - serial: { node: web, contains: "http GET /status from 192.168.4.12", within: 25s }
+  # The phone's frames on the medium: delivered while near, all lost once out of range.
+  - metric: { link: "phone->web", phase: start, loss_pct: { lt: 10 } }
+  - metric: { link: "phone->web", phase: out-of-range, loss_pct: { gt: 90 } }

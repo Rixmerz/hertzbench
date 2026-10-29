@@ -159,7 +159,7 @@ Deno.test("cli: validate exits 2 on a missing file, an invalid field and missing
   });
 });
 
-Deno.test("cli: validate accepts every example; the only refusals are unbuilt ESP-IDF binaries", async () => {
+Deno.test("cli: validate accepts every example; the only refusals are unbuilt ESP-IDF binaries and Android apps", async () => {
   const names = [...Deno.readDirSync(EXAMPLES)].filter((e) => e.name.endsWith(".yaml"))
     .map((e) => e.name).sort();
   assert(names.length >= 13, `found ${names.length} examples`);
@@ -173,12 +173,22 @@ Deno.test("cli: validate accepts every example; the only refusals are unbuilt ES
     assertEquals(outcome.code, 2, `${name}: ${outcome.stderr}`);
     assertStringIncludes(outcome.stderr, "firmware not found");
     for (const line of outcome.stderr.trim().split("\n").slice(1)) {
-      assert(/[\\/]build[\\/][^\\/]+\.bin does not exist$/.test(line), `${name}: ${line}`);
+      assert(
+        /[\\/]build[\\/](?:[^\\/]+\.bin|outputs[\\/]apk[\\/]debug[\\/]app-debug\.apk) does not exist$/
+          .test(line),
+        `${name}: ${line}`,
+      );
     }
     refused.push(name);
   }
-  // At most the two that need `idf.py build` of scenarios/examples/fw/ble-sensor first.
-  const unbuilt = ["ble-sensors-3-nodes.yaml", "bridge-ble-esp32.yaml"];
+  // At most the two that need `idf.py build` of scenarios/examples/fw/ble-sensor first, and the
+  // two that need `gradle assembleDebug` of examples/android/iot-app.
+  const unbuilt = [
+    "ble-sensors-3-nodes.yaml",
+    "bridge-ble-esp32.yaml",
+    "android-web-scripted.yaml",
+    "android-web-esp32.yaml",
+  ];
   for (const name of refused) assert(unbuilt.includes(name), `${name} was refused`);
 });
 
