@@ -14,7 +14,7 @@
 
 import type { Clock } from "./clock.ts";
 import {
-  buildArp,
+  arpReplyFor,
   buildEthernet,
   ETHERTYPE_IPV4,
   internetChecksum,
@@ -689,14 +689,9 @@ export class TcpHost {
   receive(frame: Uint8Array): boolean {
     const arp = parseArp(frame);
     if (arp) {
-      if (arp.operation !== 1 || arp.targetIp !== this.ip) return false;
-      this.#opts.send(buildArp({
-        operation: 2,
-        senderMac: this.mac,
-        senderIp: this.ip,
-        targetMac: arp.senderMac,
-        targetIp: arp.senderIp,
-      }));
+      const reply = arpReplyFor(arp, this.mac, this.ip);
+      if (!reply) return false;
+      this.#opts.send(reply);
       return true;
     }
     const ip = parseIpv4(frame);

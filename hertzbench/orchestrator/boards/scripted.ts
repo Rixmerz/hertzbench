@@ -10,8 +10,8 @@
 // esp32 board for anything that claims to be about firmware.
 
 import {
+  arpReplyFor,
   BROADCAST_MAC,
-  buildArp,
   buildDhcpClientMessage,
   buildEspNowBody,
   buildUdp,
@@ -222,14 +222,9 @@ class ScriptedBoard implements RunningBoard {
   /** Who-has for the leased address: a guest cannot send to a board that never says where it is. */
   #answerArp(frame: Uint8Array): boolean {
     const arp = parseArp(frame);
-    if (!arp || arp.operation !== 1 || this.#ip === null || arp.targetIp !== this.#ip) return false;
-    this.#send(buildArp({
-      operation: 2,
-      senderMac: this.#ctx.node.mac,
-      senderIp: this.#ip,
-      targetMac: arp.senderMac,
-      targetIp: arp.senderIp,
-    }));
+    const reply = arp && this.#ip !== null ? arpReplyFor(arp, this.#ctx.node.mac, this.#ip) : null;
+    if (!reply) return false;
+    this.#send(reply);
     return true;
   }
 
