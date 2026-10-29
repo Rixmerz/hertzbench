@@ -310,9 +310,9 @@ export function createEsp32Launcher(): BoardLauncher {
 
 async function startEsp32(ctx: BoardContext, firmwareCache: FirmwareCache): Promise<RunningBoard> {
   const { node } = ctx;
-  if (node.firmware.kind === "script") {
+  if (node.firmware.kind === "script" || node.firmware.kind === "apk") {
     throw new BoardError(
-      `${node.id}: an esp32 board needs a sketch directory or a .bin, not a script`,
+      `${node.id}: an esp32 board needs a sketch directory or a .bin, not a ${node.firmware.kind}`,
     );
   }
   const lib = resolveQemuLibrary();
