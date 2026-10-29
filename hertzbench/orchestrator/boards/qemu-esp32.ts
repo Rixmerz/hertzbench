@@ -62,6 +62,17 @@ function loadFirmware(
   return pending;
 }
 
+const IMAGE_TOO_LARGE = "text section exceeds available space";
+
+/** The compile error, with a hint when the image does not fit the default app partition. */
+export function compileFailureMessage(sketchDir: string, stderr: string): string {
+  const message = `compiling ${sketchDir} failed:\n${stderr}`;
+  if (!stderr.includes(IMAGE_TOO_LARGE)) return message;
+  return `${message}\nhint: the firmware does not fit the default app partition (1.2 MB); ` +
+    "build with a larger app partition, such as the huge_app scheme (3 MB), or link less " +
+    "(for example Wi-Fi and Bluetooth together are the usual cause)";
+}
+
 async function compileSketch(sketchDir: string): Promise<Uint8Array> {
   const output = await new Deno.Command(pythonCommand(), {
     args: [COMPILE_HELPER, sketchDir],
@@ -70,7 +81,7 @@ async function compileSketch(sketchDir: string): Promise<Uint8Array> {
   }).output();
   if (!output.success) {
     throw new BoardError(
-      `compiling ${sketchDir} failed:\n${new TextDecoder().decode(output.stderr).trim()}`,
+      compileFailureMessage(sketchDir, new TextDecoder().decode(output.stderr).trim()),
     );
   }
   const parsed: unknown = JSON.parse(new TextDecoder().decode(output.stdout));
