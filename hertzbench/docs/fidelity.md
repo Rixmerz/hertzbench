@@ -192,5 +192,7 @@ An ACK for which no frame is waiting (already answered, or lost on the way) is d
 
 **BLE (5b).** The phone's GATT operations end at BlueZ. Each is replayed as one ATT request from the bridge's node, a central on the simulated air with its own virtual controller, so it waits for connection events and pays retransmissions like any ACL data, and the phone gets the node's answer once it has crossed the air. The phone's MTU, BlueZ's handles and the phone's link parameters are not mirrored: the simulated connection keeps ATT_MTU 23 and the bridge's `interval` and `timeout`. Writes over 20 bytes are refused; long and reliable writes, security and pairing are not carried. The host advertises the mirrored name and the first service UUID, not the node's advertising data.
 
+**BLE with netsim (5b).** With `peripheral: netsim` the phone is an app in the Android emulator and its GATT operations end at netsim, the emulator's own Bluetooth: that leg has netsim's radio and no channel model, and only the bridge-to-node leg pays Hertzbench's. Everything else is as for BlueZ (one mirrored peripheral, ATT_MTU 23, no long operations, no security). The app cannot be a peripheral or scan the simulated nodes' advertisements. Not run against a real emulator; see [mobile-bridge.md](mobile-bridge.md#5b-with-netsim-an-app-in-the-android-emulator).
+
 **Metrics.** The bridge's links are in the report and `metrics.json` like a board's: `phone->web` with kind `tcp` for IP, `phone->sensor-1` with kinds `ble-data` and `ble-acl` for BLE. They measure the simulated leg only.
 

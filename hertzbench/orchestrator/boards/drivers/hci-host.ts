@@ -122,10 +122,20 @@ export class HciHost {
     await this.ok(OP.leSetEventMask, [0x1f, 0, 0, 0, 0, 0, 0, 0], "LE Set Event Mask");
     const buffers = await this.ok(OP.leReadBufferSize, [], "LE Read Buffer Size");
     this.#credits = buffers[2] ?? 0;
+    if (this.#credits === 0) {
+      // Zero means the LE link shares the BR/EDR buffers (Vol 4 Part E §7.8.2): ask that count.
+      const shared = await this.ok(OP.readBufferSize, [], "Read Buffer Size");
+      this.#credits = readU16(shared, 3);
+    }
     this.address = addressToString(await this.ok(OP.readBdAddr, [], "Read BD_ADDR"));
   }
 
-  async advertise(name: string, intervalMs: number): Promise<void> {
+  /**
+   * Advertise connectable. With `serviceUuid` (as `uuidToBytes` gives it) the advertising data
+   * carries that service and the name moves to the scan response: flags, a 128-bit UUID and a
+   * 26-byte name do not fit in the 31 bytes of one.
+   */
+  async advertise(name: string, intervalMs: number, serviceUuid?: Uint8Array): Promise<void> {
     const units = Math.round(intervalMs / 0.625);
     await this.ok(OP.leSetAdvParams, [
       ...u16(units),
@@ -143,12 +153,17 @@ export class HciHost {
       0x00,
     ], "LE Set Advertising Parameters");
     const nameBytes = new TextEncoder().encode(name).slice(0, 26);
-    // Flags (LE General Discoverable, BR/EDR not supported) and the complete local name.
-    const data = [2, 0x01, 0x06, nameBytes.length + 1, 0x09, ...nameBytes];
-    const padded = new Uint8Array(32);
-    padded[0] = data.length;
-    padded.set(data, 1);
-    await this.ok(OP.leSetAdvData, padded, "LE Set Advertising Data");
+    const flags = [2, 0x01, 0x06]; // LE General Discoverable, BR/EDR not supported
+    const nameField = [nameBytes.length + 1, 0x09, ...nameBytes]; // complete local name
+    // Complete list of 16-bit (0x03) or 128-bit (0x07) service UUIDs.
+    const service = serviceUuid
+      ? [serviceUuid.length + 1, serviceUuid.length === 2 ? 0x03 : 0x07, ...serviceUuid]
+      : [];
+    const advData = serviceUuid ? [...flags, ...service] : [...flags, ...nameField];
+    await this.ok(OP.leSetAdvData, paddedAdvData(advData), "LE Set Advertising Data");
+    if (serviceUuid) {
+      await this.ok(OP.leSetScanRspData, paddedAdvData(nameField), "LE Set Scan Response Data");
+    }
     await this.ok(OP.leSetAdvEnable, [1], "LE Set Advertising Enable");
   }
 
@@ -283,6 +298,14 @@ export class HciHost {
     this.#reassembly.delete(handle);
     if (readU16(joined, 2) === ATT_CID) this.#events.att?.(handle, joined.slice(4, 4 + length));
   }
+}
+
+/** Advertising or scan response data as the commands carry it: a length byte, then 31 bytes. */
+function paddedAdvData(data: number[]): Uint8Array {
+  const padded = new Uint8Array(32);
+  padded[0] = data.length;
+  padded.set(data, 1);
+  return padded;
 }
 
 /** The complete local name in advertising data, or null. */

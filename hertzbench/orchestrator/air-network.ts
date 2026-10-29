@@ -47,6 +47,8 @@ import {
   BluezPeripheral,
   bluezUnsupportedReason,
   type BridgeHooks,
+  type GattPeripheral,
+  NetsimPeripheral,
   type RunningBridge,
 } from "../bridge/mod.ts";
 import { BoardError } from "./boards/board.ts";
@@ -213,13 +215,26 @@ function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSe
       throw new Error("the BLE bridge needs a mirrored node and a ble radio");
     }
     // Refuse before any board starts, not as a problem in the report of a run that cannot work.
-    const unsupported = ctx.hooks?.peripheral ? null : bluezUnsupportedReason();
+    // Only BlueZ is Linux's: the emulator's netsim is reached over TCP.
+    const unsupported = ctx.hooks?.peripheral || spec.peripheral === "netsim"
+      ? null
+      : bluezUnsupportedReason();
     if (unsupported) throw new BoardError(unsupported);
+    const bridgeLog = (text: string) =>
+      log.append({ type: "serial", t: clock.now(), node: spec.id, text });
+    const peripheral: GattPeripheral = ctx.hooks?.peripheral?.(spec) ??
+      (spec.peripheral === "netsim"
+        ? new NetsimPeripheral({
+          ...spec.netsimHci,
+          log: bridgeLog,
+          onProblem: (message) => ctx.onProblem(spec.id, message),
+        })
+        : new BluezPeripheral({ adapter: spec.adapter }));
     bridge = new BleBridge({
       spec,
       mirrorAddress: mirror.mac,
       clock,
-      peripheral: ctx.hooks?.peripheral?.(spec) ?? new BluezPeripheral({ adapter: spec.adapter }),
+      peripheral,
       makeController: (toHost) =>
         new BleController({
           nodeId: spec.id,
@@ -232,7 +247,7 @@ function createBleNetwork(scenario: Scenario, ctx: AirNetworkContext): NetworkSe
           toHost,
           warn: (message) => warnings.push(`${spec.id}: ${message}`),
         }),
-      log: (text) => log.append({ type: "serial", t: clock.now(), node: spec.id, text }),
+      log: bridgeLog,
       onProblem: (message) => ctx.onProblem(spec.id, message),
     });
     controllers.push(bridge.controller);

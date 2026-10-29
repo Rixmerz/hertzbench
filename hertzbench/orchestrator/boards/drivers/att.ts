@@ -82,6 +82,17 @@ export function uuidToString(bytes: Uint8Array): string {
   }`;
 }
 
+/** `uuidToString` the other way: 2 bytes for a UUID on the Bluetooth base, else 16, little-endian. */
+export function uuidToBytes(uuid: string): Uint8Array {
+  const hex = uuid.toLowerCase().replaceAll("-", "");
+  if (!/^[0-9a-f]{32}$/.test(hex)) throw new RangeError(`not a UUID: ${JSON.stringify(uuid)}`);
+  const bytes = Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16)).reverse());
+  // Reversed, the 16-bit alias sits at bytes 12 and 13, between the base's two halves.
+  return hex.startsWith("0000") && uuid.toLowerCase().endsWith(BASE_UUID_TAIL)
+    ? bytes.slice(12, 14)
+    : bytes;
+}
+
 const u16 = (n: number) => [n & 0xff, (n >>> 8) & 0xff];
 const readU16 = (b: Uint8Array, at: number) => (b[at] ?? 0) | ((b[at + 1] ?? 0) << 8);
 

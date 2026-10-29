@@ -17,7 +17,7 @@ import {
 } from "../engine/channel.ts";
 import type { ChannelChanges, FrameKind } from "../engine/events.ts";
 import { ipToBytes, macToBytes } from "../engine/packet.ts";
-import { DEFAULT_TIMEOUTS } from "./boards/android/tooling.ts";
+import { DEFAULT_TIMEOUTS, NETSIM_HCI_PORT } from "./boards/android/tooling.ts";
 import { DEFAULT_WIFI, type NodeRadio, parseNodeRadio, type Phy } from "./radios.ts";
 
 export class ScenarioError extends Error {
@@ -249,13 +249,20 @@ export interface IpBridgeSpec extends BridgeCommon {
   expose: ExposedService[];
 }
 
-/** Phase 5b: a phone reaches a simulated peripheral's GATT server through BlueZ on the host. */
+/**
+ * Phase 5b: a phone reaches a simulated peripheral's GATT server through BlueZ on the host, or an
+ * app in the Android emulator reaches it through the emulator's netsim (docs/android-device-plan.md §3).
+ */
 export interface BleBridgeSpec extends BridgeCommon {
   kind: "ble";
   /** The peripheral node whose GATT server the host mirrors. */
   mirror: string;
-  /** BlueZ adapter the host advertises on. */
+  /** The host side that advertises it: BlueZ on `adapter`, or netsim's HCI port at `netsimHci`. */
+  peripheral: "bluez" | "netsim";
+  /** BlueZ adapter the host advertises on; unused with netsim. */
   adapter: string;
+  /** Where netsimd's HCI port listens; unused with BlueZ. */
+  netsimHci: { host: string; port: number };
   /** The name the host advertises to the phone. */
   name: string;
   intervalMs: number;
@@ -290,6 +297,16 @@ export interface Scenario {
   outputs: Outputs;
   /** The mobile bridge, at most one per scenario. */
   bridge: BridgeSpec | null;
+  /**
+   * BLE scenarios only: the app that connects to the bridge, run in the Android emulator. It is
+   * not a node. `instrument` and `snapshot` are never set on it.
+   */
+  android: AndroidApp | null;
+}
+
+/** The app of a BLE scenario's `android:` section: the node's section plus the APK's path. */
+export interface AndroidApp extends AndroidSpec {
+  apk: string;
 }
 
 // ── field readers ───────────────────────────────────────────────────────────
@@ -869,7 +886,7 @@ function parseInstrument(value: unknown, path: string): AndroidInstrument {
 function parseAndroid(
   value: unknown,
   path: string,
-): { spec: AndroidSpec; firmware: FirmwareSpec } {
+): { spec: AndroidSpec; firmware: Extract<FirmwareSpec, { kind: "apk" }> } {
   if (value === undefined) {
     fail(path, "board android needs an android section with avd, apk and package");
   }
@@ -1028,7 +1045,7 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
       if (radio.phy === "ble") {
         fail(
           `${path}.board`,
-          "the app reaches BLE nodes through `bridge: { kind: ble, peripheral: netsim }`; an android node is a Wi-Fi station",
+          "the app reaches BLE nodes through the bridge: `bridge: { mirror: <node>, peripheral: netsim }` and a top-level `android:` section; an android node is a Wi-Fi station",
         );
       }
       if (radio.phy !== "wifi") fail(`${path}.radios`, "an android node has a Wi-Fi radio only");
@@ -1328,6 +1345,43 @@ function parseOutputs(value: unknown): Outputs {
   };
 }
 
+/**
+ * The top-level `android:` section of a BLE scenario: the app that connects to the bridge. The
+ * same fields as a node's section, less the two that only make sense with a Wi-Fi socket or
+ * with a node to run tests on.
+ */
+function parseBleAndroid(value: unknown): AndroidApp | null {
+  if (value === undefined) return null;
+  const obj = record(value, "android");
+  for (const key of ["instrument", "snapshot"] as const) {
+    if (obj[key] !== undefined) {
+      fail(`android.${key}`, "is for a node of board: android; the app of a BLE scenario has none");
+    }
+  }
+  const { spec, firmware } = parseAndroid(value, "android");
+  return { ...spec, apk: firmware.path };
+}
+
+/** The app against the scenario: it needs a BLE bridge whose host side is the emulator's netsim. */
+function checkBleAndroid(scenario: Scenario): void {
+  const app = scenario.android;
+  if (app === null) return;
+  if (scenario.phy !== "ble") {
+    fail("android", "is for a BLE scenario; on Wi-Fi the app is a node: `board: android`");
+  }
+  const bridge = scenario.bridge;
+  if (bridge?.kind !== "ble" || bridge.peripheral !== "netsim") {
+    fail(
+      "android",
+      "needs `bridge: { mirror: <node>, peripheral: netsim }`: the app reaches the node through it",
+    );
+  }
+  // The emulator's netsimd listens on this machine; a remote one would never be the app's.
+  if (!bridge.netsimHci.host.startsWith("127.")) {
+    fail("bridge.netsim_hci", "must be on this host when the scenario starts the emulator");
+  }
+}
+
 // ── bridge ──────────────────────────────────────────────────────────────────
 
 /** The bridge's station MAC and BLE address: outside the boards' 02:68:7a:62:01:NN and the gateway's. */
@@ -1349,7 +1403,9 @@ const IP_BRIDGE_FIELDS = [
 const BLE_BRIDGE_FIELDS = [
   ...BRIDGE_COMMON_FIELDS,
   "mirror",
+  "peripheral",
   "adapter",
+  "netsim_hci",
   "name",
   "interval",
   "timeout",
@@ -1363,6 +1419,18 @@ function ipv4(value: unknown, path: string): string {
     fail(path, `not an IPv4 address: ${JSON.stringify(ip)}`);
   }
   return ip;
+}
+
+/** `127.0.0.1:6402`: an IPv4 address and a port. */
+function parseHostPort(value: unknown, path: string): { host: string; port: number } {
+  const given = text(value, path);
+  const colon = given.lastIndexOf(":");
+  if (colon < 0) fail(path, `expected <IPv4 address>:<port>, got ${JSON.stringify(given)}`);
+  const port = Number(given.slice(colon + 1));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    fail(path, `not a port: ${JSON.stringify(given.slice(colon + 1))}`);
+  }
+  return { host: ipv4(given.slice(0, colon), path), port };
 }
 
 function parseBridge(value: unknown, phy: Phy, subnetPrefix: string): BridgeSpec | null {
@@ -1392,10 +1460,25 @@ function parseBridge(value: unknown, phy: Phy, subnetPrefix: string): BridgeSpec
       fail(`${path}.timeout`, "must be more than twice the connection interval");
     }
     const mirror = text(obj.mirror, `${path}.mirror`);
+    const peripheral = obj.peripheral === undefined
+      ? "bluez"
+      : text(obj.peripheral, `${path}.peripheral`);
+    if (peripheral !== "bluez" && peripheral !== "netsim") {
+      fail(`${path}.peripheral`, 'expected "bluez" or "netsim"');
+    }
+    if (peripheral === "netsim" && obj.adapter !== undefined) {
+      fail(`${path}.adapter`, "is a BlueZ adapter: it needs peripheral: bluez");
+    }
+    if (peripheral === "bluez" && obj.netsim_hci !== undefined) {
+      fail(`${path}.netsim_hci`, "is netsim's HCI port: it needs peripheral: netsim");
+    }
     const adapter = obj.adapter === undefined ? "hci0" : text(obj.adapter, `${path}.adapter`);
     if (!/^hci\d{1,3}$/.test(adapter)) {
       fail(`${path}.adapter`, 'expected a BlueZ adapter like "hci0"');
     }
+    const netsimHci = obj.netsim_hci === undefined
+      ? { host: "127.0.0.1", port: NETSIM_HCI_PORT }
+      : parseHostPort(obj.netsim_hci, `${path}.netsim_hci`);
     const name = obj.name === undefined ? mirror : text(obj.name, `${path}.name`);
     if (new TextEncoder().encode(name).length > 26) {
       fail(`${path}.name`, "must fit in 26 bytes of advertising data");
@@ -1405,7 +1488,9 @@ function parseBridge(value: unknown, phy: Phy, subnetPrefix: string): BridgeSpec
       ...common,
       radio: radio as NodeRadio,
       mirror,
+      peripheral,
       adapter,
+      netsimHci,
       name,
       intervalMs,
       timeoutMs,
@@ -1662,6 +1747,7 @@ const TOP_LEVEL = [
   "assertions",
   "outputs",
   "bridge",
+  "android",
 ] as const;
 
 export function parseScenario(yamlText: string): Scenario {
@@ -1713,6 +1799,7 @@ export function parseScenario(yamlText: string): Scenario {
     ),
     outputs: parseOutputs(root.outputs),
     bridge: parseBridge(root.bridge, phy, subnetPrefix),
+    android: parseBleAndroid(root.android),
   };
   if (scenario.durationMs <= 0) fail("duration", "must be positive");
   scenario.interferenceWindows.forEach((window, i) => {
@@ -1724,6 +1811,7 @@ export function parseScenario(yamlText: string): Scenario {
     }
   });
   checkBridge(scenario, record(root.bridge ?? {}, "bridge").radios !== undefined);
+  checkBleAndroid(scenario);
   checkReferences(scenario);
   return scenario;
 }

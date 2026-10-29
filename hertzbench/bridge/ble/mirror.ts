@@ -95,7 +95,8 @@ export class BleBridge implements RunningBridge {
       kind: "ble",
       id: this.id,
       mirror: spec.mirror,
-      adapter: spec.adapter,
+      // The netsim backend has no BlueZ adapter: the report says where the host side is instead.
+      adapter: spec.peripheral === "netsim" ? "netsim" : spec.adapter,
       name: spec.name,
       services: this.#services.map((s) => ({
         uuid: s.uuid,
@@ -110,6 +111,7 @@ export class BleBridge implements RunningBridge {
   }
 
   async start(): Promise<void> {
+    await this.#opts.peripheral.open?.();
     await this.#host.init();
     this.#opts.log(`bridge ready addr=${this.#host.address}`);
     await this.#connect();

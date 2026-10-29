@@ -38,6 +38,9 @@ export async function loadScenario(file: string, outDirOverride?: string): Promi
 
   const scenario: Scenario = {
     ...parsed,
+    ...(parsed.android !== null
+      ? { android: { ...parsed.android, apk: resolveFrom(baseDir, parsed.android.apk) } }
+      : {}),
     nodes: parsed.nodes.map((node) => ({
       ...node,
       firmware: node.firmware.kind === "script"
@@ -77,6 +80,13 @@ export async function loadScenario(file: string, outDirOverride?: string): Promi
 /** Check that the firmware a scenario names exists, so `validate` and `run` fail before any board starts. */
 export async function checkFirmwareFiles(scenario: Scenario): Promise<string[]> {
   const missing: string[] = [];
+  if (scenario.android !== null) {
+    try {
+      if (!(await Deno.stat(scenario.android.apk)).isFile) throw new Error("not a file");
+    } catch {
+      missing.push(`android: ${scenario.android.apk} is not an .apk file that exists`);
+    }
+  }
   for (const node of scenario.nodes) {
     const testApk = node.android?.instrument?.apk;
     if (testApk !== undefined) {
