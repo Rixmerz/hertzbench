@@ -116,7 +116,7 @@ async function startAndroid(
   };
   try {
     await emulator.waitForBoot(spec.bootTimeoutMs);
-    logcat = await emulator.logcat(spec.logcat, ctx.onSerial);
+    logcat = await emulator.logcat(spec.logcat, withoutBufferBanners(ctx.onSerial));
     await emulator.install(apk, spec.installTimeoutMs);
     await emulator.launch(
       {
@@ -131,6 +131,16 @@ async function startAndroid(
     throw new BoardError(`${node.id}: ${describe(error)}${flagHint(version)} (log: ${logPath})`);
   }
   return new AndroidBoard(shutDown);
+}
+
+// adb announces the log buffer ("--------- beginning of main") even when logcat filters by tag.
+// That line is adb's, not the app's, and a serial assertion must not be able to match it.
+const LOGCAT_BANNER = /^-{9} /;
+
+function withoutBufferBanners(onSerial: (line: string) => void): (line: string) => void {
+  return (line) => {
+    if (!LOGCAT_BANNER.test(line)) onSerial(line);
+  };
 }
 
 function describe(error: unknown): string {
