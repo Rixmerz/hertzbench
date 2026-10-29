@@ -74,7 +74,7 @@ export async function checkFirmwareFiles(scenario: Scenario): Promise<string[]> 
       if (info.isDirectory !== wantDir) {
         missing.push(
           `${node.id}: ${node.firmware.path} should be a ${
-            wantDir ? "sketch directory" : ".bin file"
+            wantDir ? "sketch directory" : node.firmware.kind === "apk" ? ".apk file" : ".bin file"
           }`,
         );
       }

@@ -1,4 +1,5 @@
 export * from "./assertions.ts";
+export * from "./boards/android.ts";
 export * from "./boards/board.ts";
 export * from "./boards/qemu-esp32.ts";
 export * from "./boards/scripted.ts";

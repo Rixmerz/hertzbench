@@ -30,8 +30,8 @@ const STOP_GRACE_MS = 10_000;
 const BOOT_POLL_MS = 1000;
 const LOG_TAIL_LINES = 20;
 /** Console ports the emulator takes in pairs (console, adb): 5554, 5556, ... */
-const FIRST_CONSOLE_PORT = 5554;
-const LAST_CONSOLE_PORT = 5682;
+export const FIRST_CONSOLE_PORT = 5554;
+export const LAST_CONSOLE_PORT = 5682;
 
 /** The flags every headless launch uses (plan section 1, step 2). */
 const HEADLESS_FLAGS = [
@@ -167,7 +167,12 @@ export async function emulatorVersion(emulator: string): Promise<string> {
   return match[1]!.trim();
 }
 
-/** Whether /dev/kvm can be opened for read and write; null when it can, else the reason. */
+/**
+ * Whether /dev/kvm can be opened for read and write; null when it can, else the reason. Also
+ * null when Deno's own permissions forbid the look: it demands --allow-all for any device
+ * node, which the CLI's task never has. The emulator then answers for itself: it exits at
+ * once without acceleration and the boot step quotes its log.
+ */
 export function kvmProblem(device = "/dev/kvm"): string | null {
   if (Deno.build.os !== "linux") {
     return `hardware acceleration for the emulator is only wired for Linux (KVM); this is ${Deno.build.os}`;
@@ -176,21 +181,28 @@ export function kvmProblem(device = "/dev/kvm"): string | null {
     Deno.openSync(device, { read: true, write: true }).close();
     return null;
   } catch (error) {
+    if (error instanceof Deno.errors.NotCapable) return null;
     return `${device} is not usable: ${(error as Error).message}. ` +
       `Enable virtualization and add your user to the kvm group.`;
+  }
+}
+
+/** Whether a console port pair (console, adb) can be opened on loopback. */
+export function consolePortFree(port: number): boolean {
+  try {
+    Deno.listen({ hostname: "127.0.0.1", port }).close();
+    Deno.listen({ hostname: "127.0.0.1", port: port + 1 }).close();
+    return true;
+  } catch {
+    // taken by another emulator or adb server
+    return false;
   }
 }
 
 /** The first even console port in 5554..5682 whose pair of ports is free on loopback. */
 export function pickConsolePort(): number {
   for (let port = FIRST_CONSOLE_PORT; port <= LAST_CONSOLE_PORT; port += 2) {
-    try {
-      Deno.listen({ hostname: "127.0.0.1", port }).close();
-      Deno.listen({ hostname: "127.0.0.1", port: port + 1 }).close();
-      return port;
-    } catch {
-      // taken by another emulator or adb server; try the next pair
-    }
+    if (consolePortFree(port)) return port;
   }
   throw new BoardError(
     `no free emulator console port in ${FIRST_CONSOLE_PORT}..${LAST_CONSOLE_PORT}`,
@@ -334,7 +346,10 @@ export class RunningEmulator {
       "-p",
       app.package,
     ];
-    const extras = Object.entries(app.extras ?? {}).flatMap(([key, value]) => ["--es", key, value]);
+    // `adb shell` joins its arguments into one line for the device's shell: quote the values.
+    const extras = Object.entries(app.extras ?? {}).flatMap((
+      [key, value],
+    ) => ["--es", key, `'${value.replaceAll("'", `'\\''`)}'`]);
     const result = await runBounded(
       "launch",
       this.tools.adb,
