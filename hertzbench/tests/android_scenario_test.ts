@@ -34,8 +34,54 @@ import {
   fakeSnapshotSdk,
 } from "./android_fake_sdk.ts";
 import { skipOnWindows } from "./platform.ts";
+import {
+  consolePortFree,
+  FIRST_CONSOLE_PORT,
+  LAST_CONSOLE_PORT,
+} from "../orchestrator/boards/android/tooling.ts";
 
 const androidRun = skipOnWindows("the fake emulator and adb are sh scripts");
+
+// Not derived from a console port, so the run takes any free port and another run, or a
+// developer's own emulator, on 5584 cannot break the test.
+const GUEST_MAC = "02:aa:bb:cc:dd:ee";
+
+/** The MAC the AVD gives `wlan0` on console `port`: the inverse of `consolePortForMac`. */
+function macForPort(port: number): string {
+  const hex = port.toString(16).padStart(4, "0");
+  return `02:${hex.slice(0, 2)}:${hex.slice(2)}:00:00:00`;
+}
+
+/**
+ * The lowest console port whose pair is free now: a cold boot that must use its MAC's own port
+ * without depending on 5584 being free.
+ */
+function freeConsolePort(): number {
+  for (let port = FIRST_CONSOLE_PORT; port <= LAST_CONSOLE_PORT; port += 2) {
+    if (consolePortFree(port)) return port;
+  }
+  throw new Error(`no free console port in ${FIRST_CONSOLE_PORT}..${LAST_CONSOLE_PORT}`);
+}
+
+/**
+ * Binds the highest free console port pair. Scanning down keeps it away from the port
+ * `freeConsolePort` hands a parallel run, and binding while scanning leaves no gap between
+ * finding the pair free and holding it.
+ */
+function holdConsolePort(): { port: number; holder: Deno.TcpListener[] } {
+  for (let port = LAST_CONSOLE_PORT; port >= FIRST_CONSOLE_PORT; port -= 2) {
+    const holder: Deno.TcpListener[] = [];
+    try {
+      holder.push(Deno.listen({ hostname: "127.0.0.1", port }));
+      holder.push(Deno.listen({ hostname: "127.0.0.1", port: port + 1 }));
+      return { port, holder };
+    } catch (error) {
+      holder.forEach((listener) => listener.close());
+      if (!(error instanceof Deno.errors.AddrInUse)) throw error;
+    }
+  }
+  throw new Error(`no free console port in ${FIRST_CONSOLE_PORT}..${LAST_CONSOLE_PORT}`);
+}
 
 const PHONE = `
     id: phone
@@ -306,7 +352,9 @@ async function runWithFakeGuest(
 androidRun(
   "android run: a DISCOVER from the AVD's MAC gets an OFFER of the node's IP, and the flags are the plan's",
   async () => {
-    const { sdk, work, run, outDir } = await runWithFakeGuest(ANDROID_DEFAULT_MAC);
+    const port = freeConsolePort();
+    const mac = macForPort(port);
+    const { sdk, work, run, outDir } = await runWithFakeGuest(mac, `\n    mac: ${mac}`);
     try {
       const result = await run();
       assertEquals(result.problems, []);
@@ -315,15 +363,15 @@ androidRun(
         (await Deno.readTextFile(join(sdk.dir, "reply.hex"))).match(/../g)!,
         (b) => parseInt(b, 16),
       );
-      assertEquals(parseEthernet(reply)!.dst, ANDROID_DEFAULT_MAC);
+      assertEquals(parseEthernet(reply)!.dst, mac);
       const bootp = parseUdp(reply, parseIpv4(reply)!)!.payload;
       assertEquals(Array.from(bootp.subarray(16, 20)), [192, 168, 4, 12]); // yiaddr: the phone's IP
       assertEquals(bootp[240 + 2], 2); // option 53 first: DHCPOFFER
 
       const args = await Deno.readTextFile(join(sdk.dir, "emulator-args"));
       assertStringIncludes(args, "-avd pixel8 -no-window");
-      // The AVD's MAC comes from the console port: 5584 is what gives the default MAC.
-      assertStringIncludes(args, "-port 5584 ");
+      // The AVD's MAC comes from the console port, so the launcher boots on the MAC's own port.
+      assertStringIncludes(args, `-port ${port} `);
       assertStringIncludes(args, "-feature -WiFiPacketStream -wifi-socket connect=127.0.0.1:");
 
       const phone = result.nodes.find((n) => n.id === "phone")!;
@@ -362,31 +410,30 @@ Deno.test("the console port that gives the guest a MAC is read back from the MAC
 androidRun(
   "android run: a console port that is taken stops the run before the emulator starts",
   async () => {
-    let holder: Deno.TcpListener[];
+    const { port, holder } = holdConsolePort();
+    const mac = macForPort(port);
     try {
-      holder = [
-        Deno.listen({ hostname: "127.0.0.1", port: 5584 }),
-        Deno.listen({ hostname: "127.0.0.1", port: 5585 }),
-      ];
-    } catch {
-      return; // a real emulator holds the port: the situation under test already exists
-    }
-    const { sdk, work, run } = await runWithFakeGuest(ANDROID_DEFAULT_MAC);
-    try {
-      const error = await assertRejects(run, BoardError);
-      assertStringIncludes(error.message, "console port 5584 is taken");
-      assertStringIncludes(error.message, ANDROID_DEFAULT_MAC);
-      await assertRejects(() => Deno.stat(join(sdk.dir, "emulator-args")), Deno.errors.NotFound);
+      const { sdk, work, run } = await runWithFakeGuest(mac, `\n    mac: ${mac}`);
+      try {
+        const error = await assertRejects(run, BoardError);
+        assertStringIncludes(error.message, `console port ${port} is taken`);
+        assertStringIncludes(error.message, mac);
+        await assertRejects(
+          () => Deno.stat(join(sdk.dir, "emulator-args")),
+          Deno.errors.NotFound,
+        );
+      } finally {
+        await sdk.restore();
+        await Deno.remove(work, { recursive: true });
+      }
     } finally {
       holder.forEach((listener) => listener.close());
-      await sdk.restore();
-      await Deno.remove(work, { recursive: true });
     }
   },
 );
 
 androidRun("android run: a mac: override is the MAC the lease is for", async () => {
-  const mac = "02:aa:bb:cc:dd:ee";
+  const mac = GUEST_MAC;
   const { sdk, work, run } = await runWithFakeGuest(mac, `\n    mac: ${mac}`);
   try {
     const result = await run();
@@ -403,12 +450,12 @@ androidRun("android run: a mac: override is the MAC the lease is for", async () 
 });
 
 androidRun("android run: another source MAC stops the run naming both", async () => {
-  const { sdk, work, run } = await runWithFakeGuest("02:99:88:77:66:55");
+  const { sdk, work, run } = await runWithFakeGuest("02:99:88:77:66:55", `\n    mac: ${GUEST_MAC}`);
   try {
     const error = await assertRejects(run, BoardError);
     assertStringIncludes(error.message, "phone");
     assertStringIncludes(error.message, "02:99:88:77:66:55"); // what the guest used
-    assertStringIncludes(error.message, ANDROID_DEFAULT_MAC); // what the scenario gave the node
+    assertStringIncludes(error.message, GUEST_MAC); // what the scenario gave the node
     await assertRejects(
       () => Deno.stat(join(sdk.dir, "reply.hex")),
       Deno.errors.NotFound,
@@ -433,7 +480,7 @@ for await (const _ of conn.readable) { /* drain until the host closes */ }
 androidRun(
   "android run: a guest that sends no Wi-Fi frames stops the run naming the flag",
   async () => {
-    const { sdk, work, run } = await runWithFakeGuest(ANDROID_DEFAULT_MAC, "", {
+    const { sdk, work, run } = await runWithFakeGuest(GUEST_MAC, `\n    mac: ${GUEST_MAC}`, {
       guest: SILENT_GUEST,
       startupTimeoutMs: 400,
     });
