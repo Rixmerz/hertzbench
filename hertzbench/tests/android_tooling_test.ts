@@ -81,27 +81,35 @@ Deno.test("kvmProblem names the device it could not open", async () => {
   }
 });
 
-Deno.test("kvmProblem does not mistake Deno's own permission wall for a missing KVM", async () => {
-  // The CLI task has no --allow-all, and Deno refuses /dev/kvm without it; a process with no
-  // permission at all meets the same refusal.
-  const dir = await Deno.makeTempDir({ prefix: "hzb-kvm-" });
-  try {
-    const module = new URL("../orchestrator/boards/android/tooling.ts", import.meta.url).href;
-    const script = join(dir, "probe.ts");
-    await Deno.writeTextFile(
-      script,
-      `import { kvmProblem } from ${
-        JSON.stringify(module)
-      };\nconsole.log(kvmProblem("/dev/kvm"));\n`,
-    );
-    const { stdout, success, stderr } = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "--no-prompt", script],
-    }).output();
-    assert(success, new TextDecoder().decode(stderr));
-    assertEquals(new TextDecoder().decode(stdout).trim(), "null");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+// Linux only: Deno's refusal of /dev paths is what this probes, and on macOS and Windows
+// kvmProblem answers before opening anything ("only wired for Linux").
+Deno.test({
+  name: `kvmProblem does not mistake Deno's own permission wall for a missing KVM${
+    Deno.build.os === "linux" ? "" : " [skipped: Deno's /dev permission wall is Linux-only]"
+  }`,
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    // The CLI task has no --allow-all, and Deno refuses /dev/kvm without it; a process with no
+    // permission at all meets the same refusal.
+    const dir = await Deno.makeTempDir({ prefix: "hzb-kvm-" });
+    try {
+      const module = new URL("../orchestrator/boards/android/tooling.ts", import.meta.url).href;
+      const script = join(dir, "probe.ts");
+      await Deno.writeTextFile(
+        script,
+        `import { kvmProblem } from ${
+          JSON.stringify(module)
+        };\nconsole.log(kvmProblem("/dev/kvm"));\n`,
+      );
+      const { stdout, success, stderr } = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "--no-prompt", script],
+      }).output();
+      assert(success, new TextDecoder().decode(stderr));
+      assertEquals(new TextDecoder().decode(stdout).trim(), "null");
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });
 
 androidTest("launches with the headless flags, boots, installs, launches and kills", async () => {
