@@ -6,6 +6,7 @@ import {
   environmentFromPreset,
   EventLog,
   linkStats,
+  macToString,
   PcapWriter,
   VirtualGateway,
 } from "../engine/mod.ts";
@@ -121,6 +122,38 @@ Deno.test("a frame to the QEMU fork's AP MAC goes, acknowledged, to the holder o
   const deliver = rig.log.events.find((e) => e.type === "deliver");
   assert(deliver && deliver.type === "deliver");
   assertEquals(deliver.to, "b");
+});
+
+Deno.test("a frame that went by lease reaches its station addressed to the station's own MAC", () => {
+  // Issue #74: the SYN-ACK from an esp32 to an android node kept the fork's AP
+  // MAC as its destination, so the phone, which takes only its own MAC, never saw it.
+  const gateway = new VirtualGateway({
+    mac: GATEWAY_MAC,
+    ip: GATEWAY_IP,
+    subnetMask: "255.255.255.0",
+    leases: new Map([1, 2].map((i) => [macFor(i), ipFor(i)])),
+  });
+  const rig = makeRig({ gateway, positions: { a: { x: 0, y: 0 }, b: { x: 5, y: 0 } } });
+  const apMac = [0x10, 0x01, 0x00, 0xc4, 0x0a, 0x51];
+  const toB = udpFrame(rig, "a", "b");
+  toB.set(apMac, 0);
+  toB.set(apMac, 6); // the fork writes the AP MAC as the source too
+  rig.medium.transmit("a", toB);
+  rig.clock.runAll();
+
+  const [got] = rig.sinks.get("b")!.frames;
+  assertEquals(macToString(got!.frame, 0), macOf(rig, "b"));
+  assertEquals(
+    macToString(got!.frame, 6),
+    "10:01:00:c4:0a:51",
+    "only the destination is rewritten",
+  );
+  assertEquals(toB.slice(0, 6), Uint8Array.from(apMac), "the sender's own buffer is untouched");
+  assertEquals(
+    got!.frame.slice(12),
+    toB.slice(12),
+    "and so is everything after the Ethernet addresses",
+  );
 });
 
 Deno.test("two stations with the same MAC cannot join", () => {
