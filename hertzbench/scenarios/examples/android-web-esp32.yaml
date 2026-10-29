@@ -1,0 +1,44 @@
+# The same app and walk as android-web-scripted.yaml, against real firmware: an ESP32 running the
+# core's WebServer (fw/web-node) answers the app's GET /status on the simulated Wi-Fi. The phone
+# stands 6 m from the board and at 30 s moves 200 m away, where every frame it sends is lost.
+#
+# Needs libqemu-xtensa and the ESP-IDF toolchain (docs/e2e-esp32.md; the run compiles the sketch)
+# as well as the Android emulator (Linux with KVM, the SDK, an AVD named pixel8). Build the app,
+# then run:
+#   cd examples/android/iot-app && gradle assembleDebug
+#   cd ../.. && deno task hertzbench run scenarios/examples/android-web-esp32.yaml
+#
+# NEVER RUN: the host this was written on has no libqemu. The Android half was not run either;
+# see docs/missing-tests.md.
+name: android-web-esp32
+seed: 11
+duration: 90s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: web
+    board: esp32
+    firmware: ./fw/web-node
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+  - id: phone
+    board: android
+    position: [6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    android:
+      avd: pixel8
+      apk: ../../examples/android/iot-app/app/build/outputs/apk/debug/app-debug.apk
+      package: dev.hertzbench.iotapp
+      activity: .MainActivity
+      extras: { board_url: "http://192.168.4.11/" }
+timeline:
+  - at: 60s
+    label: out-of-range
+    move: { node: phone, to: [200, 0] }
+assertions:
+  - serial: { node: web, contains: "http listening on 80", within: 30s }
+  - serial: { node: phone, contains: "status ok 200 web-node uptime_ms=", within: 55s }
+  - serial: { node: web, contains: "http GET /status from 192.168.4.12", within: 55s }
+  - metric: { link: "phone->web", phase: start, loss_pct: { lt: 10 } }
+  - metric: { link: "phone->web", phase: out-of-range, loss_pct: { gt: 90 } }
