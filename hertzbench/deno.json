@@ -1,6 +1,6 @@
 {
   "name": "@hertzbench/hertzbench",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "exports": "./cli/main.ts",
   "tasks": {
     "check": "deno check engine/mod.ts adapters/qemu-wifi-l2/mod.ts adapters/spi-link/mod.ts adapters/lora-sx127x/mod.ts adapters/nrf24/mod.ts adapters/ble-hci/mod.ts orchestrator/mod.ts bridge/mod.ts mcp/mod.ts view/server.ts cli/main.ts scripts/compile.ts tests/",
