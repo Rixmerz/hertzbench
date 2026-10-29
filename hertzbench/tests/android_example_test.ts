@@ -5,6 +5,7 @@
 // phone off, which is what the scenarios' metric assertions say.
 
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { computeMetrics } from "../engine/mod.ts";
 import { evaluateAssertions, loadScenario, type Scenario } from "../orchestrator/mod.ts";
@@ -31,7 +32,7 @@ for (const name of NAMES) {
     // Where gradle puts the APK, the application id, and the activity `am start` is told.
     assertEquals(
       phone!.firmware,
-      { kind: "apk", path: `${APP}app/build/outputs/apk/debug/app-debug.apk` },
+      { kind: "apk", path: join(APP, "app", "build", "outputs", "apk", "debug", "app-debug.apk") },
     );
     assertStringIncludes(gradle, `applicationId = "${spec.package}"`);
     assertStringIncludes(manifest, `android:name="${spec.activity}"`);
