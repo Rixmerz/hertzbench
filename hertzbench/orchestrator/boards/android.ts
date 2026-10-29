@@ -49,12 +49,14 @@ export { wifiSocketArgs };
 export interface AndroidLauncherOptions {
   /** Replaces the /dev/kvm check; tests on hosts without KVM pass `() => null`. */
   checkKvm?: () => string | null;
+  /** How long to wait for `ip route get` to name wlan0; tests that expect eth0 shorten it. */
+  routeTimeoutMs?: number;
 }
 
 export function createAndroidLauncher(options: AndroidLauncherOptions = {}): BoardLauncher {
   return {
     fidelity: ANDROID_FIDELITY,
-    start: (ctx) => startAndroid(ctx, options.checkKvm ?? kvmProblem),
+    start: (ctx) => startAndroid(ctx, options.checkKvm ?? kvmProblem, options.routeTimeoutMs),
   };
 }
 
@@ -72,6 +74,8 @@ interface AppBoot {
   extraArgs: string[];
   /** The first line of the emulator log says how it booted. */
   bootKind: "cold boot" | "snapshot boot";
+  /** A board on the medium: wlan0 must be the route to it before the app starts. Null: no Wi-Fi. */
+  routeTo: { ip: string; timeoutMs?: number } | null;
 }
 
 /** Everything that can be wrong before an emulator is worth starting. */
@@ -106,6 +110,7 @@ async function preflight(
 async function startAndroid(
   ctx: BoardContext,
   checkKvm: () => string | null,
+  routeTimeoutMs?: number,
 ): Promise<RunningBoard> {
   const { node } = ctx;
   if (ctx.netPort === null) throw new BoardError(`${node.id}: an android node needs a Wi-Fi port`);
@@ -139,6 +144,11 @@ async function startAndroid(
     port,
     extraArgs: [...(snapshot ? snapshotBootArgs(node.mac) : []), ...wifiSocketArgs(ctx.netPort)],
     bootKind: snapshot ? "snapshot boot" : "cold boot",
+    // Any station on the medium will do; the gateway is there when the node has no peers.
+    routeTo: {
+      ip: ctx.peers[0]?.ip ?? ctx.gateway.ip,
+      ...(routeTimeoutMs !== undefined ? { timeoutMs: routeTimeoutMs } : {}),
+    },
   }, flagHint(version));
   return new AndroidBoard(node.id, spec, emulator, ctx.onSerial, shutDown);
 }
@@ -176,6 +186,10 @@ async function bootApp(
     await emulator.install(apk, spec.installTimeoutMs);
     if (spec.instrument?.apk !== undefined) {
       await emulator.install(spec.instrument.apk, spec.installTimeoutMs);
+    }
+    // Before the app runs: an unbound Socket() takes the default network, eth0 unless this is done.
+    if (boot.routeTo !== null) {
+      await emulator.preferWifi(boot.routeTo.ip, boot.routeTo.timeoutMs);
     }
     await emulator.launch(
       {
@@ -229,6 +243,7 @@ export function createAndroidAppLauncher(options: AndroidLauncherOptions = {}): 
         port: null,
         extraArgs: netsimHciArgs(ctx.hciPort),
         bootKind: "cold boot",
+        routeTo: null,
       }, "");
       return new AndroidBoard(ctx.id, ctx.app, emulator, ctx.onSerial, shutDown);
     },

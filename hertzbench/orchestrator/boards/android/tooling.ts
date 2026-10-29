@@ -15,6 +15,7 @@ export type AndroidStep =
   | "intent"
   | "instrument"
   | "logcat"
+  | "network"
   | "snapshot"
   | "stop"
   | "tool";
@@ -39,6 +40,9 @@ const STOP_GRACE_MS = 10_000;
 const BOOT_POLL_MS = 1000;
 const LOG_TAIL_LINES = 20;
 /** Console ports the emulator takes in pairs (console, adb): 5554, 5556, ... */
+/** How long `preferWifi` waits for the route to name wlan0: the DHCP lease lands just after boot. */
+const ROUTE_TIMEOUT_MS = 10_000;
+const ROUTE_POLL_MS = 500;
 export const FIRST_CONSOLE_PORT = 5554;
 export const LAST_CONSOLE_PORT = 5682;
 
@@ -417,6 +421,48 @@ export class RunningEmulator {
         "install",
         `installing ${apk} failed (step: install), adb said:\n${result.text}`,
       );
+    }
+  }
+
+  /**
+   * Makes `wlan0` the network app sockets use: `svc data disable` (the emulator's "radio" is
+   * `eth0`, which Android keeps as the default network while mobile data is on), then `ip route
+   * get <boardIp>` until it names `wlan0`. The lease arrives a moment after boot, so a route
+   * through anything else is polled for `routeTimeoutMs` before the step fails quoting the last
+   * route line (issue #70).
+   */
+  async preferWifi(boardIp: string, routeTimeoutMs = ROUTE_TIMEOUT_MS): Promise<void> {
+    const disable = await runBounded(
+      "network",
+      this.tools.adb,
+      ["-s", this.serial, "shell", "svc", "data", "disable"],
+      DEFAULT_TIMEOUTS.launchMs,
+      "svc data disable",
+    );
+    if (!disable.success) {
+      throw new AndroidStepError(
+        "network",
+        `svc data disable failed (step: network), adb said:\n${disable.text}`,
+      );
+    }
+    const deadline = performance.now() + routeTimeoutMs;
+    for (;;) {
+      const route = await runBounded(
+        "network",
+        this.tools.adb,
+        ["-s", this.serial, "shell", "ip", "route", "get", boardIp],
+        DEFAULT_TIMEOUTS.launchMs,
+        `ip route get ${boardIp}`,
+      );
+      if (route.success && /\bdev wlan0\b/.test(route.text)) return;
+      if (performance.now() >= deadline) {
+        throw new AndroidStepError(
+          "network",
+          `app sockets to ${boardIp} do not go through wlan0 (step: network), ` +
+            `\`ip route get ${boardIp}\` says:\n${route.text}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, ROUTE_POLL_MS));
     }
   }
 

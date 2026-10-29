@@ -28,6 +28,13 @@ echo "$@" >> "$DIR/adb-calls"
 serial="$2"
 shift 2
 cmd="$1"; shift
+# The two commands the launcher issues to make wlan0 the network app sockets use. A test that
+# wants another route writes it to $DIR/route; the default is the healthy one.
+if [ "$cmd" = shell ] && [ "$1" = svc ]; then exit 0; fi
+if [ "$cmd" = shell ] && [ "$1" = ip ]; then
+  if [ -f "$DIR/route" ]; then cat "$DIR/route"; else echo "$5 dev wlan0 table 1016 src 192.168.4.12 uid 2000"; fi
+  exit 0
+fi
 case "$cmd" in
 ${adbCases}
 esac
