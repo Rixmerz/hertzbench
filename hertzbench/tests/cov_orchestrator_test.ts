@@ -1220,6 +1220,7 @@ Deno.test("scenario: defaults fill in what a minimal file leaves out", () => {
     kind: "script",
     send: [],
     serve: [],
+    subscribe: [],
     listen: true,
     ble: null,
   });
@@ -5361,6 +5362,7 @@ function drvNode(
         kind: "script",
         send: script.send ?? [],
         serve: [],
+        subscribe: [],
         listen: script.listen ?? false,
         ble: script.ble ?? null,
       }

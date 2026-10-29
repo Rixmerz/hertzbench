@@ -15,8 +15,9 @@
 //   ws open <path> from <ip> / ws rx "<text>" from <ip> / ws closed from <ip>
 //   mqtt connect <client id> from <ip> / mqtt subscribe <filter> from <client id>
 //   mqtt publish <topic> "<payload>" from <client id>
+// MqttClient is the other side: a scripted board's own connection to a broker.
 
-import type { TcpConnection } from "../../../engine/mod.ts";
+import type { Clock, TcpConnection } from "../../../engine/mod.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -24,7 +25,7 @@ const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /** A request head larger than this is refused rather than buffered. */
 const MAX_HEAD_BYTES = 8192;
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+export function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = new Uint8Array(a.length + b.length);
   out.set(a, 0);
   out.set(b, a.length);
@@ -223,7 +224,7 @@ export function mqttPacket(type: number, flags: number, body: ArrayLike<number>)
   ]);
 }
 
-function mqttString(text: string): number[] {
+export function mqttString(text: string): number[] {
   const bytes = encoder.encode(text);
   return [bytes.length >>> 8, bytes.length & 0xff, ...bytes];
 }
@@ -259,7 +260,7 @@ export function parseMqttPacket(
   };
 }
 
-function readString(body: Uint8Array, offset: number): [string, number] {
+export function readString(body: Uint8Array, offset: number): [string, number] {
   const length = ((body[offset] ?? 0) << 8) | (body[offset + 1] ?? 0);
   return [decoder.decode(body.subarray(offset + 2, offset + 2 + length)), offset + 2 + length];
 }
@@ -377,5 +378,160 @@ export class MqttBroker {
         session.conn.end();
         return;
     }
+  }
+}
+
+// ── MQTT client ─────────────────────────────────────────────────────────────
+
+/** The keep-alive the client declares and keeps: a PINGREQ this often. */
+const MQTT_KEEP_ALIVE_MS = 10_000;
+/** A broker that has said nothing for this long (1.5 keep-alives, MQTT 3.1.1 §3.1.2.10) is gone. */
+const MQTT_SILENCE_LIMIT_MS = MQTT_KEEP_ALIVE_MS * 1.5;
+const MQTT_RETRY_MS = 1000;
+
+export interface MqttClientOptions {
+  clientId: string;
+  /** Topic filters subscribed to after every (re)connection. */
+  filters: string[];
+  clock: Clock;
+  /** Open the TCP connection to the broker; rejects when it cannot. */
+  connect(): Promise<TcpConnection>;
+  onMessage(topic: string, payload: Uint8Array): void;
+  /** The session came up (CONNACK accepted) or went down. */
+  onState(connected: boolean): void;
+}
+
+/**
+ * An MQTT 3.1.1 client at QoS 0 that keeps its session: when the link drops, the broker closes it
+ * or says nothing for 1.5 keep-alives, it connects again and subscribes again.
+ */
+export class MqttClient {
+  readonly #opts: MqttClientOptions;
+  #conn: TcpConnection | null = null;
+  #connected = false;
+  #stopped = false;
+  #lastHeardMs = 0;
+  #cancelTimer: (() => void) | null = null;
+
+  constructor(opts: MqttClientOptions) {
+    this.#opts = opts;
+  }
+
+  get connected(): boolean {
+    return this.#connected;
+  }
+
+  start(): void {
+    this.#open();
+  }
+
+  /** False, and nothing sent, while the session is down. */
+  publish(topic: string, payload: Uint8Array): boolean {
+    if (!this.#connected || this.#conn === null) return false;
+    void this.#conn.write(mqttPublish(topic, payload)).catch(() => {});
+    return true;
+  }
+
+  stop(): void {
+    this.#stopped = true;
+    this.#cancelTimer?.();
+    this.#cancelTimer = null;
+    this.#conn?.abort("the client stopped");
+  }
+
+  #later(ms: number, fn: () => void): void {
+    const { clock } = this.#opts;
+    this.#cancelTimer = clock.schedule(clock.now() + ms, () => {
+      this.#cancelTimer = null;
+      if (!this.#stopped) fn();
+    });
+  }
+
+  #open(): void {
+    if (this.#stopped) return;
+    this.#opts.connect().then(
+      (conn) => this.#attach(conn),
+      () => this.#later(MQTT_RETRY_MS, () => this.#open()),
+    );
+  }
+
+  #attach(conn: TcpConnection): void {
+    if (this.#stopped) return conn.abort("the client stopped");
+    this.#conn = conn;
+    this.#lastHeardMs = this.#opts.clock.now();
+    let buffer: Uint8Array = new Uint8Array(0);
+    const write = (packet: Uint8Array) => void conn.write(packet).catch(() => {});
+    conn.onData((chunk) => {
+      this.#lastHeardMs = this.#opts.clock.now();
+      buffer = concat(buffer, chunk);
+      for (;;) {
+        let packet;
+        try {
+          packet = parseMqttPacket(buffer);
+        } catch (error) {
+          if (!(error instanceof RangeError)) throw error;
+          return conn.abort("malformed MQTT packet");
+        }
+        if (!packet) return;
+        buffer = buffer.slice(packet.size);
+        this.#handle(conn, packet, write);
+      }
+    });
+    conn.onEnd(() => conn.end());
+    conn.onClose(() => {
+      if (this.#conn !== conn) return;
+      this.#conn = null;
+      this.#cancelTimer?.();
+      this.#cancelTimer = null;
+      if (this.#connected) {
+        this.#connected = false;
+        this.#opts.onState(false);
+      }
+      this.#later(MQTT_RETRY_MS, () => this.#open());
+    });
+    // CONNECT: "MQTT", level 4, clean session, keep-alive, client id.
+    write(mqttPacket(MQTT.connect, 0, [
+      ...mqttString("MQTT"),
+      4,
+      0x02,
+      MQTT_KEEP_ALIVE_MS / 1000 >>> 8,
+      (MQTT_KEEP_ALIVE_MS / 1000) & 0xff,
+      ...mqttString(this.#opts.clientId),
+    ]));
+    this.#later(MQTT_KEEP_ALIVE_MS, () => this.#keepAlive(conn, write));
+  }
+
+  #keepAlive(conn: TcpConnection, write: (packet: Uint8Array) => void): void {
+    if (this.#opts.clock.now() - this.#lastHeardMs > MQTT_SILENCE_LIMIT_MS) {
+      return conn.abort("the broker went silent");
+    }
+    write(mqttPacket(MQTT.pingreq, 0, []));
+    this.#later(MQTT_KEEP_ALIVE_MS, () => this.#keepAlive(conn, write));
+  }
+
+  #handle(
+    conn: TcpConnection,
+    packet: { type: number; flags: number; body: Uint8Array },
+    write: (packet: Uint8Array) => void,
+  ): void {
+    const { body } = packet;
+    if (packet.type === MQTT.connack) {
+      if (body[1] !== 0) return conn.abort(`the broker refused the connection (code ${body[1]})`);
+      this.#connected = true;
+      this.#opts.onState(true);
+      if (this.#opts.filters.length > 0) {
+        write(mqttPacket(MQTT.subscribe, 0x02, [
+          0,
+          1,
+          ...this.#opts.filters.flatMap((filter) => [...mqttString(filter), 0]),
+        ]));
+      }
+    } else if (packet.type === MQTT.publish) {
+      const [topic, afterTopic] = readString(body, 0);
+      const qos = (packet.flags >>> 1) & 0x03;
+      if (qos === 1) write(mqttPacket(MQTT.puback, 0, body.subarray(afterTopic, afterTopic + 2)));
+      this.#opts.onMessage(topic, body.slice(qos > 0 ? afterTopic + 2 : afterTopic));
+    }
+    // SUBACK and PINGRESP only prove the broker is alive, which the receive time already records.
   }
 }

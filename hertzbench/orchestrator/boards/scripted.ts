@@ -5,7 +5,8 @@
 // so the frames and ACKs on the wire are the fork's. The adapter, engine,
 // metrics, pcap and assertions can run end to end on a machine without libqemu.
 // Its `serve` entries are TCP servers (drivers/tcp-services.ts) on the engine's
-// small TCP, for the IP bridge to reach.
+// small TCP, for the IP bridge to reach; its `via: mqtt` sends and `subscribe` entries make it an
+// MQTT client of a broker node over the same TCP.
 // Fidelity: none. Use it to develop scenarios and to test the engine; use the
 // esp32 board for anything that claims to be about firmware.
 
@@ -26,12 +27,12 @@ import {
   TcpHost,
 } from "../../engine/mod.ts";
 import { encodeFrame, FrameDecoder, LOOPBACK } from "../../adapters/qemu-wifi-l2/mod.ts";
-import { BROADCAST_TARGET } from "../scenario.ts";
+import { BROADCAST_TARGET, type ScriptedSend } from "../scenario.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 import { EspNowForkModel, type EspNowTxStatus } from "./espnow-fork-model.ts";
 import { startScriptedBleBoard } from "./scripted-ble.ts";
 import { startScriptedRadioBoard } from "./scripted-radio.ts";
-import { MqttBroker, serveHttp } from "./drivers/tcp-services.ts";
+import { MqttBroker, MqttClient, serveHttp } from "./drivers/tcp-services.ts";
 
 const DHCP_RETRY_MS = 1000;
 const DHCP_MAX_TRIES = 10;
@@ -77,8 +78,10 @@ class ScriptedBoard implements RunningBoard {
   /** ESP-NOW frames go one at a time, as the driver sends them: the fork has one ACK timer. */
   readonly #espnowQueue: { dst: string; label: string; body: Uint8Array }[] = [];
   #espnowInFlight: string | null = null;
-  /** Once bound: the TCP the `serve` entries listen on. */
+  /** Once bound: the TCP the `serve` entries listen on and the MQTT clients connect from. */
   #tcp: TcpHost | null = null;
+  /** One MQTT session per broker (node and port), shared by the sends and subscriptions to it. */
+  readonly #mqtt = new Map<string, { client: MqttClient; onFirstUp: (() => void)[] }>();
   /** Addresses learned from the frames that arrive, for TCP replies. */
   readonly #neighbors = new Map<string, string>();
 
@@ -106,6 +109,7 @@ class ScriptedBoard implements RunningBoard {
   async stop(): Promise<void> {
     this.#stopped = true;
     this.#espnow.stop();
+    for (const { client } of this.#mqtt.values()) client.stop();
     this.#tcp?.close();
     for (const cancel of this.#cancels) cancel();
     this.#cancels.clear();
@@ -229,24 +233,28 @@ class ScriptedBoard implements RunningBoard {
     } else if (type === DHCPACK && this.#ip === null) {
       this.#ip = offered;
       this.#ctx.onSerial(`dhcp bound ip=${offered}`);
-      this.#startServers(offered);
+      this.#startTcp(offered);
       this.#startScript();
     }
   }
 
-  #startServers(ip: string): void {
+  #startTcp(ip: string): void {
     const { node, clock } = this.#ctx;
-    if (node.firmware.kind !== "script" || node.firmware.serve.length === 0) return;
+    if (node.firmware.kind !== "script") return;
+    const { serve, send, subscribe } = node.firmware;
+    if (serve.length === 0 && subscribe.length === 0 && !send.some((s) => s.via === "mqtt")) return;
     const tcp = new TcpHost({
       mac: node.mac,
       ip,
       clock,
       send: (frame) => this.#send(frame),
-      macFor: (peer) => this.#neighbors.get(peer) ?? null,
+      // A client may dial a broker before any frame from it has arrived: the scenario knows its MAC.
+      macFor: (peer) =>
+        this.#neighbors.get(peer) ?? this.#ctx.peers.find((p) => p.ip === peer)?.mac ?? null,
       rng: createRng(`scripted-tcp:${node.id}`),
     });
     const ctx = { node: node.id, onSerial: (line: string) => this.#ctx.onSerial(line) };
-    for (const service of node.firmware.serve) {
+    for (const service of serve) {
       if (service.protocol === "http") tcp.listen(service.port, (conn) => serveHttp(conn, ctx));
       else {
         const broker = new MqttBroker(ctx);
@@ -257,11 +265,56 @@ class ScriptedBoard implements RunningBoard {
     this.#tcp = tcp;
   }
 
+  /**
+   * The client for a broker, made and started on first use: it dials as soon as the board has its
+   * lease and again whenever the session drops. `onFirstUp` runs the first time it is up.
+   */
+  #mqttClient(to: string, port: number, onFirstUp?: () => void) {
+    const { node, clock, peers } = this.#ctx;
+    const key = `${to}:${port}`;
+    let entry = this.#mqtt.get(key);
+    if (entry === undefined) {
+      const peer = peers.find((p) => p.id === to);
+      const tcp = this.#tcp;
+      if (peer === undefined || tcp === null) {
+        this.#ctx.onProblem(`${node.id}: MQTT broker ${to} is not a known peer`);
+        return null;
+      }
+      const subscribe = node.firmware.kind === "script" ? node.firmware.subscribe : [];
+      const pending: (() => void)[] = [];
+      let up = false;
+      const client = new MqttClient({
+        clientId: node.id,
+        filters: subscribe.filter((s) => s.to === to && s.port === port).map((s) => s.topic),
+        clock,
+        connect: () => tcp.connect(peer.ip, port),
+        onMessage: (topic, payload) =>
+          this.#ctx.onSerial(`mqtt rx ${topic} ${new TextDecoder().decode(payload)}`),
+        onState: (connected) => {
+          this.#ctx.onSerial(`mqtt ${connected ? "connected to" : "disconnected from"} ${to}`);
+          if (connected && !up) {
+            up = true;
+            for (const fn of pending.splice(0)) fn();
+          }
+        },
+      });
+      entry = { client, onFirstUp: pending };
+      this.#mqtt.set(key, entry);
+      client.start();
+    }
+    if (onFirstUp) entry.onFirstUp.push(onFirstUp);
+    return entry.client;
+  }
+
   #startScript(): void {
     const { node, peers, clock } = this.#ctx;
     if (node.firmware.kind !== "script") return;
     const bound = clock.now();
     for (const send of node.firmware.send) {
+      if (send.via === "mqtt") {
+        this.#startMqttPublisher(send);
+        continue;
+      }
       const peer = send.to === BROADCAST_TARGET ? null : peers.find((p) => p.id === send.to);
       if (peer === undefined) {
         this.#ctx.onProblem(`${node.id}: scripted send to unknown peer ${send.to}`);
@@ -298,6 +351,48 @@ class ScriptedBoard implements RunningBoard {
       };
       this.#schedule(bound + send.startMs, () => sendNext(0));
     }
+    this.#startMqttSubscriptions();
+  }
+
+  #startMqttSubscriptions(): void {
+    const { node } = this.#ctx;
+    if (node.firmware.kind !== "script") return;
+    for (const sub of node.firmware.subscribe) {
+      this.#mqttClient(sub.to, sub.port);
+    }
+  }
+
+  /**
+   * Publishes `topic` to the broker every `everyMs`, cycling through the payloads as given (no
+   * sequence suffix). The schedule starts when the session first comes up, so `start` counts from
+   * the connection and the first publish is not lost to the handshake; one that falls while the
+   * session is down is skipped and logged.
+   */
+  #startMqttPublisher(send: ScriptedSend): void {
+    if (send.to === null || send.topic === undefined) return;
+    const topic = send.topic;
+    const payloads = send.payloads ?? [send.payload];
+    const publish = (seq: number) => {
+      const payload = payloads[seq % payloads.length] as string;
+      const sent = this.#mqtt.get(`${send.to}:${send.port}`)?.client.publish(
+        topic,
+        new TextEncoder().encode(payload),
+      );
+      if (!sent) this.#ctx.onSerial(`mqtt tx ${topic} skipped: not connected to ${send.to}`);
+    };
+    const publishNext = (seq: number, firstAtMs: number) => {
+      publish(seq);
+      if (seq + 1 < send.count) {
+        this.#schedule(
+          firstAtMs + (seq + 1) * send.everyMs,
+          () => publishNext(seq + 1, firstAtMs),
+        );
+      }
+    };
+    this.#mqttClient(send.to, send.port, () => {
+      const firstAtMs = this.#ctx.clock.now() + send.startMs;
+      this.#schedule(firstAtMs, () => publishNext(0, firstAtMs));
+    });
   }
 }
 
