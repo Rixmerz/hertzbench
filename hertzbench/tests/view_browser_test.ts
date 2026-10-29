@@ -10,6 +10,7 @@ import {
   Cdp,
   chromiumArgs,
   findChromium,
+  PAGE_TIMEOUT_MS,
   StderrWatch,
   terminate,
 } from "./chromium.ts";
@@ -24,6 +25,14 @@ Deno.test({
   ignore: CHROMIUM === null,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "hzb-browser-" });
+    // The run's clock starts with the view, before Chromium is up, and a 120 s run can end
+    // inside the budgets the waits below get: the drag needs one that outlives them all.
+    const live = await Deno.readTextFile(LIVE);
+    assert(live.includes("\nduration: 120s\n"), "live-3-scripted.yaml no longer lasts 120 s");
+    await Deno.writeTextFile(
+      `${dir}/live.yaml`,
+      live.replace("\nduration: 120s\n", "\nduration: 600s\n"),
+    );
     const view = new Deno.Command(Deno.execPath(), {
       args: [
         "run",
@@ -34,7 +43,7 @@ Deno.test({
         "--allow-env",
         MAIN,
         "view",
-        LIVE,
+        `${dir}/live.yaml`,
         "--port",
         "0",
         "--out",
@@ -51,6 +60,7 @@ Deno.test({
     }).spawn();
     const browserLog = new StderrWatch(browser.stderr);
     let cdp: Cdp | null = null;
+    let status: Deno.CommandStatus;
     try {
       const [, url] = await viewLog.waitFor(
         /view: (http:\/\/127\.0\.0\.1:\d+\/)/,
@@ -72,27 +82,41 @@ Deno.test({
       // map at the size its box has. The first frame of a run is drawn at the box's earlier size
       // and redrawn when the box settles, tens of ms later: the map's scale was 5.7 px/m in that
       // frame and 9.3 after it, so coordinates taken in it put the press and the drop off.
+      // Until then the answer says what the page shows instead, for the error a timeout raises.
       const centres = `(() => {
-        if (document.getElementById("state").dataset.state !== "running") return null;
+        const state = document.getElementById("state");
+        if (!state) return { waiting: "the page at " + location.href };
+        if (["finished", "failed", "stopped"].includes(state.dataset.state)) {
+          return { ended: state.textContent };
+        }
+        if (state.dataset.state !== "running") return { waiting: "state " + state.textContent };
         const box = document.getElementById("map-box").getBoundingClientRect();
         const [, , width, height] = document.getElementById("map").getAttribute("viewBox")
           .split(" ").map(Number);
-        if (Math.abs(width - box.width) > 0.5 || Math.abs(height - box.height) > 0.5) return null;
+        if (Math.abs(width - box.width) > 0.5 || Math.abs(height - box.height) > 0.5) {
+          return { waiting: "the map drawn at its box's earlier size" };
+        }
         const out = {};
         for (const node of document.querySelectorAll(".node")) {
           const r = node.querySelector("circle.node-dot").getBoundingClientRect();
           out[node.getAttribute("aria-label").split(",")[0]] = [r.x + r.width / 2, r.y + r.height / 2];
         }
-        return Object.keys(out).length === 3 ? out : null;
+        const count = Object.keys(out).length;
+        return count === 3 ? { out } : { waiting: count + " nodes" };
       })()`;
       type Centres = Record<string, [number, number]>;
-      const deadline = performance.now() + 20_000;
+      const deadline = performance.now() + PAGE_TIMEOUT_MS;
+      let showing = "nothing yet";
       const settled = async (): Promise<Centres> => {
         for (;;) {
-          const found: Centres | null = await evaluate(centres);
-          if (found) return found;
+          const found: { out?: Centres; waiting?: string; ended?: string } | undefined =
+            await evaluate(centres);
+          if (found?.out) return found.out;
+          // A run that is over cannot be dragged in: waiting longer would only hide why.
+          if (found?.ended) throw new Error(`the run ended before the drag: ${found.ended}`);
+          showing = found?.waiting ?? showing;
           if (performance.now() > deadline) {
-            throw new Error("the page never showed three running nodes");
+            throw new Error(`the page never showed three running nodes; it showed ${showing}`);
           }
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
@@ -135,7 +159,7 @@ Deno.test({
 
       const expected = { x: (toX - ax) / pxPerMetre, y: -(toY - ay) / pxPerMetre };
       let position: { x: number; y: number } | null = null;
-      const moveDeadline = performance.now() + 5_000;
+      const moveDeadline = performance.now() + PAGE_TIMEOUT_MS;
       for (;;) {
         const scene = await (await fetch(`${url}api/view?since=999999999`)).json();
         position = scene.status.nodes.find((n: { id: string }) => n.id === "c").position;
@@ -160,10 +184,12 @@ Deno.test({
       await browser.status;
       await browserLog.done;
       view.kill("SIGINT");
-      const status = await view.status;
+      status = await view.status;
       await viewLog.done;
       await Deno.remove(dir, { recursive: true });
-      assertEquals(status.code, 0, viewLog.text);
     }
+    // Not in the finally: a view killed before it started exits 130, and that would replace the
+    // error that says why the test failed.
+    assertEquals(status.code, 0, viewLog.text);
   },
 });

@@ -10,6 +10,14 @@
  */
 export const BROWSER_START_TIMEOUT_MS = 90_000;
 
+/**
+ * How long a page in that Chromium may take to load and draw, or to show a move. The machine that
+ * made the start slow keeps the first navigation slow: on the GitHub Ubuntu runner the drag test
+ * passed in 14-28 s and failed in 62-94 s, each time with the page still not drawn at a 20 s
+ * limit, and on two starved cores here the page sat at about:blank or "connecting" for 20 s.
+ */
+export const PAGE_TIMEOUT_MS = 90_000;
+
 export function chromiumArgs(profileDir: string): string[] {
   return [
     "--headless=new",
