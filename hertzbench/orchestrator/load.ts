@@ -43,6 +43,17 @@ export async function loadScenario(file: string, outDirOverride?: string): Promi
       firmware: node.firmware.kind === "script"
         ? node.firmware
         : { ...node.firmware, path: resolveFrom(baseDir, node.firmware.path) },
+      ...(node.android?.instrument?.apk !== undefined
+        ? {
+          android: {
+            ...node.android,
+            instrument: {
+              ...node.android.instrument,
+              apk: resolveFrom(baseDir, node.android.instrument.apk),
+            },
+          },
+        }
+        : {}),
     })),
   };
 
@@ -67,6 +78,14 @@ export async function loadScenario(file: string, outDirOverride?: string): Promi
 export async function checkFirmwareFiles(scenario: Scenario): Promise<string[]> {
   const missing: string[] = [];
   for (const node of scenario.nodes) {
+    const testApk = node.android?.instrument?.apk;
+    if (testApk !== undefined) {
+      try {
+        if (!(await Deno.stat(testApk)).isFile) throw new Error("not a file");
+      } catch {
+        missing.push(`${node.id}: ${testApk} is not an .apk file that exists`);
+      }
+    }
     if (node.firmware.kind === "script") continue;
     try {
       const info = await Deno.stat(node.firmware.path);

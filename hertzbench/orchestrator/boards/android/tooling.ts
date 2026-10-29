@@ -8,7 +8,15 @@ import { delimiter, join } from "node:path";
 import { BoardError } from "../board.ts";
 
 /** The steps that have a timeout, as a timeout or failure message names them. */
-export type AndroidStep = "boot" | "install" | "launch" | "logcat" | "stop" | "tool";
+export type AndroidStep =
+  | "boot"
+  | "install"
+  | "launch"
+  | "intent"
+  | "instrument"
+  | "logcat"
+  | "stop"
+  | "tool";
 
 /** A step of the Android lifecycle failed or ran out of time. */
 export class AndroidStepError extends BoardError {
@@ -133,6 +141,32 @@ async function runBounded(
   }
   const [stdout, stderr] = await output;
   return { success: winner.success, code: winner.code, text: `${stdout}${stderr}`.trim() };
+}
+
+/** `adb shell` joins its arguments into one line for the device's shell: quote what is not ours. */
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+/** Intent extras as `--es key value` arguments. */
+const extraArgs = (extras: Record<string, string> = {}): string[] =>
+  Object.entries(extras).flatMap(([key, value]) => ["--es", key, shellQuote(value)]);
+
+/** Feed `onLine` each non-empty line of `stream` as it arrives; a read error ends it quietly. */
+async function readLines(
+  stream: ReadableStream<Uint8Array>,
+  onLine: (line: string) => void,
+): Promise<void> {
+  let pending = "";
+  const decoder = new TextDecoder();
+  try {
+    for await (const chunk of stream) {
+      const lines = (pending + decoder.decode(chunk, { stream: true })).split(/\r?\n/);
+      pending = lines.pop()!;
+      lines.filter((line) => line !== "").forEach(onLine);
+    }
+  } catch {
+    // the process was killed; the lines read so far were delivered
+  }
+  if (pending !== "") onLine(pending);
 }
 
 /** `emulator -list-avds`: the AVD names, one per line of output. */
@@ -346,14 +380,10 @@ export class RunningEmulator {
       "-p",
       app.package,
     ];
-    // `adb shell` joins its arguments into one line for the device's shell: quote the values.
-    const extras = Object.entries(app.extras ?? {}).flatMap((
-      [key, value],
-    ) => ["--es", key, `'${value.replaceAll("'", `'\\''`)}'`]);
     const result = await runBounded(
       "launch",
       this.tools.adb,
-      ["-s", this.serial, "shell", "am", "start", "-W", ...target, ...extras],
+      ["-s", this.serial, "shell", "am", "start", "-W", ...target, ...extraArgs(app.extras)],
       timeoutMs,
       `starting ${app.package}`,
     );
@@ -364,6 +394,76 @@ export class RunningEmulator {
         `starting ${app.package} failed (step: launch), adb said:\n${result.text}`,
       );
     }
+  }
+
+  /**
+   * `am broadcast` or `am start` of `intent.action`, limited to `app.package` so a test hook cannot
+   * reach another app (and a manifest receiver gets a broadcast at all, since API 26). It returns
+   * once the system has taken the intent, not once the app has handled it.
+   */
+  async sendIntent(
+    app: { package: string },
+    intent: { via: "broadcast" | "start"; action: string; extras?: Record<string, string> },
+    timeoutMs = DEFAULT_TIMEOUTS.launchMs,
+  ): Promise<void> {
+    const result = await runBounded(
+      "intent",
+      this.tools.adb,
+      [
+        "-s",
+        this.serial,
+        "shell",
+        "am",
+        intent.via,
+        "-a",
+        shellQuote(intent.action),
+        "-p",
+        shellQuote(app.package),
+        ...extraArgs(intent.extras),
+      ],
+      timeoutMs,
+      `${intent.via} of ${intent.action}`,
+    );
+    // Like `am start`, `am broadcast` exits 0 on "Error: ..." and on a thrown exception.
+    if (!result.success || /^(Error|Exception)\b/m.test(result.text)) {
+      throw new AndroidStepError(
+        "intent",
+        `${intent.via} of ${intent.action} to ${app.package} failed (step: intent), adb said:\n${result.text}`,
+      );
+    }
+  }
+
+  /**
+   * `am instrument -w -r <runner>` with its output streamed line by line to `onLine` while the
+   * tests run. `done` settles with adb's exit code when instrumentation ends; `stop()` ends it
+   * early and resolves once the output is drained.
+   */
+  instrument(
+    runner: string,
+    onLine: (line: string) => void,
+  ): { done: Promise<number>; stop(): Promise<void> } {
+    const child = new Deno.Command(this.tools.adb, {
+      args: ["-s", this.serial, "shell", "am", "instrument", "-w", "-r", shellQuote(runner)],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const reading = Promise.all([readLines(child.stdout, onLine), readLines(child.stderr, onLine)]);
+    const done = child.status.then(async (status) => {
+      await reading;
+      return status.code;
+    });
+    return {
+      done,
+      async stop() {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // already exited
+        }
+        await done;
+      },
+    };
   }
 
   /**
@@ -389,20 +489,7 @@ export class RunningEmulator {
       stdout: "piped",
       stderr: "null",
     }).spawn();
-    const reading = (async () => {
-      let pending = "";
-      const decoder = new TextDecoder();
-      try {
-        for await (const chunk of child.stdout) {
-          const lines = (pending + decoder.decode(chunk, { stream: true })).split(/\r?\n/);
-          pending = lines.pop()!;
-          lines.filter((line) => line !== "").forEach(onLine);
-        }
-      } catch {
-        // killed by stop(); the lines read so far were delivered
-      }
-      if (pending !== "") onLine(pending);
-    })();
+    const reading = readLines(child.stdout, onLine);
     return {
       async stop() {
         try {
