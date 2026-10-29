@@ -619,11 +619,13 @@ function parseBleScript(obj: Obj, path: string, nodeName: string): BleScript {
   return { advertise, connect, scan: obj.scan === true };
 }
 
-const MQTT_PORT = 1883;
+/** The ports a scripted send uses when it names none. */
+export const MQTT_PORT = 1883;
+export const UDP_PORT = 5000;
 const MAX_SEND_COUNT = 100_000;
 
 /** An MQTT topic name, or with `filter` a topic filter; wildcards are only for filters (MQTT 3.1.1 §4.7). */
-function mqttTopic(value: unknown, path: string, filter: boolean): string {
+export function mqttTopic(value: unknown, path: string, filter: boolean): string {
   const topic = text(value, path);
   if (topic === "" || new TextEncoder().encode(topic).length > 65535 || topic.includes("\0")) {
     fail(path, "expected a topic of 1 to 65535 bytes");
@@ -736,7 +738,7 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
       everyMs: parseDuration(entry.every, `${p}.every`),
       count,
       startMs: entry.start === undefined ? 0 : parseDuration(entry.start, `${p}.start`),
-      port: int(entry.port ?? (via === "mqtt" ? MQTT_PORT : 5000), `${p}.port`, 1, 65535),
+      port: int(entry.port ?? (via === "mqtt" ? MQTT_PORT : UDP_PORT), `${p}.port`, 1, 65535),
       payload,
       ...(via === "mqtt"
         ? {

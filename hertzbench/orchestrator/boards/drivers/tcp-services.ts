@@ -7,8 +7,9 @@
 //   or binary message.
 // - mqtt: a broker for MQTT 3.1.1 at QoS 0: CONNECT, SUBSCRIBE (with + and #),
 //   UNSUBSCRIBE, PUBLISH fanned out to every matching subscription, PINGREQ
-//   and DISCONNECT. A QoS 1 PUBLISH is acknowledged and delivered at QoS 0.
-//   No retained messages, no will, no sessions.
+//   and DISCONNECT. A QoS 1 PUBLISH is acknowledged and delivered at QoS 0. One retained
+//   message is kept per topic and sent to a client when it subscribes to a matching filter.
+//   No will, no sessions.
 //
 // Serial lines, for `serial:` assertions:
 //   http <METHOD> <path> from <ip>
@@ -229,8 +230,9 @@ export function mqttString(text: string): number[] {
   return [bytes.length >>> 8, bytes.length & 0xff, ...bytes];
 }
 
-export function mqttPublish(topic: string, payload: Uint8Array): Uint8Array {
-  return mqttPacket(MQTT.publish, 0, [...mqttString(topic), ...payload]);
+/** `retain` sets the RETAIN flag: only for a stored message sent on to a new subscriber (§3.3.1.3). */
+export function mqttPublish(topic: string, payload: Uint8Array, retain = false): Uint8Array {
+  return mqttPacket(MQTT.publish, retain ? 1 : 0, [...mqttString(topic), ...payload]);
 }
 
 /** The first complete packet in `buf`; null until it has all arrived. */
@@ -274,10 +276,32 @@ interface MqttSession {
 /** One broker per node, shared by every connection to its MQTT port. */
 export class MqttBroker {
   readonly #sessions = new Set<MqttSession>();
+  readonly #retained = new Map<string, Uint8Array>();
   readonly #ctx: ServiceContext;
 
   constructor(ctx: ServiceContext) {
     this.#ctx = ctx;
+  }
+
+  /**
+   * Fans a message out to every session subscribed to a matching filter, as the broker does for a
+   * client's PUBLISH; `from` is the name the serial line gives it. Returns how many sessions it wrote to.
+   */
+  publish(topic: string, payload: Uint8Array, retain: boolean, from: string): number {
+    this.#ctx.onSerial(`mqtt publish ${topic} "${decoder.decode(payload)}" from ${from}`);
+    if (retain) {
+      // A retained message with no payload clears the topic's (§3.3.1.3).
+      if (payload.length === 0) this.#retained.delete(topic);
+      else this.#retained.set(topic, payload);
+    }
+    let reached = 0;
+    for (const other of this.#sessions) {
+      if ([...other.filters].some((filter) => mqttTopicMatches(filter, topic))) {
+        void other.conn.write(mqttPublish(topic, payload)).catch(() => {});
+        reached++;
+      }
+    }
+    return reached;
   }
 
   serve(conn: TcpConnection): void {
@@ -337,19 +361,13 @@ export class MqttBroker {
         const payloadStart = qos > 0 ? afterTopic + 2 : afterTopic;
         const payload = body.slice(payloadStart);
         if (qos === 1) send(mqttPacket(MQTT.puback, 0, body.subarray(afterTopic, afterTopic + 2)));
-        this.#ctx.onSerial(
-          `mqtt publish ${topic} "${decoder.decode(payload)}" from ${session.clientId}`,
-        );
-        for (const other of this.#sessions) {
-          if ([...other.filters].some((filter) => mqttTopicMatches(filter, topic))) {
-            void other.conn.write(mqttPublish(topic, payload)).catch(() => {});
-          }
-        }
+        this.publish(topic, payload, (packet.flags & 1) === 1, session.clientId);
         return;
       }
       case MQTT.subscribe:
       case MQTT.unsubscribe: {
         const granted: number[] = [];
+        const added: string[] = [];
         let offset = 2;
         while (offset < body.length) {
           const [filter, next] = readString(body, offset);
@@ -357,6 +375,7 @@ export class MqttBroker {
           if (packet.type === MQTT.subscribe) {
             offset++; // requested QoS: everything is delivered at 0
             session.filters.add(filter);
+            added.push(filter);
             granted.push(0);
             this.#ctx.onSerial(`mqtt subscribe ${filter} from ${session.clientId}`);
           } else {
@@ -369,6 +388,11 @@ export class MqttBroker {
             ? mqttPacket(MQTT.suback, 0, [...id, ...granted])
             : mqttPacket(MQTT.unsuback, 0, id),
         );
+        for (const filter of added) {
+          for (const [topic, payload] of this.#retained) {
+            if (mqttTopicMatches(filter, topic)) send(mqttPublish(topic, payload, true));
+          }
+        }
         return;
       }
       case MQTT.pingreq:

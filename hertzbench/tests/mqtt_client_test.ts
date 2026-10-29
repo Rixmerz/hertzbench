@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { createRng, ManualClock, type TcpConnection, TcpHost } from "../engine/mod.ts";
 import {
+  BoardError,
   type LiveRun,
   loadScenario,
   parseScenario,
@@ -324,6 +325,8 @@ assertions:
 /** MQTT 3.1.1 written byte by byte, so the broker and the clients are not checked against their own encoder. */
 class RawMqtt {
   #buffer: number[] = [];
+  /** The RETAIN flag of the PUBLISH `nextPublish` returned last. */
+  lastRetain = false;
   constructor(readonly conn: Deno.TcpConn) {}
 
   async #fill(): Promise<void> {
@@ -340,7 +343,8 @@ class RawMqtt {
       const length = this.#buffer[1] as number; // every packet here is under 128 bytes
       while (this.#buffer.length < 2 + length) await this.#fill();
       const packet = this.#buffer.splice(0, 2 + length);
-      if (packet[0] !== 0x30) continue;
+      if (((packet[0] as number) & 0xf0) !== 0x30) continue;
+      this.lastRetain = ((packet[0] as number) & 1) === 1;
       const topicLength = ((packet[2] as number) << 8) | (packet[3] as number);
       const text = (bytes: number[]) => new TextDecoder().decode(Uint8Array.from(bytes));
       return `${text(packet.slice(4, 4 + topicLength))}=${text(packet.slice(4 + topicLength))}`;
@@ -411,4 +415,178 @@ Deno.test("mqtt clients: publishes reach subscribers and a phone through the bri
   assertStringIncludes(serial("broker").join("\n"), 'mqtt publish riego/estado "ON" from valve');
   assertStringIncludes(serial("broker").join("\n"), 'mqtt publish riego/cmd "HOST" from ph');
   await Deno.remove(out, { recursive: true });
+});
+
+// ── live publish through the broker node (the mqtt_publish tool) ────────────────────────────
+
+const LIVE_SCENARIO = `
+name: mqtt-live
+seed: 5
+duration: 20s
+environment: { preset: indoor_office, shadowing_sigma_db: 0 }
+nodes:
+  - id: broker
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware: { serve: [{ port: 1883, protocol: mqtt }, { port: 80, protocol: http }] }
+  - id: valve
+    board: scripted
+    position: [6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware: { subscribe: [{ to: broker, topic: 'riego/#' }] }
+bridge:
+  position: [3, 3]
+  expose:
+    - { node: broker, port: 1883, service: mqtt }
+`;
+
+/** Runs LIVE_SCENARIO and hands `body` the live run, once every board is up; stops the run after. */
+async function withLiveRun(body: (control: LiveRun) => Promise<void>): Promise<void> {
+  const out = await Deno.makeTempDir({ prefix: "hzb-mqtt-live-" });
+  const abort = new AbortController();
+  let underway: (live: LiveRun) => void = () => {};
+  const live = new Promise<LiveRun>((resolve) => (underway = resolve));
+  const run = runScenario(parseScenario(LIVE_SCENARIO), {
+    outDir: out,
+    outputs: {
+      metrics: `${out}/metrics.json`,
+      pcap: `${out}/air.pcap`,
+      events: `${out}/events.jsonl`,
+    },
+    onUnderway: underway,
+    signal: abort.signal,
+  });
+  run.catch(() => {}); // an aborted run rejects; the test is over by then
+  try {
+    await body(await live);
+  } finally {
+    abort.abort();
+    await run.catch(() => {});
+    await Deno.remove(out, { recursive: true });
+  }
+}
+
+async function waitForSerial(control: LiveRun, node: string, line: string): Promise<void> {
+  for (const until = Date.now() + 8000; Date.now() < until;) {
+    if (control.events().some((e) => e.type === "serial" && e.node === node && e.text === line)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`${node} never logged ${line}`);
+}
+
+/** A phone on the IP bridge: connects as `id` and subscribes to `filter`. */
+async function phoneOn(control: LiveRun, id: string, filter: string) {
+  const bridge = control.bridge();
+  assert(bridge?.kind === "ip");
+  const conn = await Deno.connect({
+    hostname: "127.0.0.1",
+    port: (bridge.endpoints[0] as { hostPort: number }).hostPort,
+  });
+  const connect = [0, 4, 77, 81, 84, 84, 4, 2, 0, 60, ...utf8(id)];
+  await conn.write(Uint8Array.of(0x10, connect.length, ...connect));
+  const subscribe = [0, 1, ...utf8(filter), 0];
+  await conn.write(Uint8Array.of(0x82, subscribe.length, ...subscribe));
+  await waitForSerial(control, "broker", `mqtt subscribe ${filter} from ${id}`);
+  return { conn, phone: new RawMqtt(conn) };
+}
+
+const bytes = (text: string) => new TextEncoder().encode(text);
+
+Deno.test("mqtt publish: a message from the broker node reaches a scripted subscriber and a phone on the bridge", async () => {
+  await withLiveRun(async (control) => {
+    await waitForSerial(control, "valve", "mqtt connected to broker");
+    const { conn, phone } = await phoneOn(control, "ph", "riego/#");
+
+    const reached = control.publishMqtt("broker", {
+      topic: "riego/bomba",
+      payload: bytes("ON"),
+      retain: false,
+      port: null,
+    });
+    assertEquals(reached, 2, "the valve's session and the phone's");
+    assertEquals(await phone.nextPublish(), "riego/bomba=ON");
+    assertEquals(phone.lastRetain, false, "a live delivery never carries the RETAIN flag");
+    await waitForSerial(control, "valve", "mqtt rx riego/bomba ON");
+    await waitForSerial(control, "broker", 'mqtt publish riego/bomba "ON" from mcp');
+
+    // A topic nobody subscribed to reaches no one, and is not an error.
+    assertEquals(
+      control.publishMqtt("broker", {
+        topic: "otro/tema",
+        payload: bytes("x"),
+        retain: false,
+        port: 1883,
+      }),
+      0,
+    );
+    conn.close();
+  });
+});
+
+Deno.test("mqtt publish: a retained message waits for a later subscriber, and an empty one clears it", async () => {
+  await withLiveRun(async (control) => {
+    await waitForSerial(control, "valve", "mqtt connected to broker");
+    const retained = (payload: string) =>
+      control.publishMqtt("broker", {
+        topic: "riego/estado",
+        payload: bytes(payload),
+        retain: true,
+        port: null,
+      });
+    assertEquals(retained("ON"), 1, "the valve is subscribed to riego/#, so it hears it now");
+    await waitForSerial(control, "valve", "mqtt rx riego/estado ON");
+
+    const late = await phoneOn(control, "late", "riego/+");
+    assertEquals(await late.phone.nextPublish(), "riego/estado=ON");
+    assertEquals(late.phone.lastRetain, true, "stored messages go out flagged as retained");
+    late.conn.close();
+
+    retained(""); // an empty retained payload clears the topic
+    const after = await phoneOn(control, "after", "riego/+");
+    // Nothing is stored now: the next thing this phone hears is a message published after it.
+    control.publishMqtt("broker", {
+      topic: "riego/estado",
+      payload: bytes("OFF"),
+      retain: false,
+      port: null,
+    });
+    assertEquals(await after.phone.nextPublish(), "riego/estado=OFF");
+    assertEquals(after.phone.lastRetain, false);
+    after.conn.close();
+  });
+});
+
+Deno.test("mqtt publish: a PUBLISH a client sends with RETAIN is kept for later subscribers", async () => {
+  await withLiveRun(async (control) => {
+    const sender = await phoneOn(control, "pub", "nada/#");
+    const publish = [...utf8("riego/modo"), ...bytes("AUTO")];
+    await sender.conn.write(Uint8Array.of(0x31, publish.length, ...publish));
+    await waitForSerial(control, "broker", 'mqtt publish riego/modo "AUTO" from pub');
+    const late = await phoneOn(control, "late", "riego/modo");
+    assertEquals(await late.phone.nextPublish(), "riego/modo=AUTO");
+    assertEquals(late.phone.lastRetain, true);
+    sender.conn.close();
+    late.conn.close();
+  });
+});
+
+Deno.test("mqtt publish: a node that is not a broker refuses, naming why", async () => {
+  await withLiveRun((control) => {
+    const publish = { topic: "t", payload: bytes("x"), retain: false, port: null };
+    assertThrows(
+      () => control.publishMqtt("valve", publish),
+      BoardError,
+      "valve serves no MQTT broker",
+    );
+    assertThrows(
+      () => control.publishMqtt("broker", { ...publish, port: 80 }),
+      BoardError,
+      "broker serves no MQTT broker on port 80 (its MQTT ports: 1883)",
+    );
+    assertThrows(() => control.publishMqtt("nobody", publish), BoardError, "not a board");
+    return Promise.resolve();
+  });
 });

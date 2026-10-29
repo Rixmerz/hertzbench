@@ -5,7 +5,14 @@
 import { join } from "node:path";
 import { writeFakePython } from "./platform.ts";
 import { assert, assertAlmostEquals, assertEquals, assertStringIncludes } from "@std/assert";
-import { EXAMPLES, type Json, pollMetrics, pollStatus, withServer } from "./mcp_client.ts";
+import {
+  EXAMPLES,
+  type Json,
+  McpClient,
+  pollMetrics,
+  pollStatus,
+  withServer,
+} from "./mcp_client.ts";
 
 const LIVE = `${EXAMPLES}live-3-scripted.yaml`;
 
@@ -450,6 +457,253 @@ Deno.test("mcp drive: get_report gives the CLI's report once the run has finishe
     const { report } = await client.ok("get_report");
     assertStringIncludes(report, "pair  (seed 5, 2000 ms)");
     assertStringIncludes(report, "RESULT: PASS");
+  });
+});
+
+const PAYLOADS = `name: payloads
+seed: 5
+duration: 60s
+environment: { shadowing_sigma_db: 0 }
+nodes:
+  - id: broker
+    board: scripted
+    position: [0, 0]
+    firmware: { serve: [{ port: 1883, protocol: mqtt }, { port: 80, protocol: http }] }
+  - id: valve
+    board: scripted
+    position: [6, 0]
+    firmware: { subscribe: [{ to: broker, topic: 'riego/#' }] }
+  - { id: panel, board: scripted, position: [-6, 0], firmware: {} }
+`;
+
+/** Poll get_serial until `node` has printed a line containing `text`; fails instead of hanging. */
+async function serialContains(client: McpClient, node: string, text: string): Promise<string[]> {
+  const deadline = performance.now() + 10_000;
+  for (;;) {
+    const lines = (await client.ok("get_serial", { node })).lines.map((l: Json) => l.text);
+    if (lines.some((line: string) => line.includes(text))) return lines;
+    if (performance.now() > deadline) {
+      throw new Error(`${node} never printed ${text}: ${JSON.stringify(lines)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+async function runPayloads(client: McpClient): Promise<void> {
+  await client.ok("create_scenario", { path: "payloads.yaml", yaml: PAYLOADS });
+  await client.ok("run_scenario", { path: "payloads.yaml" });
+  await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+  await serialContains(client, "valve", "mqtt connected to broker");
+}
+
+Deno.test("mcp drive: mqtt_publish publishes through the broker node to a subscribed board, retained or not", async () => {
+  await withServer(async (client) => {
+    await runPayloads(client);
+
+    const sent = await client.ok("mqtt_publish", {
+      node: "broker",
+      topic: "riego/bomba",
+      payload: "ON",
+    });
+    assertEquals(
+      [sent.node, sent.topic, sent.bytes, sent.retain, sent.delivered_to],
+      ["broker", "riego/bomba", 2, false, 1],
+    );
+    await serialContains(client, "valve", "mqtt rx riego/bomba ON");
+    await serialContains(client, "broker", 'mqtt publish riego/bomba "ON" from mcp');
+
+    // Retained, on the one MQTT port of the node (given explicitly this time).
+    const kept = await client.ok("mqtt_publish", {
+      node: "broker",
+      topic: "riego/estado",
+      payload: "REGANDO",
+      retain: true,
+      port: 1883,
+    });
+    assertEquals([kept.retain, kept.delivered_to], [true, 1]);
+    await serialContains(client, "valve", "mqtt rx riego/estado REGANDO");
+    // A topic nobody follows reaches no session; an empty retained payload is allowed.
+    assertEquals(
+      (await client.ok("mqtt_publish", { node: "broker", topic: "x/y", payload: "" }))
+        .delivered_to,
+      0,
+    );
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: mqtt_publish refuses a node that is not a broker, and bad arguments", async () => {
+  await withServer(async (client) => {
+    const publish = { topic: "riego/bomba", payload: "ON" };
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "broker", ...publish }),
+      "no run yet",
+    );
+    await runPayloads(client);
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "valve", ...publish }),
+      "valve serves no MQTT broker",
+    );
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "broker", port: 80, ...publish }),
+      "broker serves no MQTT broker on port 80 (its MQTT ports: 1883)",
+    );
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "zz", ...publish }),
+      "no node named",
+    );
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "broker", topic: "a/+", payload: "x" }),
+      "no + or # wildcard",
+    );
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "broker", topic: "t", payload: 1 }),
+      "payload must be a string",
+    );
+    assertStringIncludes(
+      await client.refused("mqtt_publish", {
+        node: "broker",
+        topic: "t",
+        payload: "x".repeat(4097),
+      }),
+      "at most 4096 bytes",
+    );
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: send_payload makes a scripted board send once by udp, espnow and mqtt", async () => {
+  await withServer(async (client) => {
+    await runPayloads(client);
+
+    const udp = await client.ok("send_payload", {
+      node: "panel",
+      to: "valve",
+      via: "udp",
+      payload: "hola",
+    });
+    assertEquals([udp.node, udp.to, udp.via, udp.bytes], ["panel", "valve", "udp", 4]);
+    await serialContains(client, "valve", "rx hola from panel");
+
+    await client.ok("send_payload", { node: "panel", to: "valve", via: "espnow", payload: "e1" });
+    await serialContains(client, "valve", "espnow rx e1 from panel");
+    await serialContains(client, "panel", "espnow tx ok to valve");
+    await client.ok("send_payload", {
+      node: "panel",
+      to: "broadcast",
+      via: "espnow",
+      payload: "todos",
+    });
+    await serialContains(client, "valve", "espnow rx todos from panel");
+
+    // `panel` has no MQTT in its script: the call opens a session to the broker, then publishes.
+    const mqtt = await client.ok("send_payload", {
+      node: "panel",
+      to: "broker",
+      via: "mqtt",
+      topic: "riego/cmd",
+      payload: "ABRIR",
+    });
+    assertEquals([mqtt.via, mqtt.topic], ["mqtt", "riego/cmd"]);
+    await serialContains(client, "valve", "mqtt rx riego/cmd ABRIR");
+    await serialContains(client, "broker", 'mqtt publish riego/cmd "ABRIR" from panel');
+    // The session stays open: a second send needs no waiting and reaches the same subscriber.
+    await client.ok("send_payload", {
+      node: "panel",
+      to: "broker",
+      via: "mqtt",
+      topic: "riego/cmd",
+      payload: "CERRAR",
+    });
+    await serialContains(client, "valve", "mqtt rx riego/cmd CERRAR");
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: send_payload refuses what the board cannot send, naming the field", async () => {
+  await withServer(async (client) => {
+    const udp = { node: "panel", to: "valve", via: "udp", payload: "x" };
+    assertStringIncludes(await client.refused("send_payload", udp), "no run yet");
+    await runPayloads(client);
+    const cases: [Record<string, unknown>, string][] = [
+      [{ ...udp, to: "zz" }, "no node named"],
+      [{ ...udp, node: "zz" }, "no node named"],
+      [{ ...udp, to: "panel" }, "cannot send to itself"],
+      [{ ...udp, to: "broadcast" }, '"broadcast" needs via: espnow'],
+      [{ ...udp, via: "frob" }, "via must be one of udp, espnow, mqtt, gatt"],
+      [{ ...udp, topic: "t" }, "topic needs via: mqtt"],
+      [{ ...udp, via: "espnow", port: 5000 }, "ESP-NOW has no ports"],
+      [{ ...udp, via: "gatt" }, "panel is a Wi-Fi board"],
+      [{ ...udp, via: "gatt", port: 5000 }, "GATT has no ports"],
+      [{ ...udp, via: "espnow", payload: "x".repeat(251) }, "at most 250 bytes"],
+      [{ ...udp, payload: "x".repeat(1473) }, "at most 1472 bytes"],
+      [{ ...udp, payload: "" }, "payload must be a non-empty string"],
+      [{ ...udp, via: "mqtt" }, "topic: expected a non-empty string"],
+      [{ ...udp, via: "mqtt", topic: "a/#" }, "no + or # wildcard"],
+      [{ ...udp, via: "mqtt", topic: "t" }, "valve serves no MQTT broker on port 1883"],
+      [
+        { ...udp, to: "broker", via: "mqtt", topic: "t", port: 80 },
+        "serves no MQTT broker on port 80",
+      ],
+    ];
+    for (const [args, message] of cases) {
+      assertStringIncludes(await client.refused("send_payload", args), message);
+    }
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: send_payload sends over a BLE connection from either end, and refuses without one", async () => {
+  await withServer(async (client) => {
+    await client.ok("run_scenario", { path: `${EXAMPLES}ble-sensors-scripted.yaml` });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    await serialContains(client, "gw", "ble connected to sensor-1 as central");
+    await serialContains(client, "sensor-1", "ble connected to gw as peripheral");
+
+    // The central writes to a peripheral; the peripheral notifies the central.
+    const write = await client.ok("send_payload", {
+      node: "gw",
+      to: "sensor-1",
+      via: "gatt",
+      payload: "hola",
+    });
+    assertEquals([write.node, write.to, write.via, write.bytes], ["gw", "sensor-1", "gatt", 4]);
+    await serialContains(client, "sensor-1", 'ble rx "hola" from gw');
+    await client.ok("send_payload", { node: "sensor-1", to: "gw", via: "gatt", payload: "pong" });
+    await serialContains(client, "gw", 'ble rx "pong" from sensor-1');
+
+    const ble = { node: "gw", to: "sensor-1", via: "gatt", payload: "x" };
+    for (
+      const [args, message] of [
+        [{ ...ble, payload: "x".repeat(21) }, "at most 20 bytes"],
+        [{ ...ble, node: "sensor-2" }, "sensor-2 is not connected to sensor-1"],
+        [{ ...ble, via: "udp" }, "gw is a BLE board: it sends via: gatt, not udp"],
+      ] as [Record<string, unknown>, string][]
+    ) {
+      assertStringIncludes(await client.refused("send_payload", args), message);
+    }
+    await client.ok("stop");
+  });
+});
+
+Deno.test("mcp drive: mqtt_publish and send_payload refuse a board that is not scripted Wi-Fi", async () => {
+  await withServer(async (client) => {
+    await client.ok("run_scenario", { path: `${EXAMPLES}lora-gateway-6-scripted.yaml` });
+    await pollStatus(client, (s) => s.state === "running", "the boards to connect");
+    assertStringIncludes(
+      await client.refused("mqtt_publish", { node: "gw", topic: "t", payload: "x" }),
+      "gw is a scripted board on lora: this needs a scripted Wi-Fi board serving MQTT",
+    );
+    assertStringIncludes(
+      await client.refused("send_payload", {
+        node: "node-1",
+        to: "gw",
+        via: "udp",
+        payload: "x",
+      }),
+      "node-1 is a scripted board on lora: this needs a scripted Wi-Fi or BLE board",
+    );
+    await client.ok("stop");
   });
 });
 
