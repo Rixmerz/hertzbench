@@ -11,6 +11,7 @@
 
 import {
   BROADCAST_MAC,
+  buildArp,
   buildDhcpClientMessage,
   buildEspNowBody,
   buildUdp,
@@ -19,6 +20,7 @@ import {
   DHCPREQUEST,
   ESPNOW_ACK_TIMEOUT_MS,
   ipToString,
+  parseArp,
   parseEspNowBody,
   parseEthernet,
   parseIpv4,
@@ -194,7 +196,8 @@ class ScriptedBoard implements RunningBoard {
     const ip = parseIpv4(frame);
     const eth = parseEthernet(frame);
     if (ip && eth && ip.src !== "0.0.0.0") this.#neighbors.set(ip.src, eth.src);
-    if (this.#tcp?.receive(frame)) return;
+    if (this.#tcp?.receive(frame)) return; // it answers ARP for the lease itself when it serves
+    if (this.#answerArp(frame)) return;
     if (!ip) return;
     const udp = parseUdp(frame, ip);
     if (!udp) return;
@@ -214,6 +217,20 @@ class ScriptedBoard implements RunningBoard {
         payload: new TextEncoder().encode(`pong${text.slice(4)}`),
       }));
     }
+  }
+
+  /** Who-has for the leased address: a guest cannot send to a board that never says where it is. */
+  #answerArp(frame: Uint8Array): boolean {
+    const arp = parseArp(frame);
+    if (!arp || arp.operation !== 1 || this.#ip === null || arp.targetIp !== this.#ip) return false;
+    this.#send(buildArp({
+      operation: 2,
+      senderMac: this.#ctx.node.mac,
+      senderIp: this.#ip,
+      targetMac: arp.senderMac,
+      targetIp: arp.senderIp,
+    }));
+    return true;
   }
 
   #onDhcp(bootp: Uint8Array): void {

@@ -41,7 +41,15 @@ import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
 import { createEsp32Launcher, resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { scriptedLauncher } from "../orchestrator/boards/scripted.ts";
 import { encodeFrame, FrameDecoder } from "../adapters/qemu-wifi-l2/mod.ts";
-import { BROADCAST_MAC, buildUdp, parseIpv4, parseUdp, VirtualGateway } from "../engine/mod.ts";
+import {
+  BROADCAST_MAC,
+  buildArp,
+  buildUdp,
+  parseArp,
+  parseIpv4,
+  parseUdp,
+  VirtualGateway,
+} from "../engine/mod.ts";
 import { until } from "./helpers.ts";
 import {
   type BoardContext,
@@ -3361,6 +3369,36 @@ Deno.test("scripted board: it answers pings from peers, logs other datagrams, ig
     // The pong goes back to the sender's port, and only to a known peer.
     assertEquals(rig.udpPayloads("192.168.4.12"), ["pong:7"]);
     assertEquals(rig.udpPayloads("192.168.4.99"), []);
+  });
+});
+
+Deno.test("scripted board: it answers ARP for its own IP only, once it has one", async () => {
+  await withScriptedBoard(wifiDoc(), async (rig) => {
+    const guest = { mac: "02:00:00:00:00:99", ip: "192.168.4.99" };
+    const ask = (targetIp: string) =>
+      buildArp({
+        operation: 1,
+        senderMac: guest.mac,
+        senderIp: guest.ip,
+        targetMac: "00:00:00:00:00:00",
+        targetIp,
+      });
+    const arpReplies = () =>
+      rig.frames.flatMap((f) => {
+        const arp = parseArp(f);
+        return arp && arp.operation === 2 ? [arp] : [];
+      });
+    await rig.bind();
+    await rig.send(ask("192.168.4.13")); // someone else's address
+    await rig.send(ask("192.168.4.11")); // this board's lease
+    await until(() => arpReplies().length > 0, "an ARP reply from the board");
+    assertEquals(arpReplies(), [{
+      operation: 2,
+      senderMac: "02:68:7a:62:01:01",
+      senderIp: "192.168.4.11",
+      targetMac: guest.mac,
+      targetIp: guest.ip,
+    }]);
   });
 });
 
