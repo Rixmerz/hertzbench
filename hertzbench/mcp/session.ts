@@ -281,7 +281,10 @@ export class Session {
     return run;
   }
 
-  /** Stop the run in progress. Boards are stopped; no output files are written. */
+  /**
+   * Stop the run in progress. Boards are stopped and the files stay as they were written so far,
+   * with a metrics.json marked interrupted.
+   */
   async stop(): Promise<Run> {
     const run = this.#active("stop");
     this.#freeze(run);
@@ -370,7 +373,10 @@ export class Session {
     }
     if (run.state === "failed") return { ...base, error: run.error };
     if (run.state === "stopped") {
-      return { ...base, note: "stopped before the end: no output files, assertions not judged" };
+      return {
+        ...base,
+        note: "stopped before the end: partial files are in out_dir, assertions not judged",
+      };
     }
     return base;
   }

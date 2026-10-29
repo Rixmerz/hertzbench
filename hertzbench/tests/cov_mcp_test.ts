@@ -565,8 +565,20 @@ Deno.test("cov mcp: after stop and after the end, the live tools refuse with the
     await pollStatus(client, (s) => s.state === "running", "the boards to connect");
     const stopped = await client.ok("stop");
     assertEquals(stopped.state, "stopped");
-    assertStringIncludes(stopped.note, "no output files");
-    assertEquals(await listDir(stopped.out_dir), [], "stop writes no output file");
+    assertStringIncludes(stopped.note, "partial");
+    assertStringIncludes(stopped.note, "assertions not judged");
+    // The run's files are closed where it was stopped, and its report says it is partial.
+    assertEquals(await listDir(stopped.out_dir), [
+      "air.pcap",
+      "events.jsonl",
+      "metrics.json",
+      "serial-a.log",
+      "serial-b.log",
+      "serial-s-1.log",
+      "serial-s-2.log",
+    ]);
+    const report = JSON.parse(await Deno.readTextFile(`${stopped.out_dir}/metrics.json`));
+    assertEquals([report.interrupted, report.passed], [true, false]);
     for (const [tool, args] of RUN_TOOLS) {
       assertStringIncludes(
         await refusal(client, tool, args),

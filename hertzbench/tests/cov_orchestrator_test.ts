@@ -2064,6 +2064,7 @@ function resultOf(
     assertions,
     problems: [],
     passed: assertions.every((a) => a.passed),
+    interrupted: false,
     files: [],
     bridge: null,
     ...extra,
@@ -2491,6 +2492,12 @@ Deno.test("runner: boards that never connect time out with the start-up message"
   });
 });
 
+/** The pcap file header: the magic number and the link type, 24 bytes in all. */
+function assertPcapHeader(bytes: Uint8Array, linkType: number): void {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  assertEquals([view.getUint32(0, true), view.getUint32(20, true)], [0xa1b2c3d4, linkType]);
+}
+
 Deno.test("runner: an already aborted signal interrupts the run before it starts", async () => {
   await withTempDir(async (dir) => {
     const boards = fakeBoards();
@@ -2500,14 +2507,20 @@ Deno.test("runner: an already aborted signal interrupts the run before it starts
       () => runScenario(shortRun(), runOptions(dir, boards, { signal: abort.signal })),
       RunInterrupted,
     );
-    // Nothing was written: an interrupted run has no results.
-    assertEquals([...Deno.readDirSync(dir)].map((e) => e.name), []);
+    // An interrupted run still closes its files: an empty log, a capture holding only its
+    // header, and a report that says it is partial.
+    assertEquals(await Deno.readTextFile(`${dir}/events.jsonl`), "");
+    const pcap = await Deno.readFile(`${dir}/air.pcap`);
+    assertEquals(pcap.length, 24);
+    assertPcapHeader(pcap, 1);
+    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/m/metrics.json`));
+    assertEquals([metrics.interrupted, metrics.passed, metrics.assertions], [true, false, []]);
   });
 });
 
-Deno.test("runner: aborting mid-run stops every board and writes nothing", async () => {
+Deno.test("runner: aborting mid-run stops every board and keeps what the run had produced", async () => {
   await withTempDir(async (dir) => {
-    const boards = fakeBoards();
+    const boards = fakeBoards((ctx) => ctx.onSerial(`boot ${ctx.node.id}`));
     const abort = new AbortController();
     await assertRejects(
       () =>
@@ -2521,7 +2534,67 @@ Deno.test("runner: aborting mid-run stops every board and writes nothing", async
       RunInterrupted,
     );
     assertEquals(boards.stopped.sort(), ["a", "b"]);
-    assertEquals([...Deno.readDirSync(dir)].filter((e) => e.isFile).map((e) => e.name), []);
+    for (const id of ["a", "b"]) {
+      assertStringIncludes(await Deno.readTextFile(`${dir}/serial-${id}.log`), `boot ${id}\n`);
+    }
+    const events = (await Deno.readTextFile(`${dir}/events.jsonl`)).trimEnd().split("\n")
+      .map((line) => JSON.parse(line));
+    assertEquals(
+      events.filter((e) => e.type === "serial").map((e) => e.text).sort(),
+      ["boot a", "boot b"],
+    );
+    assertPcapHeader(await Deno.readFile(`${dir}/air.pcap`), 1);
+    const metrics = JSON.parse(await Deno.readTextFile(`${dir}/m/metrics.json`));
+    assertEquals([metrics.interrupted, metrics.passed, metrics.assertions], [true, false, []]);
+  });
+});
+
+Deno.test("runner: serial lines, events and the capture are in their files while the run plays", async () => {
+  await withTempDir(async (dir) => {
+    const boards = fakeBoards((ctx) => ctx.onSerial(`boot ${ctx.node.id}`));
+    const abort = new AbortController();
+    const seen: Record<string, string> = {};
+    await assertRejects(
+      () =>
+        runScenario(
+          shortRun(() => {}, 60_000),
+          runOptions(dir, boards, {
+            signal: abort.signal,
+            onUnderway: () => {
+              // Time zero: the boot lines are already on disk, and so is the capture header.
+              seen.boot = Deno.readTextFileSync(`${dir}/serial-a.log`);
+              seen.pcapBytes = String(Deno.statSync(`${dir}/air.pcap`).size);
+              // A line that arrives now is on disk before the next statement, not at the end.
+              boards.contexts.find((c) => c.node.id === "a")!.onSerial("a line mid-run");
+              seen.after = Deno.readTextFileSync(`${dir}/serial-a.log`);
+              seen.events = Deno.readTextFileSync(`${dir}/events.jsonl`);
+              abort.abort();
+            },
+          }),
+        ),
+      RunInterrupted,
+    );
+    assertStringIncludes(seen.boot!, "boot a\n");
+    assert(!seen.boot!.includes("a line mid-run"));
+    assertEquals(seen.pcapBytes, "24");
+    assertStringIncludes(seen.after!, "boot a\n");
+    assertStringIncludes(seen.after!, "a line mid-run\n");
+    assertStringIncludes(seen.events!, '"text":"a line mid-run"');
+  });
+});
+
+Deno.test("runner: a run that fails during start-up leaves the boot lines the boards printed", async () => {
+  await withTempDir(async (dir) => {
+    const boards = fakeBoards((ctx) => ctx.onSerial(`booting ${ctx.node.id}`), { connect: false });
+    await assertRejects(
+      () => runScenario(shortRun(), runOptions(dir, boards, { startupTimeoutMs: 100 })),
+      BoardError,
+    );
+    assertStringIncludes(await Deno.readTextFile(`${dir}/serial-a.log`), "booting a\n");
+    assertStringIncludes(await Deno.readTextFile(`${dir}/events.jsonl`), '"text":"booting b"');
+    assertPcapHeader(await Deno.readFile(`${dir}/air.pcap`), 1);
+    // A failed run is not an interrupted one: it has no report to be partial.
+    await assertRejects(() => Deno.stat(`${dir}/m/metrics.json`), Deno.errors.NotFound);
   });
 });
 

@@ -58,6 +58,7 @@ import { scriptedLauncher } from "./boards/scripted.ts";
 import { MediumClock } from "./medium-clock.ts";
 import { describeRadio, type NodeRadio } from "./radios.ts";
 import { metricsDocument } from "./report.ts";
+import { RunArtifacts } from "./run-artifacts.ts";
 import {
   type AndroidApp,
   type BoardKind,
@@ -88,7 +89,10 @@ export interface RunOptions {
   startupTimeoutMs?: number;
   /** Progress lines for the person running the CLI. */
   progress?: (line: string) => void;
-  /** Abort to end the run early: boards are stopped and the run rejects with RunInterrupted. */
+  /**
+   * Abort to end the run early: boards are stopped, what the run had produced stays in its files
+   * (with a metrics.json marked `interrupted`) and the run rejects with RunInterrupted.
+   */
   signal?: AbortSignal;
   /** Called once, at time zero, with live control over the run (the MCP server's live tools). */
   onUnderway?: (run: LiveRun) => void;
@@ -137,7 +141,7 @@ export interface LiveRun {
   /** One send from a scripted Wi-Fi or BLE node. Throws BoardError when the node cannot make it. */
   sendPayload(id: string, send: LiveSend): Promise<void>;
   /**
-   * A capture of the run so far, as the run writes it at the end: `pcap` the
+   * A capture of the run so far, as the run writes it: `pcap` the
    * air (air.pcap), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi only),
    * `btsnoop` one BLE node's HCI. Null when this run has no such capture.
    */
@@ -176,6 +180,8 @@ export interface RunResult {
   problems: string[];
   /** Every assertion passed and no board or adapter problem was reported. */
   passed: boolean;
+  /** The run was cut short: `metrics` cover what it had by then, and the assertions were not judged. */
+  interrupted: boolean;
   files: string[];
   bridge: BridgeReport | null;
 }
@@ -276,6 +282,13 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     })
     : createAirNetwork(scenario, { ...networkContext, hooks: options.bridge ?? {} });
   const { medium, ports } = network;
+  // The files grow while the run plays, so one that ends any way at all keeps what it had made.
+  const artifacts = new RunArtifacts(log, {
+    outDir: options.outDir,
+    pcap: options.outputs.pcap,
+    events: options.outputs.events,
+  }, reportProblem);
+  log.listen((event) => artifacts.record(event));
 
   const indexOf = (id: string) => scenario.nodes.findIndex((n) => n.id === id) + 1;
   const bridgePeer: PeerInfo[] = scenario.bridge
@@ -306,8 +319,12 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   // Logged times are raw clock readings, so the log never steps backwards.
   // Time zero of the scenario is the instant every netdev has connected;
   // everything the scenario measures (timeline, duration, phases, `within`)
-  // is relative to it, and the log is shifted by it at the end.
+  // is relative to it, and the log is shifted by it when it is written.
   let zeroMs = 0;
+  let zeroReached = false;
+  // Set when the run is cut short; `stoppedAtMs` is the clock then.
+  let cutShort: RunInterrupted | null = null;
+  let stoppedAtMs = 0;
   // Boards still starting when the run is cut short must be waited for, or they
   // would come up after the cleanup below and nobody would stop them.
   let startAll: Promise<PromiseSettledResult<void>[]> = Promise.resolve([]);
@@ -361,6 +378,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   };
 
   try {
+    artifacts.streamPcap(network.pcap);
     progress(`starting ${scenario.nodes.length} board(s)`);
     // allSettled, not all: a board that fails must not leave its siblings
     // half-started and unowned while the first rejection unwinds the run.
@@ -435,6 +453,8 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     }
     startupOver = true;
     zeroMs = clock.now();
+    zeroReached = true;
+    artifacts.startAt(zeroMs);
     if (network.bridge) {
       try {
         await network.bridge.start();
@@ -570,28 +590,44 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       interrupted,
       runFailed,
     ]);
+  } catch (error) {
+    // Interrupted: the run is wound down like any other, then reports what it had.
+    if (!(error instanceof RunInterrupted)) throw error;
+    cutShort = error;
+    stoppedAtMs = clock.now();
   } finally {
     ended = true;
     endLive();
     startupOver = true;
-    await startAll;
-    await Promise.allSettled([...intents]);
-    await stopAll();
-    await Promise.allSettled([...instrumentations]);
-    await network.bridge?.close();
-    await network.close();
-    medium.close();
-    clock.cancelAll();
+    try {
+      await startAll;
+      await Promise.allSettled([...intents]);
+      await stopAll();
+      await Promise.allSettled([...instrumentations]);
+      await network.bridge?.close();
+      await network.close();
+      medium.close();
+      clock.cancelAll();
+    } finally {
+      // Nothing is logged after this: the files end where the result's events do.
+      artifacts.close();
+    }
   }
 
   const events = log.events.map((event) => ({ ...event, t: event.t - zeroMs }));
-  const metrics = computeMetrics(events, scenario.durationMs);
+  const elapsedMs = zeroReached
+    ? Math.min(Math.max(stoppedAtMs - zeroMs, 0), scenario.durationMs)
+    : 0;
+  const metrics = computeMetrics(events, cutShort ? elapsedMs : scenario.durationMs);
   metrics.warnings.push(
     ...network.warnings,
     ...declaredMismatches(scenario, events),
     ...boardLimitWarnings(scenario.nodes, events),
   );
-  const assertions = evaluateAssertions(scenario.assertions, events, metrics.phases);
+  // What a run cut short did not get to do cannot be judged: it reports no assertions.
+  const assertions = cutShort
+    ? []
+    : evaluateAssertions(scenario.assertions, events, metrics.phases);
   const nodes = scenario.nodes.map((node): NodeReport => ({
     id: node.id,
     board: node.board,
@@ -612,11 +648,13 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     metrics,
     assertions,
     problems,
-    passed: problems.length === 0 && assertions.every((a) => a.passed),
+    passed: cutShort === null && problems.length === 0 && assertions.every((a) => a.passed),
+    interrupted: cutShort !== null,
     files: [],
     bridge: network.bridge?.report() ?? null,
   };
-  result.files = await writeOutputs(result, options, network);
+  result.files = await writeOutputs(result, options, network, artifacts.files());
+  if (cutShort) throw cutShort;
   return result;
 }
 
@@ -796,8 +834,9 @@ async function writeOutputs(
   result: RunResult,
   options: RunOptions,
   network: NetworkSetup,
+  streamed: ReturnType<RunArtifacts["files"]>,
 ): Promise<string[]> {
-  const { pcap, dot11Pcap } = network;
+  const { dot11Pcap } = network;
   const files: string[] = [];
   const write = async (path: string, data: string | Uint8Array) => {
     await ensureParentDir(path);
@@ -806,28 +845,18 @@ async function writeOutputs(
     files.push(path);
   };
   await write(options.outputs.metrics, JSON.stringify(metricsDocument(result), null, 2) + "\n");
-  await write(options.outputs.pcap, pcap.toBytes());
+  // air.pcap, events.jsonl and the serial logs were written while the run played; the rest of
+  // the captures are small and are written from memory here.
+  if (streamed.pcap) files.push(streamed.pcap);
   if (dot11Pcap && dot11Pcap.packetCount > 0) {
     await write(dot11CapturePath(options.outputs.pcap), dot11Pcap.toBytes());
   }
-  await write(
-    options.outputs.events,
-    result.events.map((e) => JSON.stringify(e)).join("\n") + (result.events.length ? "\n" : ""),
-  );
+  if (streamed.events) files.push(streamed.events);
   for (const [node, snoop] of network.hciCaptures ?? []) {
     if (snoop.packetCount > 0) {
       await write(join(options.outDir, `hci-${node}.btsnoop`), snoop.toBytes());
     }
   }
-  const serialByNode = new Map<string, string[]>();
-  for (const event of result.events) {
-    if (event.type !== "serial") continue;
-    const lines = serialByNode.get(event.node) ?? [];
-    lines.push(`[${(event.t / 1000).toFixed(3)}s] ${event.text}`);
-    serialByNode.set(event.node, lines);
-  }
-  for (const [node, lines] of serialByNode) {
-    await write(join(options.outDir, `serial-${node}.log`), lines.join("\n") + "\n");
-  }
+  files.push(...streamed.serial);
   return files;
 }

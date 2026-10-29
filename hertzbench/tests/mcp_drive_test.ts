@@ -107,7 +107,7 @@ Deno.test("mcp drive: export_capture writes the air mid-run and after stop, insi
     assertEquals(new DataView(bytes.buffer).getUint32(0, true), 0xa1b2c3d4, "pcap magic");
 
     await client.ok("stop");
-    // A stopped run writes no files of its own; the capture is still there to take.
+    // The capture of a stopped run can still be taken from memory, to any path.
     const after = await client.ok("export_capture", { kind: "pcap", path: "kept/air.pcap" });
     assertEquals([after.file, after.state], [join(workspace, "kept", "air.pcap"), "stopped"]);
     assert(after.packets >= live.packets);

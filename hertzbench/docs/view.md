@@ -38,7 +38,8 @@ hertzbench view <scenario.yaml> [--port N] [--out DIR] [--seed N]
   `hertzbench run`. Without it they go to `out/<scenario>/<run id>/` in the current directory.
 - When the run ends, the report is printed, the output files are written and the page keeps showing
   the finished run until Ctrl-C. Ctrl-C during the run stops every board first and, as with
-  `hertzbench run`, writes **no** output file and judges no assertion.
+  `hertzbench run`, keeps the files the run had written, with a `metrics.json` marked
+  `interrupted`, and judges no assertion.
 - Exit status 2 for an invalid scenario or a port in use, 0 otherwise. The view never fails on an
   assertion: use `hertzbench run` in CI.
 

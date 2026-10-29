@@ -26,7 +26,7 @@ busy, the old assertion failed 4 of 5 runs and the file now passes 29 of 30.
 
 | Test | What it checks | Why it cannot run there | Where it runs |
 | ---- | -------------- | ----------------------- | ------------- |
-| `SIGINT: the CLI stops the run, exits 130 ...` (`tests/cli_test.ts`) | Ctrl-C ends a run through the runner and writes nothing | A child process cannot be sent SIGINT or SIGTERM from Deno on Windows; `kill()` ends it without its handlers | Linux, macOS |
+| `SIGINT: the CLI stops the run, exits 130 ...` (`tests/cli_test.ts`) | Ctrl-C ends a run through the runner and keeps the files it had written | A child process cannot be sent SIGINT or SIGTERM from Deno on Windows; `kill()` ends it without its handlers | Linux, macOS |
 | `mcp: SIGINT and SIGTERM stop the run ...` (`tests/mcp_test.ts`) | The MCP server stops its run on a signal | same | Linux, macOS |
 | `cli: view runs the scenario ... exits 0 on SIGINT` (`tests/cov_cli_test.ts`) | `hertzbench view` shuts down on a signal | same | Linux, macOS |
 | `view: serves the live map ... stops on SIGINT` (`tests/view_test.ts`) | The view process stops on a signal | same | Linux, macOS |
