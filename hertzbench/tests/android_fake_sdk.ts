@@ -4,7 +4,7 @@
 import { delimiter, join } from "node:path";
 import { buildDhcpClientMessage, DHCPDISCOVER } from "../engine/mod.ts";
 
-/** A temp dir holding fake tools; `adbCase` is the body of the fake adb's `case "$cmd"`. */
+/** A temp dir holding fake tools; `adbCases` is the body of the fake adb's `case "$cmd"` (`$serial` is the device). */
 export async function fakeSdk(
   adbCases: string,
   emulatorBody = 'echo "$@" > "$DIR/emulator-args"; echo $$ > "$DIR/emulator-pid"; exec sleep 60',
@@ -25,6 +25,7 @@ ${emulatorBody}
     `#!/bin/sh
 DIR="$(dirname "$0")"
 echo "$@" >> "$DIR/adb-calls"
+serial="$2"
 shift 2
 cmd="$1"; shift
 case "$cmd" in
@@ -103,3 +104,84 @@ export function fakeGuestSdk(adbCases: string, guestMac: string, guest = FAKE_GU
     }
   });
 }
+
+/**
+ * What each guest of a snapshot boot does: read its MAC from `-wifi-mac-address`, send a DHCP
+ * DISCOVER from it on the `-wifi-socket` port, and keep the first reply in `reply-<mac>.hex`.
+ * Its arguments are saved in `emulator-args-<mac>`.
+ */
+const snapshotGuest = (engine: string) => `
+import { buildDhcpClientMessage, DHCPDISCOVER } from ${JSON.stringify(engine)};
+const [dir, ...args] = Deno.args;
+const value = (flag) => args[args.indexOf(flag) + 1];
+const mac = value("-wifi-mac-address");
+const port = Number(value("-wifi-socket").split(":").pop());
+await Deno.writeTextFile(dir + "/emulator-args-" + mac, args.join(" "));
+const frame = buildDhcpClientMessage(mac, DHCPDISCOVER, 0x1234);
+const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+const out = new Uint8Array(4 + frame.length);
+new DataView(out.buffer).setUint32(0, frame.length);
+out.set(frame, 4);
+await conn.write(out);
+let pending = new Uint8Array(0);
+let replied = false;
+for await (const chunk of conn.readable) {
+  const joined = new Uint8Array(pending.length + chunk.length);
+  joined.set(pending);
+  joined.set(chunk, pending.length);
+  pending = joined;
+  if (!replied && pending.length >= 4) {
+    const length = new DataView(pending.buffer).getUint32(0);
+    if (pending.length >= 4 + length) {
+      const reply = pending.slice(4, 4 + length);
+      await Deno.writeTextFile(dir + "/reply-" + mac + ".hex", Array.from(reply, (b) => b.toString(16).padStart(2, "0")).join(""));
+      replied = true;
+    }
+  }
+}
+`;
+
+/**
+ * A fake SDK whose emulators are Deno processes standing in for snapshot-booted guests (see
+ * `snapshotGuest`), as many as the run starts. Each writes its pid to `emulator-pid-<console port>`,
+ * which is what `$serial` of the fake adb ends in, so `adb -s emulator-N emu kill` ends the right one.
+ */
+export function fakeSnapshotSdk(adbCases: string) {
+  const emulatorBody = `port=""; prev=""
+for arg in "$@"; do if [ "$prev" = "-port" ]; then port="$arg"; fi; prev="$arg"; done
+echo $$ > "$DIR/emulator-pid-$port"
+exec "${Deno.execPath()}" run --allow-net=127.0.0.1 --allow-read --allow-write "$DIR/guest.ts" "$DIR" "$@"`;
+  return fakeSdk(adbCases, emulatorBody).then(async (sdk) => {
+    try {
+      const engine = new URL("../engine/mod.ts", import.meta.url).href;
+      await Deno.writeTextFile(join(sdk.dir, "guest.ts"), snapshotGuest(engine));
+      return sdk;
+    } catch (error) {
+      await sdk.restore();
+      throw error;
+    }
+  });
+}
+
+/**
+ * An AVD directory tree under a temp dir, with the snapshot marker `android prepare` writes (or
+ * none: `marker: null`). `ANDROID_AVD_HOME` should name the returned `home`.
+ */
+export async function fakeAvdHome(
+  avd: string,
+  marker: { emulator: string } | null,
+): Promise<{ home: string; avdDir: string; remove(): Promise<void> }> {
+  const home = await Deno.makeTempDir({ prefix: "hzb-avd-home-" });
+  const avdDir = join(home, `${avd}.avd`);
+  await Deno.mkdir(join(avdDir, "snapshots", "hertzbench"), { recursive: true });
+  if (marker !== null) {
+    await Deno.writeTextFile(
+      join(avdDir, "snapshots", "hertzbench", "hertzbench.json"),
+      JSON.stringify(marker),
+    );
+  }
+  return { home, avdDir, remove: () => Deno.remove(home, { recursive: true }) };
+}
+
+/** The version the fake `emulator -version` prints. */
+export const FAKE_EMULATOR_VERSION = "37.1.11.0 (build_id 15917651) (CL:N/A)";

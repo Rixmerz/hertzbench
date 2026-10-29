@@ -15,6 +15,7 @@ export type AndroidStep =
   | "intent"
   | "instrument"
   | "logcat"
+  | "snapshot"
   | "stop"
   | "tool";
 
@@ -51,6 +52,38 @@ const HEADLESS_FLAGS = [
   "-gpu",
   "swiftshader_indirect",
 ];
+
+/**
+ * The same flags for `android prepare`. A snapshot cannot be saved under `-read-only`, and the
+ * AVD's own `default_boot` snapshot must not be what the guest starts from: the snapshot saved
+ * has to come from a boot with the run's flags.
+ */
+const PREPARE_FLAGS = HEADLESS_FLAGS.flatMap((flag) =>
+  flag === "-read-only" ? [] : flag === "-no-snapshot-save" ? ["-no-snapshot-load", flag] : [flag]
+);
+
+/** The snapshot `android prepare` saves in the AVD; never `default_boot`, which is the person's own. */
+export const PREPARED_SNAPSHOT = "hertzbench";
+const SNAPSHOT_MARKER = "hertzbench.json";
+const SNAPSHOT_SAVE_TIMEOUT_MS = 120_000;
+
+/**
+ * `-feature -WiFiPacketStream` makes the guest's virtio Wi-Fi a plain socket netdev; without it
+ * netsim owns Wi-Fi and the socket stays silent. It is an undocumented emulator feature flag.
+ * A snapshot saved without these flags would reload with netsim's Wi-Fi.
+ */
+export function wifiSocketArgs(netPort: number): string[] {
+  return ["-feature", "-WiFiPacketStream", "-wifi-socket", `connect=127.0.0.1:${netPort}`];
+}
+
+/**
+ * Boot the prepared snapshot and give the guest's `wlan0` the node's MAC. `-force-snapshot-load`
+ * makes the emulator exit when the snapshot cannot be loaded, instead of cold-booting with the
+ * AVD's own MAC, which the medium would not know.
+ */
+export function snapshotBootArgs(mac: string): string[] {
+  return ["-snapshot", PREPARED_SNAPSHOT, "-force-snapshot-load", "-wifi-mac-address", mac];
+}
 
 export interface AndroidTools {
   emulator: string;
@@ -233,10 +266,20 @@ export function consolePortFree(port: number): boolean {
   }
 }
 
-/** The first even console port in 5554..5682 whose pair of ports is free on loopback. */
+/**
+ * Console ports handed out and not yet given back by `kill()`. A launched emulator binds its port
+ * a moment after it starts, and boards start in parallel, so two picks in that moment would see the
+ * same port free and boot two emulators on one serial.
+ */
+const claimedPorts = new Set<number>();
+
+/** The first even console port in 5554..5682 whose pair of ports is free on loopback and unclaimed. */
 export function pickConsolePort(): number {
   for (let port = FIRST_CONSOLE_PORT; port <= LAST_CONSOLE_PORT; port += 2) {
-    if (consolePortFree(port)) return port;
+    if (!claimedPorts.has(port) && consolePortFree(port)) {
+      claimedPorts.add(port);
+      return port;
+    }
   }
   throw new BoardError(
     `no free emulator console port in ${FIRST_CONSOLE_PORT}..${LAST_CONSOLE_PORT}`,
@@ -247,8 +290,10 @@ export interface EmulatorOptions {
   avd: string;
   /** Even console port; defaults to a free one. */
   port?: number;
-  /** Flags after the headless set, e.g. the Wi-Fi socket flags of the next piece. */
+  /** Flags after the headless set, e.g. the Wi-Fi socket flags. */
   extraArgs?: string[];
+  /** Cold boot without `-read-only`, so a snapshot can be saved (`android prepare`). */
+  writable?: boolean;
 }
 
 export class RunningEmulator {
@@ -502,6 +547,26 @@ export class RunningEmulator {
     };
   }
 
+  /**
+   * `adb emu avd snapshot save <name>`. The console answers `OK`, or `KO: <reason>` with exit
+   * status 0, so the text is the verdict.
+   */
+  async saveSnapshot(name: string, timeoutMs = SNAPSHOT_SAVE_TIMEOUT_MS): Promise<void> {
+    const result = await runBounded(
+      "snapshot",
+      this.tools.adb,
+      ["-s", this.serial, "emu", "avd", "snapshot", "save", name],
+      timeoutMs,
+      `saving snapshot ${name}`,
+    );
+    if (!result.success || /^KO/m.test(result.text) || !/^OK/m.test(result.text)) {
+      throw new AndroidStepError(
+        "snapshot",
+        `saving snapshot ${name} failed (step: snapshot), the emulator said:\n${result.text}`,
+      );
+    }
+  }
+
   /** `adb emu kill`, then up to 10 s for the process, then SIGKILL. Safe to call twice. */
   async kill(): Promise<void> {
     if (!this.exited) {
@@ -533,17 +598,19 @@ export class RunningEmulator {
     }
     await this.child.status.catch(() => {});
     await this.drained;
+    claimedPorts.delete(this.port);
   }
 }
 
 /** Start the AVD headless with the flags of the plan; returns before it has booted. */
 export function launchEmulator(tools: AndroidTools, options: EmulatorOptions): RunningEmulator {
   const port = options.port ?? pickConsolePort();
+  claimedPorts.add(port);
   const child = new Deno.Command(tools.emulator, {
     args: [
       "-avd",
       options.avd,
-      ...HEADLESS_FLAGS,
+      ...(options.writable ? PREPARE_FLAGS : HEADLESS_FLAGS),
       "-port",
       String(port),
       ...(options.extraArgs ?? []),
@@ -553,4 +620,155 @@ export function launchEmulator(tools: AndroidTools, options: EmulatorOptions): R
     stderr: "piped",
   }).spawn();
   return new RunningEmulator(tools, child, port);
+}
+
+type EnvReader = (name: string) => string | undefined;
+const processEnv: EnvReader = (name) => Deno.env.get(name);
+
+function isDirectory(path: string): boolean {
+  try {
+    return Deno.statSync(path).isDirectory;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The directory of an AVD (`<name>.avd`): the emulator's own lookup, `$ANDROID_AVD_HOME`, then
+ * `$ANDROID_USER_HOME/avd`, then `~/.android/avd`, where `<name>.ini` points at it.
+ */
+export function avdDirectory(avd: string, env: EnvReader = processEnv): string | null {
+  const home = env("HOME") ?? env("USERPROFILE");
+  const roots = [
+    env("ANDROID_AVD_HOME"),
+    env("ANDROID_USER_HOME") ? join(env("ANDROID_USER_HOME")!, "avd") : undefined,
+    home ? join(home, ".android", "avd") : undefined,
+  ];
+  for (const root of roots) {
+    if (!root) continue;
+    let dir = join(root, `${avd}.avd`);
+    try {
+      const pointed = /^path=(.+)$/m.exec(Deno.readTextFileSync(join(root, `${avd}.ini`)));
+      if (pointed) dir = pointed[1]!.trim();
+    } catch {
+      // no .ini here: the conventional <name>.avd next to it is still a candidate
+    }
+    if (isDirectory(dir)) return dir;
+  }
+  return null;
+}
+
+/** A prepared snapshot a run may boot, or why it may not. */
+export type PreparedSnapshot = { usable: true } | { usable: false; reason: string };
+
+/**
+ * Whether `avd` holds the snapshot `android prepare` saved, made by this emulator build. Snapshots
+ * are tied to the emulator version, and the marker `prepare` writes beside the snapshot's files is
+ * how a build that differs is told apart before it costs a boot.
+ */
+export function preparedSnapshot(
+  avd: string,
+  emulatorVersion: string,
+  env: EnvReader = processEnv,
+): PreparedSnapshot {
+  const again = `run \`hertzbench android prepare ${avd}\``;
+  const dir = avdDirectory(avd, env);
+  if (dir === null) return { usable: false, reason: `no directory found for the AVD ${avd}` };
+  let marker: { emulator?: unknown };
+  try {
+    marker = JSON.parse(
+      Deno.readTextFileSync(join(dir, "snapshots", PREPARED_SNAPSHOT, SNAPSHOT_MARKER)),
+    );
+  } catch {
+    return { usable: false, reason: `${avd} has no prepared snapshot; ${again}` };
+  }
+  if (marker.emulator !== emulatorVersion) {
+    return {
+      usable: false,
+      reason: `${avd}'s snapshot was prepared with emulator ${marker.emulator}, this is ` +
+        `${emulatorVersion}; ${again}`,
+    };
+  }
+  return { usable: true };
+}
+
+export interface PrepareOptions {
+  /** Replaces the /dev/kvm check; tests on hosts without KVM pass `() => null`. */
+  checkKvm?: () => string | null;
+  bootTimeoutMs?: number;
+  env?: EnvReader;
+}
+
+/**
+ * Boot `avd` once with the flags a run uses, wait for it, save the snapshot `run`s boot from
+ * (`snapshot: true`), and stop it. The guest's Wi-Fi socket is a netdev that needs a peer to
+ * connect to, so a loopback listener that discards what it receives stands in for the medium.
+ * Replaces an earlier snapshot of the same name. Returns the emulator version it was made with.
+ */
+export async function prepareSnapshot(
+  tools: AndroidTools,
+  avd: string,
+  options: PrepareOptions = {},
+): Promise<{ snapshotDir: string; emulatorVersion: string }> {
+  const kvm = (options.checkKvm ?? kvmProblem)();
+  if (kvm !== null) throw new BoardError(kvm);
+  const avds = await listAvds(tools.emulator);
+  if (!avds.includes(avd)) {
+    throw new BoardError(
+      `no AVD named ${avd} (found: ${avds.join(", ") || "none"}). ` +
+        `Hertzbench never creates one; make it in Android Studio or with avdmanager.`,
+    );
+  }
+  const dir = avdDirectory(avd, options.env);
+  if (dir === null) throw new BoardError(`no directory found for the AVD ${avd}`);
+  const version = await emulatorVersion(tools.emulator);
+
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const connections = new Set<Deno.Conn>();
+  const accepting = (async () => {
+    try {
+      for await (const conn of listener) {
+        connections.add(conn);
+        conn.readable.pipeTo(new WritableStream()).catch(() => {}); // frames nobody answers
+      }
+    } catch {
+      // closed below, once the emulator is gone
+    }
+  })();
+  const emulator = launchEmulator(tools, {
+    avd,
+    writable: true,
+    extraArgs: wifiSocketArgs((listener.addr as Deno.NetAddr).port),
+  });
+  try {
+    await emulator.waitForBoot(options.bootTimeoutMs);
+    const snapshotDir = join(dir, "snapshots", PREPARED_SNAPSHOT);
+    // A failed save must not leave the old marker vouching for a half-written snapshot.
+    await Deno.remove(join(snapshotDir, SNAPSHOT_MARKER)).catch(() => {});
+    await emulator.saveSnapshot(PREPARED_SNAPSHOT);
+    try {
+      await Deno.writeTextFile(
+        join(snapshotDir, SNAPSHOT_MARKER),
+        `${JSON.stringify({ emulator: version })}\n`,
+      );
+    } catch (error) {
+      throw new AndroidStepError(
+        "snapshot",
+        `the emulator saved snapshot ${PREPARED_SNAPSHOT}, but ${snapshotDir} is not where ` +
+          `Hertzbench looks for it (step: snapshot): ${(error as Error).message}`,
+      );
+    }
+    return { snapshotDir, emulatorVersion: version };
+  } finally {
+    await emulator.kill();
+    listener.close();
+    for (const conn of connections) {
+      try {
+        conn.close();
+      } catch {
+        // the emulator's end closed it first
+      }
+    }
+    await accepting;
+  }
 }
