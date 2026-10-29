@@ -1,7 +1,7 @@
 // What the runner sees of a mobile bridge, whichever kind: started at time
 // zero, closed with the run, and described in the report.
 
-import type { BleBridgeSpec, IpBridgeSpec } from "../orchestrator/scenario.ts";
+import type { BleBridgeSpec, BridgeSpec, IpBridgeSpec } from "../orchestrator/scenario.ts";
 import type { GattPeripheral } from "./ble/peripheral.ts";
 import type { BridgeEndpoint, EndpointPublisher } from "./ip/proxy.ts";
 
@@ -62,7 +62,16 @@ export const BRIDGE_FIDELITY = {
   ble: "the phone's GATT operations end at BlueZ on the host and that leg is a real radio, not " +
     "modelled; each one is replayed as ATT from the bridge's node on the simulated air, so it " +
     "pays the channel model, and the phone sees the node's answer",
+  bleNetsim: "the app's GATT operations end at netsim in the Android emulator and that leg is " +
+    "netsim's own radio, not modelled; each one is replayed as ATT from the bridge's node on " +
+    "the simulated air, so it pays the channel model, and the app sees the node's answer",
 } as const;
+
+/** The fidelity line of a bridge: the BLE one depends on which host side it has. */
+export function bridgeFidelity(spec: BridgeSpec): string {
+  if (spec.kind === "ip") return BRIDGE_FIDELITY.ip;
+  return spec.peripheral === "netsim" ? BRIDGE_FIDELITY.bleNetsim : BRIDGE_FIDELITY.ble;
+}
 
 /** Where a phone connects, one line each, for the progress output and the report. */
 export function bridgeLines(report: BridgeReport): string[] {

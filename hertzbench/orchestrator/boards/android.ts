@@ -4,8 +4,9 @@
 // ./android/tooling.ts; this file strings them together inside `start()`, which resolves
 // only once the app is running, so time zero never comes before the app.
 
-import type { AndroidIntent, AndroidSpec, ScenarioNode } from "../scenario.ts";
+import type { AndroidApp, AndroidIntent, AndroidSpec } from "../scenario.ts";
 import {
+  type AndroidTools,
   consolePortFree,
   emulatorVersion,
   findAndroidTools,
@@ -14,6 +15,7 @@ import {
   LAST_CONSOLE_PORT,
   launchEmulator,
   listAvds,
+  netsimHciArgs,
   preparedSnapshot,
   type RunningEmulator,
   snapshotBootArgs,
@@ -56,20 +58,36 @@ export function createAndroidLauncher(options: AndroidLauncherOptions = {}): Boa
   };
 }
 
+/** What the lifecycle needs of the thing it boots: a node of `board: android`, or a BLE scenario's app. */
+interface AppBoot {
+  /** The node's id, or the bridge's: it names the emulator log and the problems. */
+  id: string;
+  spec: AndroidSpec;
+  apk: string;
+  outDir: string;
+  onSerial(line: string): void;
+  /** Console port to start on; null: any free one. */
+  port: number | null;
+  /** Flags after the headless set: the Wi-Fi socket, the snapshot, or netsim's HCI port. */
+  extraArgs: string[];
+  /** The first line of the emulator log says how it booted. */
+  bootKind: "cold boot" | "snapshot boot";
+}
+
 /** Everything that can be wrong before an emulator is worth starting. */
-async function preflight(node: ScenarioNode, checkKvm: () => string | null) {
-  const spec = node.android;
-  if (spec === undefined || node.firmware.kind !== "apk") {
-    throw new BoardError(`${node.id}: an android node needs an android section`);
-  }
-  const apk = node.firmware.path;
+async function preflight(
+  id: string,
+  spec: AndroidSpec,
+  apk: string,
+  checkKvm: () => string | null,
+) {
   const tools = findAndroidTools();
   const kvm = checkKvm();
-  if (kvm !== null) throw new BoardError(`${node.id}: ${kvm}`);
+  if (kvm !== null) throw new BoardError(`${id}: ${kvm}`);
   const avds = await listAvds(tools.emulator);
   if (!avds.includes(spec.avd)) {
     throw new BoardError(
-      `${node.id}: no AVD named ${spec.avd} (found: ${avds.join(", ") || "none"}). ` +
+      `${id}: no AVD named ${spec.avd} (found: ${avds.join(", ") || "none"}). ` +
         `Hertzbench never creates one; make it in Android Studio or with avdmanager.`,
     );
   }
@@ -77,12 +95,12 @@ async function preflight(node: ScenarioNode, checkKvm: () => string | null) {
     try {
       if (!(await Deno.stat(file)).isFile) throw new Error("not a file");
     } catch {
-      throw new BoardError(`${node.id}: ${file} is not an .apk file that exists`);
+      throw new BoardError(`${id}: ${file} is not an .apk file that exists`);
     }
   }
   // Only for the report: a build whose `-version` cannot be read still runs.
   const version = await emulatorVersion(tools.emulator).catch(() => "unknown");
-  return { tools, spec, apk, version };
+  return { tools, version };
 }
 
 async function startAndroid(
@@ -91,14 +109,18 @@ async function startAndroid(
 ): Promise<RunningBoard> {
   const { node } = ctx;
   if (ctx.netPort === null) throw new BoardError(`${node.id}: an android node needs a Wi-Fi port`);
-  const { tools, spec, apk, version } = await preflight(node, checkKvm);
+  const spec = node.android;
+  if (spec === undefined || node.firmware.kind !== "apk") {
+    throw new BoardError(`${node.id}: an android node needs an android section`);
+  }
+  const apk = node.firmware.path;
+  const { tools, version } = await preflight(node.id, spec, apk, checkKvm);
   const snapshot = spec.snapshot === true;
   if (snapshot) {
     const prepared = preparedSnapshot(spec.avd, version);
     if (!prepared.usable) throw new BoardError(`${node.id}: ${prepared.reason}`);
   }
 
-  const logPath = `${ctx.outDir}/${node.id}-emulator.log`;
   // A snapshot boot sets the MAC itself, so the console port does not matter to it.
   const port = snapshot ? null : consolePortForMac(node.mac);
   if (port !== null && !consolePortFree(port)) {
@@ -108,10 +130,35 @@ async function startAndroid(
         `MAC another free port gives.`,
     );
   }
+  const { emulator, shutDown } = await bootApp(tools, version, {
+    id: node.id,
+    spec,
+    apk,
+    outDir: ctx.outDir,
+    onSerial: ctx.onSerial,
+    port,
+    extraArgs: [...(snapshot ? snapshotBootArgs(node.mac) : []), ...wifiSocketArgs(ctx.netPort)],
+    bootKind: snapshot ? "snapshot boot" : "cold boot",
+  }, flagHint(version));
+  return new AndroidBoard(node.id, spec, emulator, ctx.onSerial, shutDown);
+}
+
+/**
+ * Boot the AVD, install the app, start its logcat and launch it; resolves once the app is
+ * running. A step that fails stops the emulator and throws, `hint` appended to the message.
+ */
+async function bootApp(
+  tools: AndroidTools,
+  version: string,
+  boot: AppBoot,
+  hint: string,
+): Promise<{ emulator: RunningEmulator; shutDown: () => Promise<void> }> {
+  const { id, spec, apk } = boot;
+  const logPath = `${boot.outDir}/${id}-emulator.log`;
   const emulator = launchEmulator(tools, {
     avd: spec.avd,
-    ...(port !== null ? { port } : {}),
-    extraArgs: [...(snapshot ? snapshotBootArgs(node.mac) : []), ...wifiSocketArgs(ctx.netPort)],
+    ...(boot.port !== null ? { port: boot.port } : {}),
+    extraArgs: boot.extraArgs,
   });
   let logcat: { stop(): Promise<void> } | undefined;
   const shutDown = async () => {
@@ -120,12 +167,12 @@ async function startAndroid(
     await emulator.kill();
     await Deno.writeTextFile(
       logPath,
-      `emulator ${version} (${snapshot ? "snapshot boot" : "cold boot"})\n${emulator.logTail()}\n`,
+      `emulator ${version} (${boot.bootKind})\n${emulator.logTail()}\n`,
     );
   };
   try {
     await emulator.waitForBoot(spec.bootTimeoutMs);
-    logcat = await emulator.logcat(spec.logcat, withoutBufferBanners(ctx.onSerial));
+    logcat = await emulator.logcat(spec.logcat, withoutBufferBanners(boot.onSerial));
     await emulator.install(apk, spec.installTimeoutMs);
     if (spec.instrument?.apk !== undefined) {
       await emulator.install(spec.instrument.apk, spec.installTimeoutMs);
@@ -140,9 +187,52 @@ async function startAndroid(
     );
   } catch (error) {
     await shutDown().catch(() => {}); // the step's own failure is the one to report
-    throw new BoardError(`${node.id}: ${describe(error)}${flagHint(version)} (log: ${logPath})`);
+    throw new BoardError(`${id}: ${describe(error)}${hint} (log: ${logPath})`);
   }
-  return new AndroidBoard(node.id, spec, emulator, ctx.onSerial, shutDown);
+  return { emulator, shutDown };
+}
+
+export interface AndroidAppContext {
+  /** The bridge's id: the emulator log is `<id>-emulator.log` and the app's logcat lines are its serial. */
+  id: string;
+  app: AndroidApp;
+  /** The port netsimd is asked to listen on for HCI hosts: the bridge's `netsim_hci`. */
+  hciPort: number;
+  outDir: string;
+  onSerial(line: string): void;
+}
+
+/** Boots the app of a BLE scenario (docs/android-device-plan.md, section 3). */
+export interface AndroidAppLauncher {
+  start(context: AndroidAppContext): Promise<RunningBoard>;
+}
+
+/**
+ * The lifecycle of a node without the Wi-Fi socket: the app reaches the mirrored peripheral
+ * through netsim, which the emulator starts on `hciPort` for the bridge's host side to join.
+ */
+export function createAndroidAppLauncher(options: AndroidLauncherOptions = {}): AndroidAppLauncher {
+  return {
+    async start(ctx) {
+      const { tools, version } = await preflight(
+        ctx.id,
+        ctx.app,
+        ctx.app.apk,
+        options.checkKvm ?? kvmProblem,
+      );
+      const { emulator, shutDown } = await bootApp(tools, version, {
+        id: ctx.id,
+        spec: ctx.app,
+        apk: ctx.app.apk,
+        outDir: ctx.outDir,
+        onSerial: ctx.onSerial,
+        port: null,
+        extraArgs: netsimHciArgs(ctx.hciPort),
+        bootKind: "cold boot",
+      }, "");
+      return new AndroidBoard(ctx.id, ctx.app, emulator, ctx.onSerial, shutDown);
+    },
+  };
 }
 
 // adb announces the log buffer ("--------- beginning of main") even when logcat filters by tag.

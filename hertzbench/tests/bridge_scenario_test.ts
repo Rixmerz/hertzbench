@@ -186,7 +186,9 @@ bridge:
     mac: BRIDGE_MAC,
     radio: { phy: "ble", txPowerDbm: 0, antennaGainDbi: 0, hciUart: 1 },
     mirror: "sensor",
+    peripheral: "bluez",
     adapter: "hci0",
+    netsimHci: { host: "127.0.0.1", port: 6402 },
     name: "sensor",
     intervalMs: 30,
     timeoutMs: 1000,
@@ -228,6 +230,103 @@ bridge: { position: [2, 0], mirror: sensor }
   refuses(
     bridge("  mirror: sensor\n  radios: [{ phy: wifi }]"),
     "bridge.radios: the bridge's radio must be ble",
+  );
+});
+
+Deno.test("bridge: peripheral: netsim takes netsim's HCI port, and refuses BlueZ's adapter", () => {
+  const bridge = (body: string) => `${BLE}\nbridge:\n  position: [1, 0]\n  mirror: sensor\n${body}`;
+  const own = parseScenario(bridge("  peripheral: netsim"));
+  assertEquals(own.bridge?.kind === "ble" && own.bridge.peripheral, "netsim");
+  assertEquals(own.bridge?.kind === "ble" && own.bridge.netsimHci, {
+    host: "127.0.0.1",
+    port: 6402,
+  });
+  const elsewhere = parseScenario(bridge("  peripheral: netsim\n  netsim_hci: 127.0.0.1:16402"));
+  assertEquals(elsewhere.bridge?.kind === "ble" && elsewhere.bridge.netsimHci, {
+    host: "127.0.0.1",
+    port: 16402,
+  });
+  refuses(bridge("  peripheral: usb"), 'bridge.peripheral: expected "bluez" or "netsim"');
+  refuses(
+    bridge("  peripheral: netsim\n  adapter: hci0"),
+    "bridge.adapter: is a BlueZ adapter: it needs peripheral: bluez",
+  );
+  refuses(
+    bridge("  netsim_hci: 127.0.0.1:6402"),
+    "bridge.netsim_hci: is netsim's HCI port: it needs peripheral: netsim",
+  );
+  refuses(
+    bridge("  peripheral: netsim\n  netsim_hci: localhost:6402"),
+    "bridge.netsim_hci: not an IPv4 address",
+  );
+  refuses(
+    bridge("  peripheral: netsim\n  netsim_hci: 127.0.0.1"),
+    "bridge.netsim_hci: expected <IPv4 address>:<port>",
+  );
+  refuses(
+    bridge("  peripheral: netsim\n  netsim_hci: 127.0.0.1:99999"),
+    "bridge.netsim_hci: not a port",
+  );
+});
+
+const APP = `
+android:
+  avd: pixel8
+  apk: ./app.apk
+  package: dev.example.bleapp
+`;
+
+Deno.test("android: a BLE scenario's app is read with the node section's defaults", () => {
+  const scenario = parseScenario(`${BLE}${APP}
+bridge: { position: [3, 0], mirror: sensor, peripheral: netsim }
+`);
+  assertEquals(scenario.android, {
+    avd: "pixel8",
+    apk: "./app.apk",
+    package: "dev.example.bleapp",
+    extras: {},
+    logcat: ["HZB"],
+    bootTimeoutMs: 120_000,
+    installTimeoutMs: 60_000,
+    launchTimeoutMs: 20_000,
+  });
+  assertEquals(
+    parseScenario(
+      WIFI + "bridge: { position: [3, 0], expose: [{ node: web, port: 80, service: http }] }\n",
+    ).android,
+    null,
+  );
+});
+
+Deno.test("android: the app of a BLE scenario needs the netsim bridge, and none of the node-only options", () => {
+  const withBridge = (peripheral: string) =>
+    `bridge: { position: [3, 0], mirror: sensor${peripheral} }\n`;
+  refuses(
+    `${BLE}${APP}${withBridge(", peripheral: bluez")}`,
+    "android: needs `bridge: { mirror: <node>, peripheral: netsim }`",
+  );
+  refuses(`${BLE}${APP}`, "android: needs `bridge: { mirror: <node>, peripheral: netsim }`");
+  refuses(
+    `${WIFI}${APP}`,
+    "android: is for a BLE scenario; on Wi-Fi the app is a node: `board: android`",
+  );
+  refuses(
+    `${BLE}${APP}  snapshot: true\n${withBridge(", peripheral: netsim")}`,
+    "android.snapshot: is for a node of board: android",
+  );
+  refuses(
+    `${BLE}${APP}  instrument: { runner: dev.example.test/androidx.test.runner.AndroidJUnitRunner, at: 1s }\n${
+      withBridge(", peripheral: netsim")
+    }`,
+    "android.instrument: is for a node of board: android",
+  );
+  refuses(
+    `${BLE}${APP}${withBridge(", peripheral: netsim, netsim_hci: '192.168.1.5:6402'")}`,
+    "bridge.netsim_hci: must be on this host when the scenario starts the emulator",
+  );
+  refuses(
+    `${BLE}android: { avd: pixel8, apk: ./app.apk }\n${withBridge(", peripheral: netsim")}`,
+    "android.package: is required on an android node",
   );
 });
 

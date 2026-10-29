@@ -187,7 +187,7 @@ const refusals: [string, string, string][] = [
   [
     "a BLE radio",
     scenarioWith(PHONE + "\n    radios: [{ phy: ble }]"),
-    "bridge: { kind: ble, peripheral: netsim }",
+    "bridge: { mirror: <node>, peripheral: netsim }",
   ],
   [
     "a LoRa radio",

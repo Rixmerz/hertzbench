@@ -76,6 +76,17 @@ export function wifiSocketArgs(netPort: number): string[] {
   return ["-feature", "-WiFiPacketStream", "-wifi-socket", `connect=127.0.0.1:${netPort}`];
 }
 
+/** The HCI port the emulator's own netsimd listens on (verified with emulator 37.1.11). */
+export const NETSIM_HCI_PORT = 6402;
+
+/**
+ * Make the emulator's netsimd listen for HCI hosts on `port`. `-netsim-args` takes the netsimd
+ * flags as one space-separated argument (`emulator -help-netsim-args`).
+ */
+export function netsimHciArgs(port: number): string[] {
+  return ["-netsim-args", `--hci-port ${port}`];
+}
+
 /**
  * Boot the prepared snapshot and give the guest's `wlan0` the node's MAC. `-force-snapshot-load`
  * makes the emulator exit when the snapshot cannot be loaded, instead of cold-booting with the

@@ -6,7 +6,7 @@
 import { dirname, join } from "node:path";
 import { QemuWifiL2Adapter } from "../adapters/qemu-wifi-l2/mod.ts";
 import {
-  BRIDGE_FIDELITY,
+  bridgeFidelity,
   type BridgeHooks,
   bridgeLines,
   type BridgeReport,
@@ -46,13 +46,19 @@ import {
   type PeerInfo,
   type RunningBoard,
 } from "./boards/board.ts";
-import { createAndroidLauncher, VERIFIED_EMULATOR_VERSION } from "./boards/android.ts";
+import {
+  type AndroidAppLauncher,
+  createAndroidAppLauncher,
+  createAndroidLauncher,
+  VERIFIED_EMULATOR_VERSION,
+} from "./boards/android.ts";
 import { createEsp32Launcher } from "./boards/qemu-esp32.ts";
 import { scriptedLauncher } from "./boards/scripted.ts";
 import { MediumClock } from "./medium-clock.ts";
 import { describeRadio, type NodeRadio } from "./radios.ts";
 import { metricsDocument } from "./report.ts";
 import {
+  type AndroidApp,
   type BoardKind,
   type BridgeSpec,
   GATEWAY_HOST,
@@ -75,6 +81,8 @@ export interface RunOptions {
   outDir: string;
   outputs: OutputPaths;
   launchers?: Partial<Record<BoardKind, BoardLauncher>>;
+  /** Boots the `android:` app of a BLE scenario; default: the real emulator. */
+  androidApp?: AndroidAppLauncher;
   /** How long to wait for every board's netdev to connect. Default 30 s. */
   startupTimeoutMs?: number;
   /** Progress lines for the person running the CLI. */
@@ -328,34 +336,60 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     pending.add(tracked);
   };
 
+  // The app of a BLE scenario is not a node, but starts beside the boards, before time zero: the
+  // bridge connects to netsim, which the emulator brings up, only after the app is running.
+  const startApp = async (app: AndroidApp): Promise<void> => {
+    const bridge = scenario.bridge;
+    if (bridge?.kind !== "ble") throw new BoardError("android: the app needs a BLE bridge");
+    try {
+      running.push(
+        await (options.androidApp ?? createAndroidAppLauncher()).start({
+          id: bridge.id,
+          app,
+          hciPort: bridge.netsimHci.port,
+          outDir: options.outDir,
+          onSerial: (text) => log.append({ type: "serial", t: clock.now(), node: bridge.id, text }),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof BoardError) throw error;
+      throw new BoardError(
+        `${bridge.id}: could not start the app: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  };
+
   try {
     progress(`starting ${scenario.nodes.length} board(s)`);
     // allSettled, not all: a board that fails must not leave its siblings
     // half-started and unowned while the first rejection unwinds the run.
-    startAll = Promise.allSettled(scenario.nodes.map(async (node) => {
-      let board: RunningBoard;
-      try {
-        board = await launchers[node.board].start({
-          node,
-          nodeIndex: indexOf(node.id),
-          netPort: ports.get(node.id) ?? null,
-          peers: peersOf(node.id),
-          gateway: { ip: gatewayIp, mac: GATEWAY_MAC, subnetMask: "255.255.255.0" },
-          clock,
-          outDir: options.outDir,
-          onSerial: (text) => log.append({ type: "serial", t: clock.now(), node: node.id, text }),
-          onProblem: reportProblem,
-        });
-      } catch (error) {
-        if (error instanceof BoardError) throw error;
-        throw new BoardError(
-          `${node.id}: could not start: ${error instanceof Error ? error.message : error}`,
-        );
-      }
-      running.push(board);
-      boards.set(node.id, board);
-      clocks.set(node.id, board.clockDescription);
-    }));
+    startAll = Promise.allSettled([
+      ...scenario.nodes.map(async (node) => {
+        let board: RunningBoard;
+        try {
+          board = await launchers[node.board].start({
+            node,
+            nodeIndex: indexOf(node.id),
+            netPort: ports.get(node.id) ?? null,
+            peers: peersOf(node.id),
+            gateway: { ip: gatewayIp, mac: GATEWAY_MAC, subnetMask: "255.255.255.0" },
+            clock,
+            outDir: options.outDir,
+            onSerial: (text) => log.append({ type: "serial", t: clock.now(), node: node.id, text }),
+            onProblem: reportProblem,
+          });
+        } catch (error) {
+          if (error instanceof BoardError) throw error;
+          throw new BoardError(
+            `${node.id}: could not start: ${error instanceof Error ? error.message : error}`,
+          );
+        }
+        running.push(board);
+        boards.set(node.id, board);
+        clocks.set(node.id, board.clockDescription);
+      }),
+      ...(scenario.android === null ? [] : [startApp(scenario.android)]),
+    ]);
     const started = await Promise.race([startAll, interrupted, startupFailed, runFailed]);
     for (const outcome of started) if (outcome.status === "rejected") throw outcome.reason;
 
@@ -680,7 +714,7 @@ function bridgeNode(spec: BridgeSpec, onMedium: { position: Position }): NodeRep
     radio: radio.phy === "ble" ? `ble 1M ${radio.txPowerDbm} dBm` : describeRadio(radio),
     onMedium: true,
     clock: "wall clock (host proxy)",
-    fidelity: BRIDGE_FIDELITY[spec.kind],
+    fidelity: bridgeFidelity(spec),
   };
 }
 

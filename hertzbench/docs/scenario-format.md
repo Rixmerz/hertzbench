@@ -148,7 +148,7 @@ An `android` node is an Android Virtual Device booted headless under the Android
 ```
 
 - `avd`, `apk` and `package` are required. The section is refused on any other board. A run has at most one android node that cold-boots (one AVD cold-boots with one MAC); several need `snapshot: true`, see below.
-- A BLE or other chip radio is refused. The app reaches BLE nodes through the mobile bridge, not as a node.
+- A BLE or other chip radio is refused. The app reaches BLE nodes through the mobile bridge, not as a node: [`peripheral: netsim`](#bridge) and the top-level `android:` section.
 - **Start-up.** The node's start resolves only once the app is running (boot, `adb install`, logcat, `am start -W`), so time zero comes after the app, and the emulator's boot time (about 30 s for `pixel8`) is spent before it. Each step has its own timeout, named in its failure. The emulator's last output goes to `<out>/<node>-emulator.log`.
 - **Logcat.** Every line the app logs under one of the `logcat` tags is a `serial` line of the node, so `- serial: { node: phone, contains: "got temp", within: 20s }` works unchanged. Times are host arrival times, good to about 100 ms. adb's own buffer banner (`--------- beginning of main`) is not a serial line.
 - **MAC.** The gateway leases by MAC and skips an unknown one, and the medium needs the MAC before the guest boots. The emulator derives `wlan0`'s MAC from its console port: `02:<port high byte>:<port low byte>:00:00:00` (port 5554 gives `02:15:b2:00:00:00`, port 5584 gives `02:15:d0:00:00:00`; seen with emulator 37.1.11). The default `mac:` is `02:15:d0:00:00:00`, and the launcher starts the emulator on console port 5584 to match; if that port is taken the run stops and says so. A `mac:` of that shape picks its own port (even, 5554 to 5682); any other `mac:` says the guest was set to it by other means and gets a free port. Either way the run checks the source MAC of the first frame the emulator sends and, if it differs, stops naming both MACs.
@@ -221,14 +221,34 @@ On BLE (Phase 5b, the GATT mirror):
 bridge:
   position: [3, 0]
   mirror: sensor-1           # required: the peripheral whose GATT server the host mirrors
-  name: hzb sensor-1         # what BlueZ advertises; default the node's id; at most 26 bytes
-  adapter: hci0              # BlueZ adapter, default hci0
+  name: hzb sensor-1         # what the host advertises; default the node's id; at most 26 bytes
+  peripheral: bluez          # the host side: bluez (default, a real phone) or netsim (an app in the Android emulator)
+  adapter: hci0              # BlueZ adapter, default hci0; refused with peripheral: netsim
+  netsim_hci: 127.0.0.1:6402 # netsimd's HCI port, default as shown; needs peripheral: netsim
   interval: 30ms             # the bridge's connection to the node, as for a scripted central
   timeout: 1s
 ```
 
 - A scripted `mirror` must advertise. Its sends may go `to:` the bridge's id: they are notifications to the bridge, which passes them to a subscribed phone.
-- The bridge's log lines: `bridge ready addr=<address>`, `bridge connected to <node>`, `bridge discovered service <uuid> with <n> characteristic(s)`, `bridge advertising "<name>" to the phone (<host side>)`, `bridge phone read|wrote <uuid>: "<value>"`, `bridge phone subscribed to <uuid>`, `bridge notify <uuid> "<value>" to the phone`, `bridge phone <operation> failed: <reason>`, `bridge disconnected from <node> reason=0x08`.
+- `peripheral: netsim` replaces BlueZ with the Android emulator's netsim (it is a TCP client of `netsim_hci`, an IPv4 address and a port, so it needs no adapter and runs on every OS; a host other than 127.0.0.1 needs `deno task lan`). A port that cannot be reached, or is not a Bluetooth controller, stops the run before it starts with exit status 2. How it works, its limits and what has not been run: [mobile-bridge.md](mobile-bridge.md#5b-with-netsim-an-app-in-the-android-emulator).
+- The bridge's log lines: `bridge ready addr=<address>`, `bridge connected to <node>`, `bridge discovered service <uuid> with <n> characteristic(s)`, `bridge advertising "<name>" to the phone (<host side>)`, `bridge phone read|wrote <uuid>: "<value>"`, `bridge phone subscribed to <uuid>`, `bridge notify <uuid> "<value>" to the phone`, `bridge phone <operation> failed: <reason>`, `bridge disconnected from <node> reason=0x08`; with netsim also `bridge phone connected`, `bridge phone disconnected reason=0x13` and `bridge netsim closed the HCI connection (the emulator stopped?)`.
+
+### `android`: the app of a BLE scenario
+
+```yaml
+android:
+  avd: pixel8
+  apk: ./app/build/app-debug.apk   # relative to the scenario file
+  package: dev.example.bleapp
+  activity: .MainActivity          # optional, as on a node
+  extras: { key: value }           # optional
+  logcat: [HZB]                    # default [HZB]
+  boot_timeout: 120s               # default 120s
+  install_timeout: 60s             # default 60s
+  launch_timeout: 20s              # default 20s
+```
+
+The app that connects to a BLE bridge, run in the Android emulator. It is **not a node**: it has no position, radio or MAC of its own; the bridge's `position` stands in for it. The fields and the start-up are those of a [node's `android` section](#board-android-an-app-in-the-android-emulator-on-wi-fi), less `instrument` and `snapshot`, which are refused. The emulator starts with `-netsim-args "--hci-port <port>"`, the port of `bridge.netsim_hci`, and without the Wi-Fi flags. The runner starts it beside the boards and waits for it before time zero, and its logcat lines are serial lines of the **bridge's id** (`- serial: { node: phone, contains: "got reading", within: 20s }`). The section needs a BLE scenario with `bridge: { peripheral: netsim }` whose `netsim_hci` is on this host (a refusal names which is missing); `board: android` on a BLE node is refused. `validate` reports a missing APK like a node's. The host needs what a node's does (Linux with KVM, `emulator` and `adb`); without this section nothing is booted and the emulator is yours to start.
 
 ## `links`
 
@@ -276,7 +296,7 @@ One JSON event per line, in the order the engine logged them, with `t` in millis
 
 ## `metrics.json`
 
-`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). With a bridge, `metrics.json` also has `bridge`: `kind` (`ip` or `ble`), `id`, and either `endpoints` (each `node`, `port`, `service`, `listenPort`, `host`, `hostPort`) and `mdns` (one line: what was advertised, or why nothing was), or `mirror`, `adapter`, `name`, `services` (the discovered table) and `peripheral`. The bridge's station is the last entry of `nodes`, with `board: "bridge"`. `events.jsonl` has a `channel` event (with the walls as they are now) each time a door changes, an `interference` event (`id`, `active`) each time a source switches, one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
+`schema: 1`. Top level: `scenario`, `seed`, `duration_ms`, `latency` (`"modelled"`), `fidelity`, `nodes`, `links` (whole run), `phases` (each with `label`, `from_ms`, `to_ms`, `links`), `warnings`, `problems`, `assertions`, `passed`. A link holds `from`, `to`, `sent`, `delivered`, `dropped` (by reason: `retry_exhausted`, `extra_loss`, `channel_mismatch`, `no_peer`, for ESP-NOW ACKs `ack_timeout`, `ack_unmatched`, for chip radios `collision`, `noise`, `phy_mismatch`, `not_listening`, and for BLE ACL data `link_lost`), `loss_pct`, `latency_ms` (`p50`, `p95`, `p99`, `mean`, `max`, or `null`), `rssi_dbm`, `snr_db`, `mean_attempts`, `bytes_delivered`, and `espnow`: `null`, or for unicast ESP-NOW sends on the link `sends`, `acked`, `outcomes` (by `acked`, `frame_lost`, `ack_timeout`, `no_ack`), `acked_pct` and `round_trip_ms` (same shape as `latency_ms`). With a bridge, `metrics.json` also has `bridge`: `kind` (`ip` or `ble`), `id`, and either `endpoints` (each `node`, `port`, `service`, `listenPort`, `host`, `hostPort`) and `mdns` (one line: what was advertised, or why nothing was), or `mirror`, `adapter` (`netsim` with `peripheral: netsim`), `name`, `services` (the discovered table) and `peripheral` (the host side, e.g. `BlueZ on hci0` or `netsim HCI port 127.0.0.1:6402`). The bridge's station is the last entry of `nodes`, with `board: "bridge"`. `events.jsonl` has a `channel` event (with the walls as they are now) each time a door changes, an `interference` event (`id`, `active`) each time a source switches, one `espnow-send` event per unicast ESP-NOW send with its outcome and `roundTripMs`, a `ble-link` event each time a BLE controller sees a connection come up or go down (`node`, `peer`, `role`, `state`, the HCI `reason`, `intervalMs`), and `warning` events.
 
 ## Exit status
 

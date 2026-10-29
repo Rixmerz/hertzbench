@@ -26,6 +26,12 @@ export interface PeripheralHandlers {
 export interface GattPeripheral {
   /** For the report: "BlueZ on hci0", or what a stand-in is. */
   readonly description: string;
+  /**
+   * Reach the host side before the bridge connects to the node, so a missing one ends the run at
+   * time zero (a BridgeStartError) instead of after the node's table is discovered. BlueZ needs
+   * the table to register, so it has none.
+   */
+  open?(): Promise<void>;
   /** Register the table and advertise `name`; resolves when the phone can connect. */
   start(services: DiscoveredService[], name: string, handlers: PeripheralHandlers): Promise<void>;
   /** The node notified or indicated: pass it to a subscribed phone. */

@@ -2,7 +2,7 @@
 
 A real phone talks to a simulated board (PLAN.md §9, Phase 5). The phone enters the engine as one more station on the medium, the bridge's node, at a position the scenario gives and the timeline or `move_node` can change. Whatever the phone sends to the board crosses the simulated link from that position, so it pays the channel model: path loss, walls, MAC retries, collisions, link overrides.
 
-There are two bridges, one per PHY. A scenario has at most one, under `bridge:` ([scenario-format.md](scenario-format.md#bridge)):
+There are two bridges, one per PHY, and the BLE one has two host sides: BlueZ for a real phone, or the Android emulator's netsim for an app in the emulator ([5b with netsim](#5b-with-netsim-an-app-in-the-android-emulator)). A scenario has at most one, under `bridge:` ([scenario-format.md](scenario-format.md#bridge)):
 
 | | 5a, IP bridge | 5b, BLE bridge |
 |---|---|---|
@@ -76,6 +76,40 @@ Then in nRF Connect or LightBlue on the phone: scan, connect to `hzb sensor-1`, 
 
 The helper that talks to BlueZ is `bridge/ble/bluez_gatt.py`. It exports `/org/hertzbench/bridge` (ObjectManager, one GattService1 per service, one GattCharacteristic1 per characteristic) and an LEAdvertisement1, registers them with `org.bluez.GattManager1` and `org.bluez.LEAdvertisingManager1` on `/org/bluez/<adapter>`, and unregisters them when the run ends. It speaks JSON lines with `bridge/ble/bluez.ts`; the protocol is at the top of the file.
 
+## 5b with netsim: an app in the Android emulator
+
+The same BLE bridge with a different host side (`docs/android-device-plan.md`, section 3). Instead of BlueZ on a real adapter, `bridge/ble/netsim.ts` connects to the HCI TCP port of the emulator's netsim (netsimd, 127.0.0.1:6402 by default) as a Bluetooth host. netsim gives that host a controller on its own air, where the emulated phone's Bluetooth scans, connects and runs GATT. `BleBridge` is unchanged: the table it discovers on the mirrored node is served to the app, and each read, write and subscription the app makes is replayed as ATT from the bridge's node on the simulated air.
+
+```yaml
+bridge:
+  position: [3, 0]
+  mirror: sensor-1
+  name: hzb sensor-1
+  peripheral: netsim            # default bluez
+  netsim_hci: 127.0.0.1:6402    # default; with android: the emulator is told to listen there
+android:                        # optional: Hertzbench boots the app; omit it to use an emulator you started
+  avd: pixel8
+  apk: ./app/build/app-debug.apk
+  package: dev.example.bleapp
+```
+
+- **The app's lifecycle** is the node's ([scenario-format.md](scenario-format.md#board-android-an-app-in-the-android-emulator-on-wi-fi)): boot, install, logcat, launch, stop, each with its own timeout. The emulator starts with `-netsim-args "--hci-port <port>"` (the port of `netsim_hci`) and no Wi-Fi flags. The runner starts it beside the boards and waits for it before time zero, so the bridge connects to a netsimd that is already up. The app's logcat lines (`logcat` tags, default `HZB`) are serial lines of the **bridge's id**: `- serial: { node: phone, contains: "got reading", within: 20s }`. `<out>/<bridge id>-emulator.log` holds the emulator's last output.
+- **Without `android:`** nothing is booted: start the emulator (or a `netsimd --hci-port N`) yourself before the run. This also works on a host where the launcher does not (it is Linux with KVM only). If the port cannot be reached, or is not a Bluetooth controller, the run stops before it starts with exit status 2.
+- **What the app sees**: one device advertising `name` and the first service's UUID (the UUID in the advertising data, the name in the scan response: 31 bytes cannot hold both), connectable, advertising again when the app leaves. The table keeps the node's own handles. GAP and GATT services are not served (BlueZ owns them, and here nothing replaces them).
+- **Limits**, as for BlueZ: ATT_MTU 23 (the app's request for more is answered with 23), values of at most 20 bytes, no long reads or writes, no security, one mirrored peripheral per run. Also: **the app's own radio is not on Hertzbench's air**: the app-to-host leg is netsim's, with netsim's unmodelled channel; only the bridge-to-node leg pays the channel model, and the bridge's `position` stands in for the phone. The app cannot be a peripheral, and cannot scan the simulated nodes' own advertisements. An indication to the app is sent without waiting for its confirmation.
+- **When the emulator stops**, netsimd goes with it: the bridge logs `bridge netsim closed the HCI connection (the emulator stopped?)` if it sees the connection end before it closes itself. That is a log line, not a problem of the run; the runner stops the boards before it closes the bridge, so it is usually not there.
+- Log lines of the host side: `bridge phone connected`, `bridge phone disconnected reason=0x13`, then the same `bridge phone read|wrote|subscribed ...` lines as with BlueZ. The report says `on netsim (netsim HCI port 127.0.0.1:6402)`, and `metrics.json` has `adapter: "netsim"`.
+- **Works on every OS** as far as Hertzbench goes: it is a TCP client. Only the `android:` launcher is Linux with KVM.
+
+**Never run against a real emulator.** What is verified is the host side against a fake H4 controller (below). Two assumptions of the plan are open and decide whether the whole path works: **A5** (an app's scan sees a device a client created through netsim's HCI port, and can connect and run GATT against it) and **A6** (`-netsim-args "--hci-port N"` reaches the emulator's netsimd; the HCI Reset answer on 6402 was seen on 2026-10-28, the flag was not). Root-Canal's behaviour as the controller (advertising, connection parameters, whether `LE Read Buffer Size` is the shared one) may need more host work than the fake shows; the host asks `Read Buffer Size` when the LE count is 0. Check, with an emulator and a BLE test app (nRF Connect or LightBlue installed in the AVD, or an app of your own with `android:`):
+
+```bash
+cd hertzbench
+deno task hertzbench run <a scenario like the one above, with sensor-1 scripted as in bridge-ble-scripted.yaml>
+```
+
+The app scans and finds `hzb sensor-1`, connects, opens service `0xFF00`, reads `0xFF01` and gets `reading:N`; `bridge phone read` appears in the bridge's log. If it finds nothing, look at the emulator log first, then at `netsimd`'s.
+
 ## What is modelled and what is not
 
 | Leg | Modelled? |
@@ -107,6 +141,7 @@ The BLE bridge (5b) needs BlueZ, which exists only on Linux. On Windows and macO
   simulated board can use the IP bridge instead of the BLE bridge: expose the node's port with
   `service: mqtt` or `service: websocket` and point the app at the host's address. Without `listen: 0.0.0.0`
   only the Mac itself can reach it.
+- **Use the netsim backend** (`peripheral: netsim`) when the app can run in the Android emulator: it needs no BlueZ and no adapter, only the emulator's netsimd ([5b with netsim](#5b-with-netsim-an-app-in-the-android-emulator)). Not run on these systems yet.
 - **Use the IP bridge (5a)** with a Wi-Fi radio instead: it works on every system. For BLE
   behaviour without a phone, use the scripted BLE scenarios, which need no adapter.
 
@@ -130,6 +165,9 @@ held by `http.sys` (a Windows 10 test machine had 8080 that way). The run then s
 | mDNS | the codec against hand-written bytes, the three kinds of asker, announce and goodbye, the UDP transport on loopback, the report line | `tests/bridge_mdns_test.ts` |
 | 5b on the air | `runScenario` with a stand-in for BlueZ: discovery, read, write, subscribe, notifications, the walk out of range | `tests/bridge_ble_test.ts` |
 | 5b BlueZ helper | the real `bluez_gatt.py` under `dbus-run-session` against a fake `bluetoothd` that plays the phone (`tests/fixtures/fake_bluez.py`); skipped when `dbus-run-session` is missing | `tests/bridge_ble_test.ts` |
+| 5b with netsim, the host side | a fake H4 controller on loopback (`tests/bridge_netsim_fake.ts`) plays netsimd and the app: the host resets and advertises (UUID in the advertising data, name in the scan response), the app discovers the table (a 16-bit and a 128-bit service in separate responses, nothing skipped), reads, writes, is refused, subscribes and is notified, and the host advertises again when it leaves; LE buffers of 0 fall back to Read Buffer Size; netsim going away is a log line; no port, or a port that is no controller, is a start error | `tests/bridge_netsim_test.ts` |
+| 5b with netsim, end to end | `runScenario` with no hooks: the fake plays the app against a scripted sensor (`peripheral: netsim`, `netsim_hci` at the fake); with `android:` and a fake `emulator`/`adb` the emulator gets `-netsim-args "--hci-port <port>"` and no Wi-Fi flags, boots before time zero and its logcat is the bridge's serial; skipped on Windows (sh scripts) | `tests/bridge_netsim_scenario_test.ts` |
+| Scenario schema | `peripheral`, `netsim_hci`, the top-level `android:` and every refusal | `tests/bridge_scenario_test.ts` |
 | MCP | `get_status` shows the bridge, `move_node` moves it, `get_serial` reads its log | `tests/mcp_test.ts` |
 
-**Never run** on the host this was written on: a real phone through either bridge, the mDNS multicast group on a LAN, and BlueZ on a real adapter. The checks for the first run are in [e2e-esp32.md](e2e-esp32.md#the-mobile-bridge).
+**Never run** on the host this was written on: a real phone through either bridge, the mDNS multicast group on a LAN, BlueZ on a real adapter, and an app in a real Android emulator through the netsim backend (A5 and A6 above). The checks for the first run are in [e2e-esp32.md](e2e-esp32.md#the-mobile-bridge).
