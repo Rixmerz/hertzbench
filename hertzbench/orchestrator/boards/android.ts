@@ -4,7 +4,7 @@
 // ./android/tooling.ts; this file strings them together inside `start()`, which resolves
 // only once the app is running, so time zero never comes before the app.
 
-import type { ScenarioNode } from "../scenario.ts";
+import type { AndroidIntent, AndroidSpec, ScenarioNode } from "../scenario.ts";
 import {
   consolePortFree,
   emulatorVersion,
@@ -14,6 +14,7 @@ import {
   LAST_CONSOLE_PORT,
   launchEmulator,
   listAvds,
+  type RunningEmulator,
 } from "./android/tooling.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 
@@ -75,10 +76,12 @@ async function preflight(node: ScenarioNode, checkKvm: () => string | null) {
         `Hertzbench never creates one; make it in Android Studio or with avdmanager.`,
     );
   }
-  try {
-    if (!(await Deno.stat(apk)).isFile) throw new Error("not a file");
-  } catch {
-    throw new BoardError(`${node.id}: ${apk} is not an .apk file that exists`);
+  for (const file of [apk, ...(spec.instrument?.apk !== undefined ? [spec.instrument.apk] : [])]) {
+    try {
+      if (!(await Deno.stat(file)).isFile) throw new Error("not a file");
+    } catch {
+      throw new BoardError(`${node.id}: ${file} is not an .apk file that exists`);
+    }
   }
   // Only for the report: a build whose `-version` cannot be read still runs.
   const version = await emulatorVersion(tools.emulator).catch(() => "unknown");
@@ -118,6 +121,9 @@ async function startAndroid(
     await emulator.waitForBoot(spec.bootTimeoutMs);
     logcat = await emulator.logcat(spec.logcat, withoutBufferBanners(ctx.onSerial));
     await emulator.install(apk, spec.installTimeoutMs);
+    if (spec.instrument?.apk !== undefined) {
+      await emulator.install(spec.instrument.apk, spec.installTimeoutMs);
+    }
     await emulator.launch(
       {
         package: spec.package,
@@ -130,7 +136,7 @@ async function startAndroid(
     await shutDown().catch(() => {}); // the step's own failure is the one to report
     throw new BoardError(`${node.id}: ${describe(error)}${flagHint(version)} (log: ${logPath})`);
   }
-  return new AndroidBoard(shutDown);
+  return new AndroidBoard(node.id, spec, emulator, ctx.onSerial, shutDown);
 }
 
 // adb announces the log buffer ("--------- beginning of main") even when logcat filters by tag.
@@ -154,15 +160,155 @@ function flagHint(version: string): string {
     `If netsim Wi-Fi is on, the emulator sends no Wi-Fi frames.)`;
 }
 
+/**
+ * Turns the raw output of `am instrument -w -r` into the serial lines `test <class>#<method>
+ * passed|failed|skipped`, one as soon as a test ends. Status code 1 only says a test started, and
+ * the runner's own codes decide the rest: 0 passed, -1 and -2 failed, -3 (ignored) and -4
+ * (assumption failure) skipped; anything else (2, in progress) says nothing about the result.
+ */
+export class InstrumentationResults {
+  #status: Record<string, string> = {};
+  #result: Record<string, string> = {};
+  /** Where a line that is not `INSTRUMENTATION_*` continues: stack traces and messages span lines. */
+  #open: { into: Record<string, string>; key: string } | null = null;
+  #started: string | null = null;
+  #runCode: number | null = null;
+  #failedToStart: string | null = null;
+  #errors: string[] = [];
+
+  /** The serial lines this line of output completes. */
+  feed(line: string): string[] {
+    const header = /^INSTRUMENTATION_(STATUS_CODE|STATUS|RESULT|CODE|FAILED): ?(.*)$/.exec(line);
+    if (header === null) {
+      if (this.#open !== null) this.#open.into[this.#open.key] += `\n${line}`;
+      return [];
+    }
+    const [, kind, value] = header as unknown as [string, string, string];
+    this.#open = null;
+    switch (kind) {
+      case "STATUS":
+      case "RESULT": {
+        const into = kind === "STATUS" ? this.#status : this.#result;
+        const split = value.indexOf("=");
+        if (split < 0) return [];
+        const key = value.slice(0, split);
+        into[key] = value.slice(split + 1);
+        this.#open = { into, key };
+        return [];
+      }
+      case "CODE":
+        this.#runCode = Number(value);
+        return [];
+      case "FAILED":
+        this.#failedToStart = value;
+        return [];
+      default:
+        return this.#finishStatus(Number(value));
+    }
+  }
+
+  #finishStatus(code: number): string[] {
+    const status = this.#status;
+    this.#status = {};
+    const test = status.test === undefined
+      ? null
+      : status.class === undefined
+      ? status.test
+      : `${status.class}#${status.test}`;
+    if (test === null) {
+      // A status block that names no test is the runner's own: an error here fails the run.
+      if (code < 0) this.#errors.push(status.Error ?? status.stack ?? `status code ${code}`);
+      return [];
+    }
+    if (code === 1) {
+      this.#started = test;
+      return [];
+    }
+    const word = code === 0
+      ? "passed"
+      : code === -1 || code === -2
+      ? "failed"
+      : code === -3 || code === -4
+      ? "skipped"
+      : null;
+    if (this.#started === test) this.#started = null;
+    return word === null ? [] : [`test ${test} ${word}`];
+  }
+
+  /**
+   * Called when adb has exited with `exitCode`: why the run as a whole failed, or null when
+   * instrumentation reached its end. `lines` is a test that had started and never ended, which a
+   * crashed process leaves behind: it did not pass.
+   */
+  finish(exitCode: number): { lines: string[]; failure: string | null } {
+    const reasons: string[] = [];
+    if (this.#failedToStart !== null) reasons.push(`could not start: ${this.#failedToStart}`);
+    reasons.push(...this.#errors);
+    const crash = this.#result.shortMsg;
+    if (crash !== undefined) {
+      reasons.push(`${crash}${this.#result.longMsg ? `: ${this.#result.longMsg}` : ""}`);
+    }
+    if (reasons.length === 0) {
+      if (this.#runCode === null) {
+        reasons.push(`adb exited with code ${exitCode} before the end of instrumentation`);
+      } else if (this.#runCode !== -1) reasons.push(`it ended with result code ${this.#runCode}`);
+    }
+    const lines = reasons.length > 0 && this.#started !== null
+      ? [`test ${this.#started} failed`]
+      : [];
+    return { lines, failure: reasons.length > 0 ? reasons.join("; ") : null };
+  }
+}
+
 class AndroidBoard implements RunningBoard {
   readonly clockDescription = "wall clock (the guest follows host time)";
   #stopped = false;
+  #instrumentation: { stop(): Promise<void> } | null = null;
 
-  constructor(private readonly shutDown: () => Promise<void>) {}
+  constructor(
+    private readonly nodeId: string,
+    private readonly spec: AndroidSpec,
+    private readonly emulator: RunningEmulator,
+    private readonly onSerial: (line: string) => void,
+    private readonly shutDown: () => Promise<void>,
+  ) {}
+
+  sendIntent(intent: AndroidIntent): Promise<void> {
+    return this.emulator.sendIntent(this.spec, intent, this.spec.launchTimeoutMs);
+  }
+
+  /**
+   * Runs the scenario's `android.instrument` runner. Each test result is a serial line when it
+   * arrives; the promise settles when instrumentation ends, and rejects when the run as a whole
+   * failed (no such runner, a crash). A board stopped meanwhile ends it quietly.
+   */
+  async runInstrumentation(): Promise<void> {
+    const instrument = this.spec.instrument;
+    if (instrument === undefined) {
+      throw new BoardError(`${this.nodeId}: the android section has no instrument to run`);
+    }
+    const results = new InstrumentationResults();
+    const run = this.emulator.instrument(
+      instrument.runner,
+      (line) => results.feed(line).forEach(this.onSerial),
+    );
+    this.#instrumentation = run;
+    const exitCode = await run.done;
+    if (this.#stopped) return;
+    const { lines, failure } = results.finish(exitCode);
+    lines.forEach(this.onSerial);
+    if (failure !== null) {
+      throw new BoardError(
+        `${this.nodeId}: instrumentation ${instrument.runner} failed: ${failure}`,
+      );
+    }
+  }
 
   async stop(): Promise<void> {
     if (this.#stopped) return;
     this.#stopped = true;
+    // Before the emulator goes: a killed emulator would make a healthy adb call look failed.
+    await this.#instrumentation?.stop();
     await this.shutDown();
   }
 }

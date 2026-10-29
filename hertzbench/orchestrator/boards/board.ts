@@ -3,7 +3,7 @@
 // hosts and CI jobs without libqemu.
 
 import type { Clock } from "../../engine/mod.ts";
-import type { ScenarioNode } from "../scenario.ts";
+import type { AndroidIntent, ScenarioNode } from "../scenario.ts";
 
 export interface PeerInfo {
   id: string;
@@ -71,6 +71,13 @@ export interface RunningBoard {
   publishMqtt?(publish: LiveMqttPublish): number;
   /** Sends once over a network path the board's script could use. Absent where it cannot. */
   sendPayload?(send: LiveSend): Promise<void>;
+  /** Delivers an intent to the board's app (`am broadcast` or `am start`). Absent where there is no app. */
+  sendIntent?(intent: AndroidIntent): Promise<void>;
+  /**
+   * Runs the app's instrumented tests, each result a serial line as it arrives. Settles when they
+   * end; throws BoardError when the run as a whole fails. Absent where there is no app.
+   */
+  runInstrumentation?(): Promise<void>;
   stop(): Promise<void>;
 }
 

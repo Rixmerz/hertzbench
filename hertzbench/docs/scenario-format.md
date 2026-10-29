@@ -140,6 +140,10 @@ An `android` node is an Android Virtual Device booted headless under the Android
     boot_timeout: 120s           # default 120s
     install_timeout: 60s         # default 60s
     launch_timeout: 20s          # default 20s
+    instrument:                  # optional: instrumented UI tests, see below
+      runner: dev.example.test/androidx.test.runner.AndroidJUnitRunner
+      at: 5s                     # after time zero
+      apk: ./app/build/app-debug-androidTest.apk   # the test APK, installed after the app
 ```
 
 - `avd`, `apk` and `package` are required. The section is refused on any other board, and a second `android` node is refused: one AVD cold-boots with one MAC.
@@ -150,6 +154,8 @@ An `android` node is an Android Virtual Device booted headless under the Android
 - **Host.** Linux with KVM (`/dev/kvm` usable), and `emulator` and `adb` found on `PATH`, in `$ANDROID_HOME`, `$ANDROID_SDK_ROOT` or `~/Android`. A missing tool, KVM or AVD stops the run with exit status 2 and the reason.
 - **Undocumented flag.** The emulator is started with `-feature -WiFiPacketStream -wifi-socket connect=127.0.0.1:<port>`. Without the feature flag netsim owns the guest's Wi-Fi and the socket stays silent. The flag is not a documented API; it was verified with emulator 37.1.11, and a failure on another build says so.
 - ESP-NOW frames share the medium, but an app cannot send or receive them.
+- **Driving the app.** A `timeline` entry `android: { node, intent: { action, via, extras } }` runs `adb shell am broadcast -a <action> -p <package> --es key value ...` (`via: broadcast`, the default) or `am start` (`via: start`) at its time. The intent is always limited to the node's `package`, so a test hook cannot reach another app. `action` is a dotted name (`dev.example.REFRESH`); `extras` are strings. The node must be an `android` node, else `timeline[i].android.node: <id> is not an android node`. The entry returns once the system has taken the intent, not once the app has handled it, so assert on what the app logs. A failed `am` (it exits 0 and prints `Error: ...`) is a problem of the run, quoting adb. `broadcast` reaches a receiver declared in the manifest as well as one registered at run time; `start` needs an activity whose intent filter has `android.intent.category.DEFAULT`.
+- **Instrumented tests.** `instrument` runs `am instrument -w -r <runner>` at `at` (not after `duration`) and turns each test result into a serial line as the test ends: `test <class>#<method> passed`, `failed` (a failure or an error) or `skipped` (ignored, or an assumption that did not hold). `serial:` assertions judge them: `- serial: { node: phone, contains: "MainTest#shows_temp passed", within: 30s }`. A test that fails is a line, not a problem of the run; a runner that cannot start, a crashed process or an `adb` that ends before the instrumentation does is a problem, and a test that had started and never ended is reported `failed`. `apk` is the test APK: the emulator boots with `-read-only`, so nothing installed earlier survives, and `am instrument` needs the test package on the device; it is installed with `adb install -r -t` after the app, within `install_timeout`, and must exist like `android.apk`. Without it the runner must come from an APK installed some other way. The run ends instrumentation when `duration` does.
 - **Example.** [`examples/android/iot-app`](../examples/android/iot-app/README.md) is a small Kotlin app that sends `GET /status` to a board once a second and logs `HZB status ok 200 ...` or `HZB status failed: ...`; its APK path in the example scenarios is where `gradle assembleDebug` leaves it, and `validate` reports it as missing until it is built.
 
 ### BLE radios
@@ -239,9 +245,10 @@ Directional. `*` matches any run of characters. Both extras default to 0. Applie
   link: { from: c, to: a, extra_loss_pct: 50 }  # optional; chaos override from now on
   obstacle: { id: front-door, attenuation_db: 0 }   # optional; a door opens (or closes again with its old value)
   interference: { id: oven, on: false }      # optional; switch a noise source off or on
+  android: { node: phone, intent: { action: dev.example.REFRESH, via: broadcast, extras: { k: v } } }   # optional; see `board: android`
 ```
 
-Needs at least a `move`, a `link`, an `obstacle`, an `interference` or a `label`. Events past `duration` are an error. A door or source the entry names must exist in `environment`: `timeline[i].obstacle.id` and `timeline[i].interference.id` say which one does not. A door or source entry makes a phase only with a `label`. Metrics are reported for the whole run and per phase; the first phase is called `start`.
+Needs at least a `move`, a `link`, an `obstacle`, an `interference`, an `android` intent or a `label`. Events past `duration` are an error. A door or source the entry names must exist in `environment`: `timeline[i].obstacle.id` and `timeline[i].interference.id` say which one does not. A door or source entry makes a phase only with a `label`. Metrics are reported for the whole run and per phase; the first phase is called `start`.
 
 ## `assertions`
 

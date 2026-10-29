@@ -303,6 +303,30 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
   // would come up after the cleanup below and nobody would stop them.
   let startAll: Promise<PromiseSettledResult<void>[]> = Promise.resolve([]);
   let endLive = () => {};
+  // Intents and instrumentation the timeline started on a board. Intents are awaited before the
+  // boards stop, or a healthy `am broadcast` would fail against a dying emulator; instrumentation
+  // is ended by its board's stop() and awaited after.
+  let ended = false;
+  const intents = new Set<Promise<void>>();
+  const instrumentations = new Set<Promise<void>>();
+  const toBoard = (
+    pending: Set<Promise<void>>,
+    nodeId: string,
+    what: string,
+    call: (board: RunningBoard) => Promise<void> | undefined,
+  ) => {
+    if (ended) return;
+    const started = boards.get(nodeId);
+    const promise = started && call(started);
+    if (!promise) {
+      reportProblem(`${nodeId}: cannot ${what}: it is not a running android board`);
+      return;
+    }
+    const tracked: Promise<void> = promise.catch((error) =>
+      reportProblem(`${nodeId}: ${error instanceof Error ? error.message : error}`)
+    ).finally(() => pending.delete(tracked));
+    pending.add(tracked);
+  };
 
   try {
     progress(`starting ${scenario.nodes.length} board(s)`);
@@ -484,8 +508,27 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
     for (const event of scenario.timeline) {
       clock.schedule(zeroMs + event.atMs, () => {
         if (event.label !== null) medium.startPhase(event.label);
-        for (const action of event.actions) applyTimelineAction(medium, action, mediumIds);
+        for (const action of event.actions) {
+          applyTimelineAction(medium, action, mediumIds, (intent) =>
+            toBoard(
+              intents,
+              intent.node,
+              `send ${intent.intent.action}`,
+              (board) => board.sendIntent?.(intent.intent),
+            ));
+        }
       });
+    }
+    for (const node of scenario.nodes) {
+      const instrument = node.android?.instrument;
+      if (instrument === undefined) continue;
+      clock.schedule(zeroMs + instrument.atMs, () =>
+        toBoard(
+          instrumentations,
+          node.id,
+          `run ${instrument.runner}`,
+          (board) => board.runInstrumentation?.(),
+        ));
     }
     await Promise.race([
       new Promise<void>((resolve) => clock.schedule(zeroMs + scenario.durationMs, resolve)),
@@ -493,10 +536,13 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       runFailed,
     ]);
   } finally {
+    ended = true;
     endLive();
     startupOver = true;
     await startAll;
+    await Promise.allSettled([...intents]);
     await stopAll();
+    await Promise.allSettled([...instrumentations]);
     await network.bridge?.close();
     await network.close();
     medium.close();
@@ -644,11 +690,15 @@ function startupMessage(problems: readonly string[], cause?: string): string {
   return `${lines.join("\n")}\n  (worker logs are in the output directory)`;
 }
 
-/** What a timeline action does to the medium; the timeline and the test rigs share it. */
+/**
+ * What a timeline action does to the medium; the timeline and the test rigs share it. An android
+ * action is no business of the medium's: `toBoard` takes it, and a rig with no boards omits it.
+ */
 export function applyTimelineAction(
   medium: MediumControl,
   action: TimelineAction,
   mediumIds: readonly string[],
+  toBoard?: (action: Extract<TimelineAction, { kind: "android" }>) => void,
 ): void {
   switch (action.kind) {
     case "move":
@@ -660,6 +710,8 @@ export function applyTimelineAction(
       return medium.setObstacleAttenuation(action.id, action.attenuationDb);
     case "interference":
       return medium.setInterference(action.id, action.on);
+    case "android":
+      return toBoard?.(action);
   }
 }
 

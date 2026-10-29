@@ -1036,7 +1036,7 @@ const INVALID: [string, Doc | string, string, string?][] = [
     "timeline entry empty",
     edit((d) => (d.timeline = [{ at: "1ms" }])),
     "timeline[0]",
-    "an obstacle, an interference or a label",
+    "an obstacle, an interference, an android intent or a label",
   ],
   ["timeline without at", edit((d) => (d.timeline = [{ label: "x" }])), "timeline[0].at"],
   [

@@ -87,6 +87,25 @@ export interface AndroidSpec {
   bootTimeoutMs: number;
   installTimeoutMs: number;
   launchTimeoutMs: number;
+  /** Instrumented UI tests to run during the scenario (section 4, item 4). */
+  instrument?: AndroidInstrument;
+}
+
+/** `am instrument -w -r <runner>` at `atMs` after time zero; its test results become serial lines. */
+export interface AndroidInstrument {
+  /** `<test package>/<runner class>`. */
+  runner: string;
+  atMs: number;
+  /** The test APK, installed after the app: `am instrument` needs it on the device. */
+  apk?: string;
+}
+
+/** What a timeline entry sends an android node's app, as `am broadcast` or `am start` limited to its package. */
+export interface AndroidIntent {
+  via: "broadcast" | "start";
+  action: string;
+  /** Passed as `--es key value`. */
+  extras: Record<string, string>;
 }
 
 export type FirmwareSpec =
@@ -137,7 +156,9 @@ export type TimelineAction =
   | { kind: "link"; rule: LinkRule }
   /** A wall named `id` takes this attenuation from now on: a door opening or closing. */
   | { kind: "obstacle"; id: string; attenuationDb: number }
-  | { kind: "interference"; id: string; on: boolean };
+  | { kind: "interference"; id: string; on: boolean }
+  /** Only an android node can take it; the runner hands it to the board, the medium does nothing. */
+  | { kind: "android"; node: string; intent: AndroidIntent };
 
 /** When an interference source is on, from its `from` and `to`. Times count from time zero. */
 export interface InterferenceWindow {
@@ -778,6 +799,7 @@ const ANDROID_FIELDS = [
   "boot_timeout",
   "install_timeout",
   "launch_timeout",
+  "instrument",
 ] as const;
 
 const AVD_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -785,6 +807,10 @@ const ANDROID_PACKAGE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
 const ANDROID_ACTIVITY = /^\.?[A-Za-z_][A-Za-z0-9_.]*$/;
 const EXTRA_KEY = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 const LOGCAT_TAG = /^[A-Za-z0-9_.-]+$/;
+const INTENT_ACTION = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+/** `<test package>/<runner class>`; inner classes carry a `$`. */
+const INSTRUMENT_RUNNER =
+  /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*\/\.?[A-Za-z_][A-Za-z0-9_.$]*$/;
 
 function requiredText(obj: Obj, key: string, path: string): string {
   if (obj[key] === undefined) fail(`${path}.${key}`, "is required on an android node");
@@ -796,6 +822,41 @@ function positiveDuration(value: unknown, fallbackMs: number, path: string): num
   const ms = parseDuration(value, path);
   if (ms <= 0) fail(path, "must be positive");
   return ms;
+}
+
+/** Intent extras: a mapping of names to strings, passed as `--es key value`. */
+function parseExtras(value: unknown, path: string): Record<string, string> {
+  const extras: Record<string, string> = {};
+  if (value === undefined) return extras;
+  for (const [key, extra] of Object.entries(record(value, path))) {
+    if (!EXTRA_KEY.test(key)) fail(`${path}.${key}`, "not an intent extra name");
+    extras[key] = text(extra, `${path}.${key}`);
+  }
+  return extras;
+}
+
+function parseInstrument(value: unknown, path: string): AndroidInstrument {
+  const obj = record(value, path);
+  known(obj, ["runner", "at", "apk"], path);
+  const runner = text(obj.runner, `${path}.runner`);
+  if (!INSTRUMENT_RUNNER.test(runner)) {
+    fail(
+      `${path}.runner`,
+      `not <test package>/<runner class>, like dev.example.test/androidx.test.runner.AndroidJUnitRunner: ${
+        JSON.stringify(runner)
+      }`,
+    );
+  }
+  let apk: string | undefined;
+  if (obj.apk !== undefined) {
+    apk = text(obj.apk, `${path}.apk`);
+    if (!apk.endsWith(".apk")) fail(`${path}.apk`, "expected the path of an .apk file");
+  }
+  return {
+    runner,
+    atMs: parseDuration(obj.at, `${path}.at`),
+    ...(apk !== undefined ? { apk } : {}),
+  };
 }
 
 /** The `android:` section of a node, and the app's path (resolved against the scenario file by the loader). */
@@ -823,13 +884,7 @@ function parseAndroid(
       fail(`${path}.activity`, `not an activity class name: ${JSON.stringify(activity)}`);
     }
   }
-  const extras: Record<string, string> = {};
-  if (obj.extras !== undefined) {
-    for (const [key, extra] of Object.entries(record(obj.extras, `${path}.extras`))) {
-      if (!EXTRA_KEY.test(key)) fail(`${path}.extras.${key}`, "not an intent extra name");
-      extras[key] = text(extra, `${path}.extras.${key}`);
-    }
-  }
+  const extras = parseExtras(obj.extras, `${path}.extras`);
   const tags = obj.logcat === undefined
     ? ["HZB"]
     : list(obj.logcat, `${path}.logcat`).map((tag, i) => {
@@ -861,6 +916,9 @@ function parseAndroid(
       DEFAULT_TIMEOUTS.launchMs,
       `${path}.launch_timeout`,
     ),
+    ...(obj.instrument !== undefined
+      ? { instrument: parseInstrument(obj.instrument, `${path}.instrument`) }
+      : {}),
   };
   return { spec, firmware: { kind: "apk", path: apk } };
 }
@@ -1070,6 +1128,29 @@ function unknownTarget(path: string, what: string, id: string, known: ReadonlySe
   return fail(path, `no ${what} with id ${JSON.stringify(id)} (${declared})`);
 }
 
+function parseAndroidAction(value: unknown, path: string): TimelineAction {
+  const entry = record(value, path);
+  known(entry, ["node", "intent"], path);
+  const intent = record(entry.intent, `${path}.intent`);
+  known(intent, ["action", "via", "extras"], `${path}.intent`);
+  const action = text(intent.action, `${path}.intent.action`);
+  if (!INTENT_ACTION.test(action)) {
+    fail(
+      `${path}.intent.action`,
+      `not an intent action like dev.example.REFRESH: ${JSON.stringify(action)}`,
+    );
+  }
+  const via = intent.via === undefined ? "broadcast" : text(intent.via, `${path}.intent.via`);
+  if (via !== "broadcast" && via !== "start") {
+    fail(`${path}.intent.via`, `expected broadcast or start, got ${JSON.stringify(via)}`);
+  }
+  return {
+    kind: "android",
+    node: text(entry.node, `${path}.node`),
+    intent: { via, action, extras: parseExtras(intent.extras, `${path}.intent.extras`) },
+  };
+}
+
 function parseTimeline(value: unknown, targets: TimelineTargets): TimelineEvent[] {
   // A phase is judged by its label, so two phases with one label would judge only the first.
   const labels = new Set<string>(["start"]);
@@ -1077,7 +1158,7 @@ function parseTimeline(value: unknown, targets: TimelineTargets): TimelineEvent[
     .map((raw, i): TimelineEvent => {
       const path = `timeline[${i}]`;
       const obj = record(raw, path);
-      known(obj, ["at", "label", "move", "link", "obstacle", "interference"], path);
+      known(obj, ["at", "label", "move", "link", "obstacle", "interference", "android"], path);
       const actions: TimelineAction[] = [];
       if (obj.move !== undefined) {
         const move = record(obj.move, `${path}.move`);
@@ -1116,9 +1197,15 @@ function parseTimeline(value: unknown, targets: TimelineTargets): TimelineEvent[
         }
         actions.push({ kind: "interference", id, on: source.on });
       }
+      if (obj.android !== undefined) {
+        actions.push(parseAndroidAction(obj.android, `${path}.android`));
+      }
       const label = obj.label === undefined ? null : text(obj.label, `${path}.label`);
       if (actions.length === 0 && label === null) {
-        fail(path, "needs a move, a link, an obstacle, an interference or a label");
+        fail(
+          path,
+          "needs a move, a link, an obstacle, an interference, an android intent or a label",
+        );
       }
       if (label !== null && labels.has(label)) {
         fail(
@@ -1451,10 +1538,21 @@ function checkReferences(scenario: Scenario): void {
       } else if (action.kind === "link") {
         needPattern(action.rule.from, `timeline[${i}].link.from`);
         needPattern(action.rule.to, `timeline[${i}].link.to`);
+      } else if (action.kind === "android") {
+        needNode(action.node, `timeline[${i}].android.node`);
+        const target = scenario.nodes.find((n) => n.id === action.node);
+        if (target?.board !== "android") {
+          fail(`timeline[${i}].android.node`, `${action.node} is not an android node`);
+        }
       }
     }
     if (event.atMs > scenario.durationMs) {
       fail(`timeline[${i}].at`, "is after the end of the run");
+    }
+  });
+  scenario.nodes.forEach((node, i) => {
+    if (node.android?.instrument && node.android.instrument.atMs > scenario.durationMs) {
+      fail(`nodes[${i}].android.instrument.at`, "is after the end of the run");
     }
   });
   const phases = new Set(scenario.timeline.flatMap((e) => (e.label ? [e.label] : [])));
