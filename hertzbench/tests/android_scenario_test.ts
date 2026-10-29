@@ -11,13 +11,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import {
-  buildDhcpClientMessage,
-  DHCPDISCOVER,
-  parseEthernet,
-  parseIpv4,
-  parseUdp,
-} from "../engine/mod.ts";
+import { parseEthernet, parseIpv4, parseUdp } from "../engine/mod.ts";
 import {
   ANDROID_DEFAULT_MAC,
   ANDROID_FIDELITY,
@@ -30,7 +24,7 @@ import {
   runScenario,
   ScenarioError,
 } from "../orchestrator/mod.ts";
-import { fakeSdk } from "./android_fake_sdk.ts";
+import { FAKE_GUEST, fakeGuestSdk, fakeSdk } from "./android_fake_sdk.ts";
 import { skipOnWindows } from "./platform.ts";
 
 const androidRun = skipOnWindows("the fake emulator and adb are sh scripts");
@@ -230,42 +224,6 @@ Deno.test("android node: the apk is resolved against the scenario file and must 
 
 // ── the launcher, through the runner ────────────────────────────────────────
 
-/** What the guest does on its Wi-Fi socket: send one frame, keep the first reply. */
-// The loop keeps reading after the reply: a real emulator outlives its exchange, and a guest
-// that exits early closes the socket before a slow start-up (macOS) has seen it connected.
-const FAKE_GUEST = `
-const [dir, ...args] = Deno.args;
-const spec = args[args.indexOf("-wifi-socket") + 1];
-const port = Number(spec.split(":").pop());
-await Deno.writeTextFile(dir + "/emulator-args", args.join(" "));
-const hex = (await Deno.readTextFile(dir + "/discover.hex")).trim();
-const frame = Uint8Array.from(hex.match(/../g) ?? [], (b) => parseInt(b, 16));
-const conn = await Deno.connect({ hostname: "127.0.0.1", port });
-const out = new Uint8Array(4 + frame.length);
-new DataView(out.buffer).setUint32(0, frame.length);
-out.set(frame, 4);
-await conn.write(out);
-let pending = new Uint8Array(0);
-let replied = false;
-for await (const chunk of conn.readable) {
-  const joined = new Uint8Array(pending.length + chunk.length);
-  joined.set(pending);
-  joined.set(chunk, pending.length);
-  pending = joined;
-  if (!replied && pending.length >= 4) {
-    const length = new DataView(pending.buffer).getUint32(0);
-    if (pending.length >= 4 + length) {
-      const reply = pending.slice(4, 4 + length);
-      await Deno.writeTextFile(dir + "/reply.hex", Array.from(reply, (b) => b.toString(16).padStart(2, "0")).join(""));
-      replied = true;
-    }
-  }
-}
-`;
-
-const toHex = (bytes: Uint8Array) =>
-  Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-
 const ADB = `shell) echo 1 ;;
 wait-for-device) exit 0 ;;
 install) echo Success ;;
@@ -278,16 +236,9 @@ async function runWithFakeGuest(
   phoneExtra = "",
   { guest = FAKE_GUEST, startupTimeoutMs }: { guest?: string; startupTimeoutMs?: number } = {},
 ) {
-  const emulatorBody = `echo $$ > "$DIR/emulator-pid"; ` +
-    `exec "${Deno.execPath()}" run --allow-net=127.0.0.1 --allow-read --allow-write "$DIR/guest.ts" "$DIR" "$@"`;
-  const sdk = await fakeSdk(ADB, emulatorBody);
+  const sdk = await fakeGuestSdk(ADB, guestMac, guest);
   const work = await Deno.makeTempDir({ prefix: "hzb-android-run-" });
   try {
-    await Deno.writeTextFile(join(sdk.dir, "guest.ts"), guest);
-    await Deno.writeTextFile(
-      join(sdk.dir, "discover.hex"),
-      toHex(buildDhcpClientMessage(guestMac, DHCPDISCOVER, 0x1234)),
-    );
     await Deno.writeTextFile(join(work, "app.apk"), "PK");
     await Deno.writeTextFile(join(work, "s.yaml"), scenarioWith(PHONE + phoneExtra));
     const loaded = await loadScenario(join(work, "s.yaml"), join(work, "out"));
