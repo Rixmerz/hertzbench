@@ -7,7 +7,12 @@
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { computeMetrics } from "../engine/mod.ts";
-import { evaluateAssertions, loadScenario, type Scenario } from "../orchestrator/mod.ts";
+import {
+  evaluateAssertions,
+  loadScenario,
+  parseScenario,
+  type Scenario,
+} from "../orchestrator/mod.ts";
 import { simulateScenarioTraffic } from "./helpers.ts";
 
 const SCENARIOS = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
@@ -92,3 +97,30 @@ for (const name of NAMES) {
     );
   });
 }
+
+// The opt-in CI job (docs/android-device-plan.md, piece 8) cannot run here: it boots an emulator.
+// Its "must fail" step edits the scenario with `sed` and then greps the report, and both depend on
+// text that lives in other files. Run here, a scenario edit that breaks either shows up on every
+// pull request instead of in the nightly job.
+Deno.test("android CI workflow: its inverted-assertion step still matches the scenario and the report", async () => {
+  const workflow = await Deno.readTextFile(
+    fileURLToPath(new URL("../../.github/workflows/hertzbench-android.yml", import.meta.url)),
+  );
+  const original = await Deno.readTextFile(`${SCENARIOS}android-web-scripted.yaml`);
+
+  const sed = workflow.match(/sed 's\/(.+?)\/(.+?)\/'/);
+  assert(sed, "the workflow edits the scenario with sed 's/<from>/<to>/'");
+  const [, from, to] = sed as unknown as [string, string, string];
+  assertEquals(original.split(from).length - 1, 1, `${from} is in the scenario exactly once`);
+  const inverted = parseScenario(original.replace(from, to));
+
+  // The assertion the sed inverts, judged against a run in which the app never logged it.
+  const failed = evaluateAssertions(inverted.assertions, [], []).filter((r) => !r.passed)
+    .filter((r) => r.description.startsWith("serial phone contains"));
+  assertEquals(failed.length, 1);
+
+  // The report prints `  FAIL  <description>  (<detail>)`; the workflow greps for that line.
+  const grep = workflow.match(/grep -qF '(FAIL {2}[^']+)'/);
+  assert(grep, "the workflow looks for the inverted assertion's FAIL line");
+  assertStringIncludes(`FAIL  ${failed[0]!.description}  (${failed[0]!.detail})`, grep![1]!);
+});
