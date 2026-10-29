@@ -561,6 +561,52 @@ for (
   });
 }
 
+// On real firmware (docs/e2e-esp32.md) two things vary from run to run: when the
+// sensors hear the gateway's first beacon, which sets how many readings fall in
+// phase "start", and host stalls of the gateway's QEMU, during which no ACK
+// comes back within 10 ms of wall clock and the driver resends every 10 ms. The
+// engine's loss draws are fixed by the seed, so sensor-4's start-phase acked %
+// depends on the reading count alone (75.6% at its lowest with seed 42). A bar
+// of 75 then failed a run on the first ACK a stalled gateway missed. 200 ms is
+// what a loaded host's stall cost one run (17 frames from sensor-4 at 40
+// readings), and about the most frame-counting bars can absorb: past it the
+// start phase sinks toward sensor-4's 18% after the move.
+const GATEWAY_STALL_MS = 200;
+/** Fewer readings before the move (a sensor that first sends after 22.5 s) fail with the stall. */
+const FEWEST_READINGS = 15;
+
+Deno.test(
+  `example espnow-mesh-5-nodes.yaml: the metric bars hold from ${FEWEST_READINGS} readings before the move and a ${GATEWAY_STALL_MS} ms gateway stall in each phase`,
+  async () => {
+    const { scenario } = await loadScenario(`${EXAMPLES}espnow-mesh-5-nodes.yaml`);
+    const metricAssertions = scenario.assertions.filter((a) => a.kind === "metric");
+    // Readings before the move: on an idle host the boards boot 1.5 s to 19.8 s
+    // into the run (up to 56 readings); a loaded host boots them later.
+    for (let readings = FEWEST_READINGS; readings <= 56; readings++) {
+      const startMs = 30_000 - readings * 500 + 7;
+      const traffic = [1, 2, 3, 4].map((i) => ({
+        from: `sensor-${i}`,
+        to: "gw",
+        everyMs: 500,
+        startMs,
+        resend: true,
+      }));
+      const log = simulateEspNowTraffic(
+        scenario,
+        [...traffic, { from: "gw", to: "broadcast", everyMs: 1000 }],
+        [
+          { node: "gw", fromMs: 29_000, toMs: 29_000 + GATEWAY_STALL_MS },
+          { node: "gw", fromMs: 45_000, toMs: 45_000 + GATEWAY_STALL_MS },
+        ],
+      );
+      const metrics = computeMetrics(log.events, scenario.durationMs);
+      for (const r of evaluateAssertions(metricAssertions, log.events, metrics.phases)) {
+        assert(r.passed, `${readings} readings before the move: ${r.description}: ${r.detail}`);
+      }
+    }
+  },
+);
+
 // The real-firmware run (docs/e2e-esp32.md) boots the boards seconds apart. A
 // sensor that sends before the gateway is up gets no ACK, its driver resends
 // dozens of times a second, and phase "start" then measures the boot order.

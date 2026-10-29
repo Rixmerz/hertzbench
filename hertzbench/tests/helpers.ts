@@ -1,4 +1,5 @@
 import {
+  BROADCAST_MAC,
   buildDhcpClientMessage,
   buildEspNowBody,
   buildEthernet,
@@ -236,6 +237,24 @@ export interface EspNowTraffic {
   from: string;
   to: string;
   everyMs: number;
+  /** When the first frame goes. Defaults to 0. */
+  startMs?: number;
+  /**
+   * Resend a unicast frame as soon as the fork reports it unacked, until the
+   * next one is due: what the closed Wi-Fi driver does on real firmware.
+   */
+  resend?: boolean;
+}
+
+/**
+ * A node whose guest is stalled for a while, as a QEMU board is when the host
+ * does not schedule it: the frames it is given wait, and it takes them (and
+ * answers them, late) when the stall ends.
+ */
+export interface StallWindow {
+  node: string;
+  fromMs: number;
+  toMs: number;
 }
 
 /**
@@ -244,7 +263,11 @@ export interface EspNowTraffic {
  * fork's MAC), so a scenario's ESP-NOW metric assertions can be checked
  * without any board and without wall-clock timing. Serial assertions cannot be.
  */
-export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic[]): EventLog {
+export function simulateEspNowTraffic(
+  scenario: Scenario,
+  traffic: EspNowTraffic[],
+  stalls: StallWindow[] = [],
+): EventLog {
   const onMedium = scenario.nodes.filter((n) => !n.internetGateway);
   const clock = new ManualClock();
   const log = new EventLog();
@@ -256,6 +279,8 @@ export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic
     retryLimit: scenario.retryLimit,
   });
   const models = new Map<string, EspNowForkModel>();
+  /** Per node, what to do when the fork reports a frame done. */
+  const txDone = new Map<string, (status: "ack" | "nack") => void>();
   for (const node of onMedium) {
     if (node.radio.phy !== "wifi") throw new Error(`${node.id}: ESP-NOW needs a Wi-Fi node`);
     const model = new EspNowForkModel({
@@ -264,12 +289,26 @@ export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic
       clock,
       output: (frame) => medium.transmit(node.id, frame),
       onReceive: () => {},
-      onTxDone: () => {},
+      onTxDone: (status) => txDone.get(node.id)?.(status),
     });
     models.set(node.id, model);
+    const own = stalls.filter((w) => w.node === node.id);
+    const backlog: Uint8Array[] = [];
+    for (const w of own) {
+      clock.schedule(w.toMs, () => {
+        for (const frame of backlog.splice(0)) model.receive(frame);
+      });
+    }
+    const stalled = () => own.some((w) => clock.now() >= w.fromMs && clock.now() < w.toMs);
     medium.addNode(
       { id: node.id, mac: node.mac, position: node.position, radio: node.radio },
-      { ready: () => true, deliver: (frame) => model.receive(frame) },
+      {
+        ready: () => true,
+        deliver: (frame) => {
+          if (stalled()) backlog.push(frame);
+          else model.receive(frame);
+        },
+      },
     );
   }
   const ids = onMedium.map((n) => n.id);
@@ -298,10 +337,21 @@ export function simulateEspNowTraffic(scenario: Scenario, traffic: EspNowTraffic
   const payload = buildEspNowBody(new TextEncoder().encode("reading:0"));
   for (const stream of traffic) {
     const dst = stream.to === "broadcast"
-      ? "ff:ff:ff:ff:ff:ff"
+      ? BROADCAST_MAC
       : onMedium.find((n) => n.id === stream.to)!.mac;
-    for (let t = 0; t < scenario.durationMs; t += stream.everyMs) {
-      clock.schedule(t, () => models.get(stream.from)!.send(dst, payload));
+    const model = models.get(stream.from)!;
+    let nextDueMs = 0;
+    if (stream.resend && dst !== BROADCAST_MAC) {
+      txDone.set(stream.from, (status) => {
+        // The fork's ACK timer fires at clock.now(); a resend due with the next frame is not made.
+        if (status === "nack" && clock.now() < nextDueMs) model.send(dst, payload);
+      });
+    }
+    for (let t = stream.startMs ?? 0; t < scenario.durationMs; t += stream.everyMs) {
+      clock.schedule(t, () => {
+        nextDueMs = t + stream.everyMs;
+        model.send(dst, payload);
+      });
     }
   }
   clock.advanceTo(scenario.durationMs);
