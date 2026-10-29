@@ -231,6 +231,8 @@ Deno.test("android node: the apk is resolved against the scenario file and must 
 // ── the launcher, through the runner ────────────────────────────────────────
 
 /** What the guest does on its Wi-Fi socket: send one frame, keep the first reply. */
+// The loop keeps reading after the reply: a real emulator outlives its exchange, and a guest
+// that exits early closes the socket before a slow start-up (macOS) has seen it connected.
 const FAKE_GUEST = `
 const [dir, ...args] = Deno.args;
 const spec = args[args.indexOf("-wifi-socket") + 1];
@@ -244,21 +246,21 @@ new DataView(out.buffer).setUint32(0, frame.length);
 out.set(frame, 4);
 await conn.write(out);
 let pending = new Uint8Array(0);
+let replied = false;
 for await (const chunk of conn.readable) {
   const joined = new Uint8Array(pending.length + chunk.length);
   joined.set(pending);
   joined.set(chunk, pending.length);
   pending = joined;
-  if (pending.length >= 4) {
+  if (!replied && pending.length >= 4) {
     const length = new DataView(pending.buffer).getUint32(0);
     if (pending.length >= 4 + length) {
       const reply = pending.slice(4, 4 + length);
       await Deno.writeTextFile(dir + "/reply.hex", Array.from(reply, (b) => b.toString(16).padStart(2, "0")).join(""));
-      break;
+      replied = true;
     }
   }
 }
-await new Promise(() => {});
 `;
 
 const toHex = (bytes: Uint8Array) =>
@@ -426,8 +428,9 @@ androidRun("android run: another source MAC stops the run naming both", async ()
 const SILENT_GUEST = `
 const [, ...args] = Deno.args;
 const port = Number(args[args.indexOf("-wifi-socket") + 1].split(":").pop());
-await Deno.connect({ hostname: "127.0.0.1", port });
-await new Promise(() => {});
+const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+// Held open like a real emulator; see FAKE_GUEST.
+for await (const _ of conn.readable) { /* drain until the host closes */ }
 `;
 
 androidRun(
