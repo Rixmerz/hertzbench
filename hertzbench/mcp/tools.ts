@@ -471,7 +471,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "run_scenario",
       description:
-        "Start a scenario in the background and return at once. Poll get_status until state is running (live tools work then), finished, failed or stopped. One run at a time. Every output (metrics.json, air.pcap, events.jsonl, serial logs) goes to out_dir inside the workspace. Errors known before boot (invalid scenario, missing firmware, no libqemu for esp32) come back here.",
+        "Start a scenario in the background and return at once. Poll get_status until state is running (live tools work then), finished, failed or stopped. One run at a time. Every output (metrics.json, air.pcap, events.jsonl, serial logs) goes to out_dir inside the workspace; air.pcap, events.jsonl and the serial logs grow while the run plays. Errors known before boot (invalid scenario, missing firmware, no libqemu for esp32) come back here.",
       inputSchema: {
         type: "object",
         properties: {
@@ -878,7 +878,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "export_capture",
       description:
-        "Write a packet capture of the current or last run as it stands now, also mid-run and after stop (which writes no files of its own): `pcap` the whole air (Wi-Fi Ethernet frames, LoRaTap, the nRF24 record, or BLE link-layer packets, by the run's PHY), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi runs), `btsnoop` one BLE node's HCI traffic. Opens in Wireshark. Written inside the workspace, by default into the run's out_dir.",
+        "Write a packet capture of the current or last run as it stands now, also mid-run and after stop: `pcap` the whole air (Wi-Fi Ethernet frames, LoRaTap, the nRF24 record, or BLE link-layer packets, by the run's PHY), `pcap-80211` its ESP-NOW frames as 802.11 (Wi-Fi runs), `btsnoop` one BLE node's HCI traffic. Opens in Wireshark. Written inside the workspace, by default into the run's out_dir.",
       inputSchema: {
         type: "object",
         properties: {
@@ -976,7 +976,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "stop",
       description:
-        "Stop the run in progress and its boards. No output files are written and assertions are not judged; get_metrics and get_serial still answer with what happened up to the stop.",
+        "Stop the run in progress and its boards. Assertions are not judged. The files written so far (serial logs, events.jsonl, air.pcap) stay in out_dir, with a metrics.json marked interrupted; get_metrics and get_serial still answer with what happened up to the stop.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       call: async (args) => {
         known(args, []);

@@ -171,8 +171,8 @@ async function main(argv: string[]): Promise<number> {
       );
       return 0;
     }
-    // Ctrl-C and SIGTERM end the run through the runner, which stops every board.
-    // Exiting straight away would leave QEMU workers running.
+    // Ctrl-C and SIGTERM end the run through the runner, which stops every board and closes its
+    // files with what the run had produced. Exiting straight away would leave QEMU workers running.
     const abort = new AbortController();
     const onSignal = () => abort.abort();
     const signals: Deno.Signal[] = Deno.build.os === "windows" ? ["SIGINT"] : ["SIGINT", "SIGTERM"];
@@ -185,6 +185,12 @@ async function main(argv: string[]): Promise<number> {
         outputs: loaded.outputs,
         progress: args.quiet ? undefined : (line) => console.error(`[${PRODUCT.slug}] ${line}`),
       });
+    } catch (error) {
+      if (!(error instanceof RunInterrupted)) throw error;
+      console.error(
+        `${PRODUCT.cli}: interrupted; boards stopped, partial results written to ${loaded.outDir}`,
+      );
+      return 130;
     } finally {
       for (const signal of signals) Deno.removeSignalListener(signal, onSignal);
     }
@@ -192,10 +198,6 @@ async function main(argv: string[]): Promise<number> {
     else console.log(renderReport(result));
     return result.passed ? 0 : 1;
   } catch (error) {
-    if (error instanceof RunInterrupted) {
-      console.error(`${PRODUCT.cli}: interrupted; boards stopped, no results written`);
-      return 130;
-    }
     if (error instanceof ScenarioError || error instanceof BoardError) {
       console.error(`${PRODUCT.cli}: ${error.message}`);
       return 2;

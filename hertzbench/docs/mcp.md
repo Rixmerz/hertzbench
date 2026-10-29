@@ -252,7 +252,9 @@ timeline. Dragging a node there calls `move_node`, so the agent sees the move in
 `stop` ends the run the way Ctrl-C ends `hertzbench run`:
 
 - every board is stopped;
-- **no output file is written**;
+- the files the run had written stay in `out_dir`: `air.pcap`, `events.jsonl` and the serial logs
+  grow while the run plays, and a `metrics.json` marked `"interrupted": true` is written over what
+  the run had by then;
 - the assertions are not judged.
 
 What the run did up to the stop stays readable: `get_metrics` returns the partial metrics of that

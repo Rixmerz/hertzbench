@@ -55,6 +55,7 @@ import {
   parseTcp,
   parseUdp,
   pathLossDb,
+  PcapWriter,
   percentile,
   pickRate,
   sameLoraChannel,
@@ -291,6 +292,29 @@ Deno.test("EventLog: a time earlier than the last one is stamped with the later 
   log.append({ type: "phase", t: 12, label: "c" });
   assertEquals(log.events.map((e) => [e.t, e.seq]), [[10, 0], [10, 1], [12, 2]]);
   assert(EVENT_TYPES.includes("deliver") && EVENT_TYPES.includes("drop"));
+});
+
+Deno.test("EventLog: a listener is told of each event as the log holds it, from the moment it listens", () => {
+  const log = new EventLog();
+  log.append({ type: "phase", t: 1, label: "before" });
+  const heard: [string, number, number][] = [];
+  log.listen((e) => heard.push([e.type, e.t, e.seq]));
+  log.append({ type: "phase", t: 9, label: "a" });
+  log.append({ type: "phase", t: 4, label: "b" });
+  // Clamped time and sequence number are the ones in the log, and nothing earlier is replayed.
+  assertEquals(heard, [["phase", 9, 1], ["phase", 9, 2]]);
+});
+
+Deno.test("pcap: a piped file gets the header first, then each record as it is added, byte for byte", () => {
+  const pcap = new PcapWriter(1_700_000_000_000);
+  const first = new Uint8Array([1, 2, 3]);
+  pcap.addFrame(1, first);
+  const written: number[] = [];
+  pcap.pipe((bytes) => written.push(...bytes));
+  assertEquals(written.length, 24 + 16 + first.length, "what was captured before the pipe");
+  pcap.addFrame(2, new Uint8Array([4, 5]));
+  assertEquals(pcap.packetCount, 2);
+  assertEquals(new Uint8Array(written), pcap.toBytes());
 });
 
 // ── rng ─────────────────────────────────────────────────────────────────────

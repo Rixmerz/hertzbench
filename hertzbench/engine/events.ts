@@ -160,6 +160,7 @@ export type NewEvent = EngineEvent extends infer E ? E extends EngineEvent ? Omi
 export class EventLog {
   readonly #events: EngineEvent[] = [];
   #lastT = -Infinity;
+  #listener: ((event: EngineEvent) => void) | null = null;
 
   /**
    * Times never step backwards: with a paced clock an event logged from a
@@ -169,7 +170,14 @@ export class EventLog {
   append(event: NewEvent): void {
     const t = Math.max(event.t, this.#lastT);
     this.#lastT = t;
-    this.#events.push({ ...event, t, seq: this.#events.length } as EngineEvent);
+    const stamped = { ...event, t, seq: this.#events.length } as EngineEvent;
+    this.#events.push(stamped);
+    this.#listener?.(stamped);
+  }
+
+  /** Calls `listener` with each event appended from now on, as the log holds it. One listener at a time. */
+  listen(listener: (event: EngineEvent) => void): void {
+    this.#listener = listener;
   }
 
   get events(): readonly EngineEvent[] {

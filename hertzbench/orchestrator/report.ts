@@ -81,7 +81,7 @@ export function linkJson(link: LinkStats) {
 /**
  * The contents of metrics.json. `schema` changes if a field is renamed or
  * removed or changes type. 2: `phy` and per-node `radio` added, node `channel`
- * may be null (LoRa has no channel number).
+ * may be null (LoRa has no channel number). Adding a field (`interrupted`) needs no bump.
  */
 export function metricsDocument(result: RunResult) {
   const { scenario, metrics } = result;
@@ -124,6 +124,8 @@ export function metricsDocument(result: RunResult) {
     problems: result.problems,
     assertions: result.assertions,
     passed: result.passed,
+    // A run cut short writes this report over what it had by then: its assertions were not judged.
+    interrupted: result.interrupted,
   };
 }
 

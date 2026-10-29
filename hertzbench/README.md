@@ -197,7 +197,8 @@ To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin d
 `deno task hertzbench ...` from here as above.
 
 `hzb` is the short alias. Exit status: 0 passed, 1 an assertion failed, 2 invalid scenario or a host
-that cannot run it, 130 interrupted (boards are stopped first).
+that cannot run it, 130 interrupted (boards are stopped first and the files written so far are
+kept).
 
 ## Scenario files
 

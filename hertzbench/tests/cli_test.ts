@@ -388,53 +388,85 @@ Deno.test("usage: no arguments and --help print usage; an unknown command exits 
   assertEquals(noFile.code, 2);
 });
 
-signalTest("SIGINT: the CLI stops the run, exits 130 and writes no results", async () => {
-  await inTempDir(async (dir) => {
-    await Deno.writeTextFile(`${dir}/long.yaml`, SHORT.replace("duration: 1s", "duration: 10m"));
-    const child = new Deno.Command(Deno.execPath(), {
-      args: [
-        "run",
-        "--allow-net=127.0.0.1",
-        "--allow-read",
-        "--allow-write",
-        "--allow-run",
-        "--allow-env",
-        MAIN,
-        "run",
-        `${dir}/long.yaml`,
-        "--out",
-        `${dir}/out`,
-      ],
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    // Wait for the run to be underway (the CLI reports it on stderr), then interrupt.
-    const reader = child.stderr.pipeThrough(new TextDecoderStream()).getReader();
-    let seen = "";
-    while (!seen.includes("running for")) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      seen += value;
-    }
-    child.kill("SIGINT");
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      seen += value;
-    }
-    const status = await child.status;
-    await child.stdout.cancel();
-    assertEquals(status.code, 130, seen);
-    assertStringIncludes(seen, "interrupted");
-    let wrote = true;
+/** Poll a file's text until `done` accepts it; null while the file does not exist yet. */
+async function waitForText(
+  path: string,
+  done: (text: string) => boolean,
+  what: string,
+): Promise<string> {
+  const deadline = performance.now() + 20_000;
+  for (;;) {
+    let text: string | null = null;
     try {
-      await Deno.stat(`${dir}/out/metrics.json`);
-    } catch {
-      wrote = false;
+      text = await Deno.readTextFile(path);
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
     }
-    assertEquals(wrote, false);
-  });
-});
+    if (text !== null && done(text)) return text;
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+signalTest(
+  "SIGINT: the CLI stops the run, exits 130 and keeps what the run had written",
+  async () => {
+    await inTempDir(async (dir) => {
+      await Deno.writeTextFile(`${dir}/long.yaml`, SHORT.replace("duration: 1s", "duration: 10m"));
+      const child = new Deno.Command(Deno.execPath(), {
+        args: [
+          "run",
+          "--allow-net=127.0.0.1",
+          "--allow-read",
+          "--allow-write",
+          "--allow-run",
+          "--allow-env",
+          MAIN,
+          "run",
+          `${dir}/long.yaml`,
+          "--out",
+          `${dir}/out`,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).spawn();
+      // Wait for the run to be underway (the CLI reports it on stderr), then interrupt.
+      const reader = child.stderr.pipeThrough(new TextDecoderStream()).getReader();
+      let seen = "";
+      while (!seen.includes("running for")) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        seen += value;
+      }
+      // The events are on disk while the run plays, not only once it ends: poll before interrupting.
+      const before = await waitForText(
+        `${dir}/out/events.jsonl`,
+        (text) => text.includes('"type":"tx"'),
+        "a transmission in events.jsonl while the run plays",
+      );
+      child.kill("SIGINT");
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        seen += value;
+      }
+      const status = await child.status;
+      await child.stdout.cancel();
+      assertEquals(status.code, 130, seen);
+      assertStringIncludes(seen, "interrupted");
+      assertStringIncludes(seen, "partial results");
+
+      const events = (await Deno.readTextFile(`${dir}/out/events.jsonl`)).trimEnd().split("\n");
+      assert(events.length >= before.trimEnd().split("\n").length, "the log only grows");
+      for (const line of events) assertEquals(typeof JSON.parse(line).type, "string");
+      const pcap = await Deno.readFile(`${dir}/out/air.pcap`);
+      assertEquals(new DataView(pcap.buffer).getUint32(0, true), 0xa1b2c3d4);
+      assert(pcap.length > 24, "the capture holds the frames sent before the interrupt");
+      const metrics = JSON.parse(await Deno.readTextFile(`${dir}/out/metrics.json`));
+      assertEquals([metrics.interrupted, metrics.passed, metrics.assertions], [true, false, []]);
+    });
+  },
+);
 
 Deno.test("exit 2: a worker that dies during start-up fails fast, lists why, and accepted the launcher's config", async () => {
   await inTempDir(async (dir) => {

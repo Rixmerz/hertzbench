@@ -27,6 +27,7 @@ export class PcapWriter {
   readonly #chunks: Uint8Array[] = [];
   #packets = 0;
   #lastMs = -Infinity;
+  #sink: ((bytes: Uint8Array) => void) | null = null;
 
   /** `epochMs` is the Unix time of engine time 0, so the capture has real-looking timestamps. */
   constructor(epochMs: number, linkType = LINKTYPE_ETHERNET) {
@@ -52,13 +53,25 @@ export class PcapWriter {
     this.#lastMs = tMs;
     const totalUs = Math.round((this.#epochMs + tMs) * 1000);
     const captured = Math.min(frame.length, SNAPLEN);
-    const header = new DataView(new ArrayBuffer(RECORD_HEADER_BYTES));
+    const record = new Uint8Array(RECORD_HEADER_BYTES + captured);
+    const header = new DataView(record.buffer);
     header.setUint32(0, Math.floor(totalUs / 1_000_000), true);
     header.setUint32(4, totalUs % 1_000_000, true);
     header.setUint32(8, captured, true);
     header.setUint32(12, frame.length, true);
-    this.#chunks.push(new Uint8Array(header.buffer), frame.slice(0, captured));
+    record.set(frame.subarray(0, captured), RECORD_HEADER_BYTES);
+    this.#chunks.push(record);
     this.#packets++;
+    this.#sink?.(record);
+  }
+
+  /**
+   * Hands `sink` everything captured so far, then each packet record as it is added, so a file
+   * can grow with the run. The capture also stays in memory for `toBytes`. One sink at a time.
+   */
+  pipe(sink: (bytes: Uint8Array) => void): void {
+    this.#sink = sink;
+    sink(this.toBytes());
   }
 
   toBytes(): Uint8Array {
