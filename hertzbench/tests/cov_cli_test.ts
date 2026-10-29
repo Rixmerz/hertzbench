@@ -220,6 +220,28 @@ Deno.test("cli: validate exits 2 on a missing file, an invalid field and missing
   });
 });
 
+Deno.test("cli: validate warns, and still exits 0, for an esp32 sketch that includes BluetoothSerial.h", async () => {
+  await inTempDir(async (dir) => {
+    await Deno.mkdir(`${dir}/bt`);
+    await Deno.writeTextFile(`${dir}/bt/bt.ino`, '#include "BluetoothSerial.h"\nvoid setup() {}\n');
+    await Deno.writeTextFile(
+      `${dir}/s.yaml`,
+      SHORT.replace(
+        "board: scripted, position: [5, 0]",
+        "board: esp32, firmware: ./bt, position: [5, 0]",
+      ),
+    );
+    const outcome = await cli(["validate", `${dir}/s.yaml`]);
+    assertEquals(outcome.code, 0, outcome.stderr);
+    assertStringIncludes(outcome.stdout, "ok (2 nodes");
+    assertStringIncludes(
+      outcome.stderr,
+      "warning: b: bt.ino includes BluetoothSerial.h; classic Bluetooth is not simulated; " +
+        "this firmware cannot run on the esp32 board",
+    );
+  });
+});
+
 Deno.test("cli: validate accepts every example; the only refusals are unbuilt ESP-IDF binaries and Android apps", async () => {
   const names = [...Deno.readDirSync(EXAMPLES)].filter((e) => e.name.endsWith(".yaml"))
     .map((e) => e.name).sort();

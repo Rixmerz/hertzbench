@@ -9,6 +9,7 @@ import { PRODUCT } from "../brand.ts";
 import { androidCommand } from "./android.ts";
 import { runMcpServer, Session, ToolError } from "../mcp/mod.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
+import { sketchLimitWarnings } from "../orchestrator/board-limits.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
 import { renderReport } from "../orchestrator/report.ts";
 import { RunInterrupted, runScenario } from "../orchestrator/runner.ts";
@@ -162,6 +163,9 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
     if (args.command === "validate") {
+      for (const warning of await sketchLimitWarnings(scenario.nodes)) {
+        console.error(`${loaded.file}: warning: ${warning}`);
+      }
       console.log(
         `${loaded.file}: ok (${scenario.nodes.length} nodes, ${scenario.durationMs} ms, seed ${scenario.seed})`,
       );

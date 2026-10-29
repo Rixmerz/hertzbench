@@ -168,7 +168,9 @@ Deno.test("mcp: create, validate and run a scenario to the end, outputs inside t
       "does not exist",
     );
 
-    assertEquals((await client.ok("validate_scenario", { path: "s/two.yaml" })).ok, true);
+    const validated = await client.ok("validate_scenario", { path: "s/two.yaml" });
+    assertEquals(validated.ok, true);
+    assertEquals(validated.warnings, []);
     assertEquals(
       (await client.ok("validate_scenario", { yaml: SHORT })).scenario.name,
       "two-nodes",

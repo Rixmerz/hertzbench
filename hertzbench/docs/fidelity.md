@@ -75,6 +75,15 @@ SNR     = RSSI - noise
 
 - **DHT11 and DHT22** (the Adafruit `DHT sensor library`, and any single-wire sensor read by a timed busy-wait). No such part is attached. On hardware the library gives up after about a millisecond and returns NaN. Under QEMU on the wall clock (Wi-Fi on) its `expectPulse` loop runs with interrupts disabled long enough to trip the interrupt watchdog, so the board reboots on its first reading, again and again. The report recognises this: two or more `rst:0x8 (TG1WDT_SYS_RESET)` or `rst:0x7 (TG0WDT_SYS_RESET)` lines in an `esp32` node's serial produce a warning naming an interrupt watchdog reset loop as a fidelity limit (`orchestrator/board-limits.ts`, tested in `board_limits_test.ts`). To get past it, read a fixed value in the scenario's sketch instead of calling the sensor.
 
+## Not modelled: classic Bluetooth
+
+- **Classic Bluetooth** (`BluetoothSerial`, SPP, A2DP). The QEMU fork maps the Bluetooth block as an unimplemented device (see [BLE](#ble)), so `esp_bt_controller_init` fails its assert and the board reboots, again and again. This firmware cannot run on the `esp32` board. Three places say so:
+  - the report: `assert failed: esp_bt_controller_init` in an `esp32` node's serial produces the warning "classic Bluetooth is not simulated; this firmware cannot run on the esp32 board" (`orchestrator/board-limits.ts`);
+  - `validate` (the CLI, and `validate_scenario` in `warnings`): an `esp32` node whose sketch includes `BluetoothSerial.h` gets the same warning before anything is compiled;
+  - the compile step: when an `esp32` build fails with `text section exceeds available space` (classic Bluetooth and Wi-Fi linked together do not fit the default app partition), the error adds a hint to build with a larger app partition.
+
+  Tests: `board_limits_test.ts`, and `validate` in `cov_cli_test.ts`. BLE is not affected: the host-only stack above HCI is the real one.
+
 ## Addressing
 
 A QEMU socket netdev has no DHCP, ARP or DNS peer (SLIRP provided them). The engine hosts a **virtual gateway** on the switch, at `.1` of the subnet (default `192.168.4.0/24`), with MAC `02:68:7a:62:00:01`:

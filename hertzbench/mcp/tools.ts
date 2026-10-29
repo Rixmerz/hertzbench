@@ -9,6 +9,7 @@ import { PRODUCT } from "../brand.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
 import { ESP32_FIDELITY, resolveQemuLibrary } from "../orchestrator/boards/qemu-esp32.ts";
 import { scriptedLauncher } from "../orchestrator/boards/scripted.ts";
+import { sketchLimitWarnings } from "../orchestrator/board-limits.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
 import { renderReport } from "../orchestrator/report.ts";
 import { CAPTURE_KINDS, type CaptureKind } from "../orchestrator/runner.ts";
@@ -292,7 +293,7 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
     {
       name: "validate_scenario",
       description:
-        "Check a scenario without running it: give `path` (a YAML file) or `yaml` (the text). Returns the expanded nodes with their addresses, or the first error with its field path. Firmware paths are checked too.",
+        "Check a scenario without running it: give `path` (a YAML file) or `yaml` (the text). Returns the expanded nodes with their addresses, or the first error with its field path. Firmware paths are checked too. `warnings` names sketches that cannot run on the emulated board (an esp32 sketch that includes BluetoothSerial.h).",
       inputSchema: {
         type: "object",
         properties: {
@@ -320,7 +321,12 @@ export function tools(session: Session, openView?: ViewOpener): ToolDefinition[]
           if (missing.length > 0) {
             throw new ToolError(`firmware not found\n  ${missing.join("\n  ")}`);
           }
-          return { ok: true, file, scenario: summary(scenario) };
+          return {
+            ok: true,
+            file,
+            scenario: summary(scenario),
+            warnings: await sketchLimitWarnings(scenario.nodes),
+          };
         }),
     },
     {
