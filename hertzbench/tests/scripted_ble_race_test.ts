@@ -135,6 +135,7 @@ Deno.test("scripted-ble: a central re-initiates when Command Status and Connecti
         kind: "script",
         send: [],
         serve: [],
+        subscribe: [],
         listen: false,
         ble: {
           advertise: null,

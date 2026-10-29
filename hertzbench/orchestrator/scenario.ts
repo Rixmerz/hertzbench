@@ -32,13 +32,29 @@ export interface ScriptedSend {
    * the channel; null on LoRa, whose PHY has no addresses (every listener hears it).
    */
   to: string | null;
-  /** Wi-Fi: a UDP datagram, or an ESP-NOW frame through the fork's MAC model. BLE: an ATT PDU on the connection. */
-  via: "udp" | "espnow" | "gatt";
+  /**
+   * Wi-Fi: a UDP datagram, an ESP-NOW frame through the fork's MAC model, or an MQTT publish to the
+   * broker node. BLE: an ATT PDU on the connection.
+   */
+  via: "udp" | "espnow" | "gatt" | "mqtt";
   everyMs: number;
   count: number;
   startMs: number;
+  /** UDP: the port both ends use. MQTT: the broker's port. */
   port: number;
   payload: string;
+  /** MQTT only: the topic published to. */
+  topic?: string;
+  /** MQTT only: the payloads published in turn, then again from the first. `payload` is the first. */
+  payloads?: string[];
+}
+
+/** An MQTT subscription a scripted Wi-Fi board holds on a broker node; each message is a serial line. */
+export interface ScriptedSubscribe {
+  to: string;
+  port: number;
+  /** A topic filter: `+` and a trailing `#` are allowed. */
+  topic: string;
 }
 
 /** A TCP server a scripted Wi-Fi board runs, for the IP bridge (Phase 5a) to reach. */
@@ -83,6 +99,8 @@ export type FirmwareSpec =
     send: ScriptedSend[];
     /** Wi-Fi only: TCP servers. */
     serve: ScriptedService[];
+    /** Wi-Fi only: MQTT subscriptions on broker nodes. */
+    subscribe: ScriptedSubscribe[];
     /** Chip radios: keep the receiver on between sends. Defaults to true for a node that sends nothing. */
     listen: boolean;
     /** BLE only. */
@@ -601,11 +619,35 @@ function parseBleScript(obj: Obj, path: string, nodeName: string): BleScript {
   return { advertise, connect, scan: obj.scan === true };
 }
 
+const MQTT_PORT = 1883;
+const MAX_SEND_COUNT = 100_000;
+
+/** An MQTT topic name, or with `filter` a topic filter; wildcards are only for filters (MQTT 3.1.1 §4.7). */
+function mqttTopic(value: unknown, path: string, filter: boolean): string {
+  const topic = text(value, path);
+  if (topic === "" || new TextEncoder().encode(topic).length > 65535 || topic.includes("\0")) {
+    fail(path, "expected a topic of 1 to 65535 bytes");
+  }
+  if (!filter && /[+#]/.test(topic)) fail(path, "a publish topic takes no + or # wildcard");
+  if (
+    filter && !topic.split("/").every((level, i, all) => {
+      if (level === "#") return i === all.length - 1;
+      return level === "+" || !/[+#]/.test(level);
+    })
+  ) {
+    fail(path, "# must be the whole last level and + a whole level");
+  }
+  return topic;
+}
+
 function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): FirmwareSpec {
   const obj = record(value, path);
-  known(obj, ["send", "listen", "serve", ...BLE_SCRIPT_FIELDS], path);
+  known(obj, ["send", "listen", "serve", "subscribe", ...BLE_SCRIPT_FIELDS], path);
   if (phy !== "wifi" && obj.serve !== undefined) {
     fail(`${path}.serve`, "is a Wi-Fi notion: TCP servers need an IP network");
+  }
+  if (phy !== "wifi" && obj.subscribe !== undefined) {
+    fail(`${path}.subscribe`, "is a Wi-Fi notion: MQTT needs an IP network");
   }
   const serve = list(obj.serve ?? [], `${path}.serve`).map((raw, i): ScriptedService => {
     const p = `${path}.serve[${i}]`;
@@ -622,6 +664,18 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
     if (servedPorts.has(service.port)) fail(`${path}.serve[${i}].port`, "is already served");
     servedPorts.add(service.port);
   }
+  const subscribe = list(obj.subscribe ?? [], `${path}.subscribe`).map(
+    (raw, i): ScriptedSubscribe => {
+      const p = `${path}.subscribe[${i}]`;
+      const entry = record(raw, p);
+      known(entry, ["to", "topic", "port"], p);
+      return {
+        to: text(entry.to, `${p}.to`),
+        port: int(entry.port ?? MQTT_PORT, `${p}.port`, 1, 65535),
+        topic: mqttTopic(entry.topic, `${p}.topic`, true),
+      };
+    },
+  );
   for (const field of BLE_SCRIPT_FIELDS) {
     if (phy !== "ble" && obj[field] !== undefined) {
       fail(`${path}.${field}`, "is a BLE notion; this node's radio is not ble");
@@ -633,7 +687,7 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
   const send = list(obj.send ?? [], `${path}.send`).map((raw, i): ScriptedSend => {
     const p = `${path}.send[${i}]`;
     const entry = record(raw, p);
-    known(entry, ["to", "via", "every", "count", "start", "port", "payload"], p);
+    known(entry, ["to", "via", "every", "count", "start", "port", "payload", "topic"], p);
     if (phy === "lora" && entry.to !== undefined) {
       fail(`${p}.to`, "LoRa has no addresses: every listening node hears a send; leave `to` out");
     }
@@ -642,10 +696,15 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
       : text(entry.via, `${p}.via`);
     if (phy === "ble" && via !== "gatt") fail(`${p}.via`, 'a BLE node sends "gatt"');
     if (phy !== "ble" && via === "gatt") fail(`${p}.via`, "GATT needs a ble radio");
-    if (via !== "udp" && via !== "espnow" && via !== "gatt") {
-      fail(`${p}.via`, 'expected "udp", "espnow" or "gatt"');
+    if (via !== "udp" && via !== "espnow" && via !== "gatt" && via !== "mqtt") {
+      fail(`${p}.via`, 'expected "udp", "espnow", "gatt" or "mqtt"');
     }
     if (via === "espnow" && phy !== "wifi") fail(`${p}.via`, "ESP-NOW needs a wifi radio");
+    if (via === "mqtt" && phy !== "wifi") fail(`${p}.via`, "MQTT needs a wifi radio");
+    if (via === "mqtt" && entry.topic === undefined) {
+      fail(`${p}.topic`, "is required with via: mqtt");
+    }
+    if (via !== "mqtt" && entry.topic !== undefined) fail(`${p}.topic`, "needs via: mqtt");
     const to = phy === "lora" ? null : text(entry.to, `${p}.to`);
     if (to === BROADCAST_TARGET && via !== "espnow") {
       fail(`${p}.to`, `"${BROADCAST_TARGET}" needs via: espnow`);
@@ -653,7 +712,12 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
     if ((via === "espnow" || via === "gatt") && entry.port !== undefined) {
       fail(`${p}.port`, via === "gatt" ? "GATT has no ports" : "ESP-NOW has no ports");
     }
-    const payload = entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`);
+    const payloads = via === "mqtt" && Array.isArray(entry.payload)
+      ? list(entry.payload, `${p}.payload`).map((item, k) => text(item, `${p}.payload[${k}]`))
+      : null;
+    if (payloads?.length === 0) fail(`${p}.payload`, "names no payload to publish");
+    const payload = payloads?.[0] ??
+      (entry.payload === undefined ? "ping" : text(entry.payload, `${p}.payload`));
     // Room for ":<sequence>" inside ESP-NOW's 250-byte payload.
     if (via === "espnow" && new TextEncoder().encode(payload).length > 200) {
       fail(`${p}.payload`, "an ESP-NOW payload must stay within 200 bytes");
@@ -662,14 +726,24 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
     if (via === "gatt" && new TextEncoder().encode(payload).length > 14) {
       fail(`${p}.payload`, "a GATT payload must stay within 14 bytes");
     }
+    // An MQTT publish has no natural end: without `count` it goes on until the run does.
+    const count = via === "mqtt" && entry.count === undefined
+      ? MAX_SEND_COUNT
+      : int(entry.count, `${p}.count`, 1, MAX_SEND_COUNT);
     return {
       to,
       via,
       everyMs: parseDuration(entry.every, `${p}.every`),
-      count: int(entry.count, `${p}.count`, 1, 100_000),
+      count,
       startMs: entry.start === undefined ? 0 : parseDuration(entry.start, `${p}.start`),
-      port: int(entry.port ?? 5000, `${p}.port`, 1, 65535),
+      port: int(entry.port ?? (via === "mqtt" ? MQTT_PORT : 5000), `${p}.port`, 1, 65535),
       payload,
+      ...(via === "mqtt"
+        ? {
+          topic: mqttTopic(entry.topic, `${p}.topic`, false),
+          payloads: payloads ?? [payload],
+        }
+        : {}),
     };
   });
   if (obj.listen !== undefined && typeof obj.listen !== "boolean") {
@@ -680,6 +754,7 @@ function parseScript(value: unknown, path: string, phy: Phy, nodeName: string): 
     kind: "script",
     send,
     serve,
+    subscribe,
     listen,
     ble: phy === "ble" ? parseBleScript(obj, path, nodeName) : null,
   };
@@ -1384,8 +1459,24 @@ function checkReferences(scenario: Scenario): void {
   const connects = (central: ScenarioNode, peripheral: string) =>
     central.firmware.kind === "script" &&
     (central.firmware.ble?.connect?.peers.includes(peripheral) ?? false);
+  // A scripted broker must serve MQTT on the port; any other board (an ESP32 sketch) is taken at its word.
+  const needBroker = (peer: ScenarioNode, port: number, path: string) => {
+    if (peer.firmware.kind !== "script") return;
+    if (!peer.firmware.serve.some((s) => s.protocol === "mqtt" && s.port === port)) {
+      fail(`${path}.to`, `${peer.id} serves no MQTT broker on port ${port}`);
+    }
+  };
   scenario.nodes.forEach((node, i) => {
     if (node.firmware.kind !== "script") return;
+    node.firmware.subscribe.forEach((sub, j) => {
+      const p = `nodes[${i}].firmware.subscribe[${j}]`;
+      if (!boards.includes(sub.to)) {
+        fail(`${p}.to`, `no node named ${JSON.stringify(sub.to)} on the medium`);
+      }
+      if (sub.to === node.id) fail(`${p}.to`, "a node cannot subscribe to itself");
+      const peer = scenario.nodes.find((n) => n.id === sub.to);
+      if (peer) needBroker(peer, sub.port, p);
+    });
     node.firmware.ble?.connect?.peers.forEach((peer, j) => {
       const p = `nodes[${i}].firmware.connect.peers[${j}]`;
       if (!boards.includes(peer)) fail(p, `no node named ${JSON.stringify(peer)} on the medium`);
@@ -1407,6 +1498,9 @@ function checkReferences(scenario: Scenario): void {
         fail(`nodes[${i}].firmware.send[${j}].to`, "a node cannot send to itself");
       }
       const peer = scenario.nodes.find((n) => n.id === send.to);
+      if (send.via === "mqtt" && peer) {
+        needBroker(peer, send.port, `nodes[${i}].firmware.send[${j}]`);
+      }
       if (send.via === "gatt" && peer && !connects(node, send.to) && !connects(peer, node.id)) {
         fail(
           `nodes[${i}].firmware.send[${j}].to`,

@@ -1,0 +1,51 @@
+# Scripted boards as MQTT clients (no QEMU): `valve` publishes its state to the
+# broker every 10 s, alternating ON and OFF, and listens on riego/cmd; `panel`
+# sends the commands and listens on the state topic. A phone on the host's LAN
+# can watch the same topics through the IP bridge:
+#   mosquitto_sub -h 127.0.0.1 -p 1883 -t 'riego/#' -v
+#   mosquitto_pub -h 127.0.0.1 -p 1883 -t riego/cmd -m OPEN
+#
+# Each client connects as soon as it has its lease and connects again whenever the
+# session drops. A publish's `start` counts from the first connection.
+name: mqtt-clients-scripted
+seed: 7
+duration: 60s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: broker
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      serve:
+        - { port: 1883, protocol: mqtt }
+  - id: valve
+    board: scripted
+    position: [6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      send:
+        - { to: broker, via: mqtt, topic: riego/estado, every: 10s, payload: [ON, OFF] }
+      subscribe:
+        - { to: broker, topic: riego/cmd }
+  - id: panel
+    board: scripted
+    position: [-6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      send:
+        - { to: broker, via: mqtt, topic: riego/cmd, every: 15s, start: 5s, payload: [OPEN, CLOSE] }
+      subscribe:
+        - { to: broker, topic: riego/estado }
+bridge:
+  id: phone
+  position: [3, 3]
+  listen: 127.0.0.1
+  expose:
+    - { node: broker, port: 1883, service: mqtt, listen_port: 1883 }
+assertions:
+  - serial: { node: broker, contains: 'mqtt publish riego/estado "ON" from valve', within: 10s }
+  - serial: { node: valve, contains: "mqtt rx riego/cmd OPEN", within: 20s }
+  - serial: { node: panel, contains: "mqtt rx riego/estado OFF", within: 30s }

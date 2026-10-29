@@ -2,7 +2,7 @@
 
 A scenario is one YAML file. `hertzbench validate` checks it; every error names the field (`nodes[1].position: expected [x, y] or [x, y, z]`). Unknown fields are errors, not ignored. Durations need a unit: `500ms`, `60s`, `1.5s`, `2m`. A bare number is refused.
 
-Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE; [`bridge-web-scripted.yaml`](../scenarios/examples/bridge-web-scripted.yaml), [`bridge-web-esp32.yaml`](../scenarios/examples/bridge-web-esp32.yaml), [`bridge-ble-scripted.yaml`](../scenarios/examples/bridge-ble-scripted.yaml) and [`bridge-ble-esp32.yaml`](../scenarios/examples/bridge-ble-esp32.yaml) for the mobile bridge; [`door-and-interference-scripted.yaml`](../scenarios/examples/door-and-interference-scripted.yaml) (scripted) for a door that opens and a noise source that switches on and off.
+Examples: [`udp-3-nodes.yaml`](../scenarios/examples/udp-3-nodes.yaml) (ESP32) and [`udp-3-scripted.yaml`](../scenarios/examples/udp-3-scripted.yaml) (scripted boards, no QEMU) for Wi-Fi/IP; [`espnow-mesh-5-nodes.yaml`](../scenarios/examples/espnow-mesh-5-nodes.yaml) (ESP32) and [`espnow-mesh-scripted.yaml`](../scenarios/examples/espnow-mesh-scripted.yaml) (scripted) for ESP-NOW; [`ble-sensors-3-nodes.yaml`](../scenarios/examples/ble-sensors-3-nodes.yaml) (ESP32 sensors) and [`ble-sensors-scripted.yaml`](../scenarios/examples/ble-sensors-scripted.yaml) (scripted) for BLE; [`bridge-web-scripted.yaml`](../scenarios/examples/bridge-web-scripted.yaml), [`bridge-web-esp32.yaml`](../scenarios/examples/bridge-web-esp32.yaml), [`bridge-ble-scripted.yaml`](../scenarios/examples/bridge-ble-scripted.yaml) and [`bridge-ble-esp32.yaml`](../scenarios/examples/bridge-ble-esp32.yaml) for the mobile bridge; [`mqtt-clients-scripted.yaml`](../scenarios/examples/mqtt-clients-scripted.yaml) (scripted) for boards that publish to and subscribe on an MQTT broker node; [`door-and-interference-scripted.yaml`](../scenarios/examples/door-and-interference-scripted.yaml) (scripted) for a door that opens and a noise source that switches on and off.
 
 ```yaml
 name: udp-3-nodes            # required
@@ -101,6 +101,22 @@ interference:
   ```
 
   Ports are distinct, 1 to 65535. Serial lines: `tcp listening on <port> (<protocol>)`, `http <METHOD> <path> from <ip>`, `ws open <path> from <ip>`, `ws rx "<text>" from <ip>`, `ws closed from <ip>`, `mqtt connect <client id> from <ip>`, `mqtt subscribe <filter> from <client id>`, `mqtt publish <topic> "<payload>" from <client id>`.
+
+  With `via: mqtt` the board is an MQTT 3.1.1 client of a broker node (a scripted node that `serve`s `mqtt`, or an ESP32 running one) and publishes periodically; `subscribe` lists the topics it listens on:
+
+  ```yaml
+  send:
+    - { to: broker, via: mqtt, topic: riego/estado, every: 10s, payload: [ON, OFF] }
+  subscribe:
+    - { to: broker, topic: riego/cmd }
+  ```
+
+  - `topic` is required with `via: mqtt` and refused with any other `via`; a publish topic takes no `+` or `#`. `payload` is a string or a list of strings: each publish sends the next one and the list starts over after the last. The payload goes out as written, with no `:<n>` suffix. `port` is the broker's port, default 1883. `count` is optional for MQTT and defaults to 100000, that is, until the run ends. An MQTT send is Wi-Fi only.
+  - `subscribe` entries are `{ to, topic, port }`: `to` the broker node, `topic` a filter (`+` for one level, `#` as the whole last level), `port` default 1883. Each message that arrives is a serial line `mqtt rx <topic> <payload>`. Wi-Fi only.
+  - `to` must be a node on the medium other than the board itself. If it is a scripted node, it must `serve` `mqtt` on that port (`<node> serves no MQTT broker on port <port>` otherwise); any other board is taken at its word.
+  - One connection per broker (node and port) carries all the board's publishes and subscriptions to it. It connects as soon as the board has its lease, with the board's id as client id, a clean session and a 10 s keep-alive. The `start` of a publish counts from the first time the session is up, so the handshake does not eat the first publish; later publishes keep the `every` cadence, and one that falls while the session is down is skipped and logged as `mqtt tx <topic> skipped: not connected to <node>`.
+  - **Reconnection.** If the TCP connection closes or resets, or the broker says nothing for 15 s (1.5 keep-alives, with a PINGREQ every 10 s), the board connects again after 1 s and subscribes again; the same retry covers a broker that is not listening yet. No QoS above 0, retained messages, will or authentication: the broker of `serve` has none either.
+  - Serial lines: `mqtt connected to <node>`, `mqtt disconnected from <node>`, `mqtt rx <topic> <payload>`, `mqtt tx <topic> skipped: not connected to <node>`. On the broker node, `mqtt connect|subscribe|publish ...` as for any client, so a phone on the [bridge](#bridge) that exposes the broker sees the same topics.
 
   Frames go one at a time, each waiting for its ACK or, if none comes, for the fork's 10 ms timeout plus a 30 ms allowance for the loopback hops (a failed send is logged about 40 ms after it). The board logs `espnow rx <text> from <node>` for each frame it accepts and `espnow tx ok to <node>` or `espnow tx fail to <node>` for each send it completes. The ESP32 example sketches print the same lines.
 
