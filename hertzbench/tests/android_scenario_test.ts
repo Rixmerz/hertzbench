@@ -20,11 +20,19 @@ import {
   consolePortForMac,
   createAndroidLauncher,
   loadScenario,
+  macForIndex,
   parseScenario,
   runScenario,
   ScenarioError,
 } from "../orchestrator/mod.ts";
-import { FAKE_GUEST, fakeGuestSdk, fakeSdk } from "./android_fake_sdk.ts";
+import {
+  FAKE_EMULATOR_VERSION,
+  FAKE_GUEST,
+  fakeAvdHome,
+  fakeGuestSdk,
+  fakeSdk,
+  fakeSnapshotSdk,
+} from "./android_fake_sdk.ts";
 import { skipOnWindows } from "./platform.ts";
 
 const androidRun = skipOnWindows("the fake emulator and adb are sh scripts");
@@ -94,6 +102,30 @@ ${WEB}
     installTimeoutMs: 30_000,
     launchTimeoutMs: 5000,
   });
+});
+
+Deno.test("android node: snapshot boot gives the node an ordinary MAC, and nodes may share a run", () => {
+  const snapshotPhone = (id: string, extra = "") =>
+    `  - id: ${id}\n    board: android\n    position: [3, 0]\n${extra}` +
+    "    android: { avd: pixel8, apk: ./app.apk, package: dev.example.app, snapshot: true }\n";
+  const scenario = parseScenario(
+    `name: android\nduration: 1s\nnodes:\n${WEB}\n${snapshotPhone("phone")}` +
+      snapshotPhone("tablet") + snapshotPhone("watch", "    mac: 02:AA:BB:CC:DD:EE\n"),
+  );
+  const [, phone, tablet, watch] = scenario.nodes;
+  assertEquals(phone!.android!.snapshot, true);
+  assertEquals(phone!.mac, macForIndex(2));
+  assertEquals(tablet!.mac, macForIndex(3));
+  assertEquals(watch!.mac, "02:aa:bb:cc:dd:ee");
+  assertEquals(new Set(scenario.nodes.map((n) => n.mac)).size, 4);
+  // a node that cold-boots may share the run with snapshot nodes, and keeps the AVD's MAC
+  const mixed = parseScenario(
+    `name: android\nduration: 1s\nnodes:\n${WEB}\n${snapshotPhone("phone")}  -${
+      PHONE.replace("id: phone", "id: cold")
+    }`,
+  );
+  assertEquals(mixed.nodes[2]!.mac, ANDROID_DEFAULT_MAC);
+  assertEquals(mixed.nodes[2]!.android!.snapshot, undefined);
 });
 
 const refusals: [string, string, string][] = [
@@ -194,7 +226,21 @@ const refusals: [string, string, string][] = [
       "  - id: tablet\n    board: android\n    position: [6, 0]\n" +
         "    android: { avd: pixel8, apk: ./app.apk, package: dev.example.app }\n",
     ),
-    "a run has at most one android node",
+    "a run has at most one android node that cold-boots",
+  ],
+  [
+    "a snapshot flag that is not a boolean",
+    scenarioWith(PHONE.replaceAll("}", ", snapshot: yes please }")),
+    "nodes[1].android.snapshot: expected true or false",
+  ],
+  [
+    "a cold-boot node beside a second one that cold-boots",
+    scenarioWith(
+      PHONE,
+      "  - id: tablet\n    board: android\n    position: [6, 0]\n" +
+        "    android: { avd: pixel8, apk: ./app.apk, package: dev.example.app, snapshot: false }\n",
+    ),
+    "set `snapshot: true` in each android section",
   ],
 ];
 
@@ -429,3 +475,107 @@ androidRun("android run: an AVD that does not exist is refused before anything b
     await Deno.remove(work, { recursive: true });
   }
 });
+
+// ── snapshot boot, through the runner ───────────────────────────────────────
+
+const SNAPSHOT_ADB = `shell) echo 1 ;;
+wait-for-device) exit 0 ;;
+install) echo Success ;;
+logcat) if [ "$1" = "-c" ]; then exit 0; fi; echo "HZB up"; exec sleep 60 ;;
+emu) kill "$(cat "$DIR/emulator-pid-\${serial#emulator-}")" ;;`;
+
+const SNAPSHOT_NODES = `
+    android: { avd: pixel8, apk: ./app.apk, package: dev.example.app, snapshot: true }`;
+
+/** Run two snapshot android nodes, `phone` and `tablet`, against a fake AVD home holding `marker`. */
+async function runSnapshotNodes(marker: { emulator: string } | null) {
+  const avd = await fakeAvdHome("pixel8", marker);
+  const work = await Deno.makeTempDir({ prefix: "hzb-android-run-" });
+  const oldHome = Deno.env.get("ANDROID_AVD_HOME");
+  Deno.env.set("ANDROID_AVD_HOME", avd.home);
+  try {
+    await Deno.writeTextFile(join(work, "app.apk"), "PK");
+    await Deno.writeTextFile(
+      join(work, "s.yaml"),
+      scenarioWith(
+        SNAPSHOT_NODES.replace(/^/, "\n    id: phone\n    board: android\n    position: [3, 0]"),
+        `  - id: tablet\n    board: android\n    position: [6, 0]${SNAPSHOT_NODES}\n`,
+      ),
+    );
+    const loaded = await loadScenario(join(work, "s.yaml"), join(work, "out"));
+    return await runScenario(loaded.scenario, {
+      outDir: loaded.outDir,
+      outputs: loaded.outputs,
+      launchers: { android: createAndroidLauncher({ checkKvm: () => null }) },
+    });
+  } finally {
+    if (oldHome === undefined) Deno.env.delete("ANDROID_AVD_HOME");
+    else Deno.env.set("ANDROID_AVD_HOME", oldHome);
+    await avd.remove();
+    await Deno.remove(work, { recursive: true });
+  }
+}
+
+androidRun(
+  "android run: two snapshot nodes boot with their own MAC and console port and get distinct leases",
+  async () => {
+    const sdk = await fakeSnapshotSdk(SNAPSHOT_ADB);
+    try {
+      const result = await runSnapshotNodes({ emulator: FAKE_EMULATOR_VERSION });
+      assertEquals(result.problems, []);
+
+      const leases: string[] = [];
+      const ports: string[] = [];
+      for (const [node, mac, ip] of [["phone", 2, 12], ["tablet", 3, 13]] as const) {
+        const guestMac = macForIndex(mac);
+        const reply = Uint8Array.from(
+          (await Deno.readTextFile(join(sdk.dir, `reply-${guestMac}.hex`))).match(/../g)!,
+          (b) => parseInt(b, 16),
+        );
+        assertEquals(parseEthernet(reply)!.dst, guestMac, node);
+        const bootp = parseUdp(reply, parseIpv4(reply)!)!.payload;
+        assertEquals(bootp[240 + 2], 2, node); // DHCPOFFER
+        leases.push(Array.from(bootp.subarray(16, 20)).join("."));
+        assertEquals(leases.at(-1), `192.168.4.${ip}`, node);
+
+        const args = await Deno.readTextFile(join(sdk.dir, `emulator-args-${guestMac}`));
+        assertStringIncludes(
+          args,
+          `-snapshot hertzbench -force-snapshot-load -wifi-mac-address ${guestMac} `,
+        );
+        assertStringIncludes(args, "-read-only -no-snapshot-save");
+        ports.push(/-port (\d+)/.exec(args)![1]!);
+        assert(!args.includes("-port 5584 "), "a snapshot boot does not need the MAC's own port");
+      }
+      assertEquals(new Set(leases).size, 2);
+      assertEquals(new Set(ports).size, 2, "two emulators on one console port");
+    } finally {
+      await sdk.restore();
+    }
+  },
+);
+
+androidRun(
+  "android run: a snapshot node refuses to start when the AVD has no snapshot or one from another emulator",
+  async () => {
+    const sdk = await fakeSdk(SNAPSHOT_ADB);
+    try {
+      for (
+        const [marker, words] of [
+          [null, "pixel8 has no prepared snapshot; run `hertzbench android prepare pixel8`"],
+          [
+            { emulator: "36.0.0.0" },
+            `prepared with emulator 36.0.0.0, this is ${FAKE_EMULATOR_VERSION}`,
+          ],
+        ] as const
+      ) {
+        const error = await assertRejects(() => runSnapshotNodes(marker), BoardError);
+        assertStringIncludes(error.message, words);
+      }
+      // refused in preflight: no emulator was ever started for either node
+      await assertRejects(() => Deno.stat(join(sdk.dir, "emulator-args")), Deno.errors.NotFound);
+    } finally {
+      await sdk.restore();
+    }
+  },
+);

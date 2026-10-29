@@ -6,6 +6,7 @@
 
 import { resolve } from "node:path";
 import { PRODUCT } from "../brand.ts";
+import { androidCommand } from "./android.ts";
 import { runMcpServer, Session, ToolError } from "../mcp/mod.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
 import { checkFirmwareFiles, loadScenario } from "../orchestrator/load.ts";
@@ -21,6 +22,7 @@ Usage:
   ${PRODUCT.cli} validate <scenario.yaml>
   ${PRODUCT.cli} view <scenario.yaml> [--port N] [--out DIR] [--seed N]
   ${PRODUCT.cli} mcp [--workspace DIR] [--view-port N]
+  ${PRODUCT.cli} android prepare <avd>
 
   (${PRODUCT.cliAlias} is a short alias for ${PRODUCT.cli})
 
@@ -32,6 +34,8 @@ view       Run the scenario and draw it live in the browser: a map of the
            node to move it (see docs/view.md). Serves until Ctrl-C.
 mcp        Serve the Model Context Protocol on stdin and stdout, for an AI
            agent such as Claude Code (see docs/mcp.md).
+android    prepare: save the AVD snapshot that \`snapshot: true\` android nodes boot
+           from (see docs/scenario-format.md, \`board: android\`).
 
 Options:
   --out DIR   Write every output file into DIR instead of the scenario's own.
@@ -119,6 +123,7 @@ function parseArgs(argv: string[]): Args | string {
 }
 
 async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "android") return await androidCommand(argv.slice(1));
   const args = parseArgs(argv);
   if (typeof args === "string") {
     console.error(args === USAGE ? args : `${args}\n\n${USAGE}`);

@@ -6,13 +6,19 @@ import { join } from "node:path";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import {
   AndroidStepError,
+  avdDirectory,
   findAndroidTools,
   kvmProblem,
   launchEmulator,
   listAvds,
+  preparedSnapshot,
+  prepareSnapshot,
   type RunningEmulator,
+  snapshotBootArgs,
+  wifiSocketArgs,
 } from "../orchestrator/boards/android/tooling.ts";
-import { fakeSdk } from "./android_fake_sdk.ts";
+import { BoardError } from "../orchestrator/boards/board.ts";
+import { FAKE_EMULATOR_VERSION, fakeAvdHome, fakeSdk } from "./android_fake_sdk.ts";
 import { skipOnWindows } from "./platform.ts";
 
 const androidTest = skipOnWindows("the fake emulator and adb are sh scripts");
@@ -242,3 +248,256 @@ emu) kill "$(cat "$DIR/emulator-pid")" ;;`);
     assertStringIncludes(error.message, "does not exist");
   });
 });
+
+// ── snapshots (piece 6) ─────────────────────────────────────────────────────
+
+const envOf = (vars: Record<string, string>) => (name: string) => vars[name];
+
+Deno.test("avdDirectory follows the AVD's .ini to where the AVD really is", async () => {
+  const home = await Deno.makeTempDir({ prefix: "hzb-avd-ini-" });
+  const elsewhere = await Deno.makeTempDir({ prefix: "hzb-avd-elsewhere-" });
+  try {
+    await Deno.writeTextFile(
+      join(home, "moved.ini"),
+      `avd.ini.encoding=UTF-8\npath=${elsewhere}\n`,
+    );
+    await Deno.mkdir(join(home, "plain.avd"));
+    const env = envOf({ ANDROID_AVD_HOME: home });
+    assertEquals(avdDirectory("moved", env), elsewhere);
+    assertEquals(avdDirectory("plain", env), join(home, "plain.avd"));
+    assertEquals(avdDirectory("absent", env), null);
+    // $ANDROID_USER_HOME/avd and ~/.android/avd come after $ANDROID_AVD_HOME
+    await Deno.mkdir(join(home, "avd", "user.avd"), { recursive: true });
+    assertEquals(
+      avdDirectory("user", envOf({ ANDROID_USER_HOME: home })),
+      join(home, "avd", "user.avd"),
+    );
+    await Deno.mkdir(join(home, ".android", "avd", "dot.avd"), { recursive: true });
+    assertEquals(
+      avdDirectory("dot", envOf({ HOME: home })),
+      join(home, ".android", "avd", "dot.avd"),
+    );
+  } finally {
+    await Deno.remove(home, { recursive: true });
+    await Deno.remove(elsewhere, { recursive: true });
+  }
+});
+
+Deno.test("preparedSnapshot: usable only with a marker made by this emulator build", async () => {
+  const ready = await fakeAvdHome("pixel8", { emulator: FAKE_EMULATOR_VERSION });
+  const bare = await fakeAvdHome("pixel8", null);
+  try {
+    const env = (home: string) => envOf({ ANDROID_AVD_HOME: home });
+    assertEquals(preparedSnapshot("pixel8", FAKE_EMULATOR_VERSION, env(ready.home)), {
+      usable: true,
+    });
+
+    const stale = preparedSnapshot("pixel8", "38.0.0.0", env(ready.home));
+    assert(!stale.usable);
+    assertStringIncludes(stale.reason, `prepared with emulator ${FAKE_EMULATOR_VERSION}`);
+    assertStringIncludes(stale.reason, "this is 38.0.0.0");
+    assertStringIncludes(stale.reason, "hertzbench android prepare pixel8");
+
+    const none = preparedSnapshot("pixel8", FAKE_EMULATOR_VERSION, env(bare.home));
+    assert(!none.usable);
+    assertStringIncludes(none.reason, "pixel8 has no prepared snapshot");
+
+    const unknown = preparedSnapshot("tablet", FAKE_EMULATOR_VERSION, env(bare.home));
+    assert(!unknown.usable);
+    assertStringIncludes(unknown.reason, "no directory found for the AVD tablet");
+  } finally {
+    await ready.remove();
+    await bare.remove();
+  }
+});
+
+Deno.test("the snapshot and Wi-Fi socket flags are spelled as the emulator reads them", () => {
+  assertEquals(snapshotBootArgs("02:68:7a:62:01:02"), [
+    "-snapshot",
+    "hertzbench",
+    "-force-snapshot-load",
+    "-wifi-mac-address",
+    "02:68:7a:62:01:02",
+  ]);
+  assertEquals(wifiSocketArgs(4321), [
+    "-feature",
+    "-WiFiPacketStream",
+    "-wifi-socket",
+    "connect=127.0.0.1:4321",
+  ]);
+});
+
+androidTest("two emulators launched back to back get different console ports", async () => {
+  const sdk = await fakeSdk(
+    `emu) kill "$(cat "$DIR/emulator-pid-\${serial#emulator-}")" ;;`,
+    `port=""; prev=""
+for arg in "$@"; do if [ "$prev" = "-port" ]; then port="$arg"; fi; prev="$arg"; done
+echo $$ > "$DIR/emulator-pid-$port"
+exec sleep 60`,
+  );
+  const first = launchEmulator(findAndroidTools(), { avd: "pixel8" });
+  const second = launchEmulator(findAndroidTools(), { avd: "pixel8" });
+  try {
+    // Neither fake binds its port, so only the claim keeps the second pick from the first's port.
+    assert(first.port !== second.port, `both took ${first.port}`);
+    assertEquals(first.serial, `emulator-${first.port}`);
+    await first.kill();
+    // a stopped emulator gives its port back
+    const third = launchEmulator(findAndroidTools(), { avd: "pixel8" });
+    assertEquals(third.port, first.port);
+    await third.kill();
+  } finally {
+    await second.kill();
+    await first.kill();
+    await sdk.restore();
+  }
+});
+
+const SAVE_OK = BOOTED.replace(
+  "emu) kill",
+  'emu) if [ "$1" = avd ]; then echo OK; exit 0; fi; kill',
+);
+
+/**
+ * The pieces `prepareSnapshot` needs around a fake SDK: an AVD tree that already holds a marker of
+ * an older build, and an emulator that records its arguments and the Wi-Fi port it was given.
+ */
+async function prepareRig(adb: string) {
+  const avd = await fakeAvdHome("pixel8", { emulator: "old build" });
+  const sdk = await fakeSdk(
+    adb,
+    `echo "$@" > "$DIR/emulator-args"; echo $$ > "$DIR/emulator-pid"
+for arg in "$@"; do last="$arg"; done
+echo "\${last##*:}" > "$DIR/wifi-port"
+exec sleep 60`,
+  );
+  return {
+    sdk,
+    avd,
+    env: envOf({ ANDROID_AVD_HOME: avd.home }),
+    async remove() {
+      await sdk.restore();
+      await avd.remove();
+    },
+  };
+}
+
+androidTest(
+  "prepare: boots writable and cold with the run's Wi-Fi flags, saves the snapshot, marks it, stops",
+  async () => {
+    const rig = await prepareRig(SAVE_OK);
+    try {
+      const marker = join(rig.avd.avdDir, "snapshots", "hertzbench", "hertzbench.json");
+      const result = await prepareSnapshot(findAndroidTools(), "pixel8", {
+        checkKvm: () => null,
+        env: rig.env,
+      });
+      assertEquals(result.snapshotDir, join(rig.avd.avdDir, "snapshots", "hertzbench"));
+      assertEquals(result.emulatorVersion, FAKE_EMULATOR_VERSION);
+      assertEquals(JSON.parse(await Deno.readTextFile(marker)), {
+        emulator: FAKE_EMULATOR_VERSION,
+      });
+      assertEquals(preparedSnapshot("pixel8", FAKE_EMULATOR_VERSION, rig.env), { usable: true });
+
+      const args = await Deno.readTextFile(join(rig.sdk.dir, "emulator-args"));
+      assertStringIncludes(
+        args,
+        "-avd pixel8 -no-window -no-audio -no-boot-anim -no-snapshot-load",
+      );
+      assertStringIncludes(args, "-no-snapshot-save -gpu swiftshader_indirect -port ");
+      assertStringIncludes(args, "-feature -WiFiPacketStream -wifi-socket connect=127.0.0.1:");
+      assert(!args.includes("-read-only"), `a snapshot cannot be saved read-only: ${args}`);
+      const calls = await Deno.readTextFile(join(rig.sdk.dir, "adb-calls"));
+      assertStringIncludes(calls, " emu avd snapshot save hertzbench");
+      assert(
+        calls.indexOf("snapshot save") < calls.indexOf("emu kill"),
+        "the snapshot is saved before the emulator is stopped",
+      );
+    } finally {
+      await rig.remove();
+    }
+  },
+);
+
+androidTest("prepare: the emulator's Wi-Fi socket has a listener to connect to", async () => {
+  // The fake emulator only records the port; the save waits for the probe's connection to it.
+  const rig = await prepareRig(
+    SAVE_OK.replace(
+      "echo OK;",
+      'n=0; while [ ! -f "$DIR/probed" ] && [ $n -lt 100 ]; do sleep 0.05; n=$((n+1)); done; echo OK;',
+    ),
+  );
+  try {
+    let connected = false;
+    const probe = (async () => {
+      for (let i = 0; i < 200 && !connected; i++) {
+        try {
+          const port = Number((await Deno.readTextFile(join(rig.sdk.dir, "wifi-port"))).trim());
+          (await Deno.connect({ hostname: "127.0.0.1", port })).close();
+          connected = true;
+          await Deno.writeTextFile(join(rig.sdk.dir, "probed"), "");
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+    })();
+    await prepareSnapshot(findAndroidTools(), "pixel8", { checkKvm: () => null, env: rig.env });
+    await probe;
+    assert(connected, "nothing listened on the port given to -wifi-socket");
+  } finally {
+    await rig.remove();
+  }
+});
+
+androidTest(
+  "prepare: a refused save names the snapshot step, quotes the console and drops the old marker",
+  async () => {
+    const rig = await prepareRig(
+      SAVE_OK.replace("echo OK;", "echo 'KO: not enough disk'; exit 0;"),
+    );
+    try {
+      const error = await assertRejects(
+        () => prepareSnapshot(findAndroidTools(), "pixel8", { checkKvm: () => null, env: rig.env }),
+        AndroidStepError,
+      );
+      assertEquals(error.step, "snapshot");
+      assertStringIncludes(error.message, "KO: not enough disk");
+      assertEquals(
+        preparedSnapshot("pixel8", FAKE_EMULATOR_VERSION, rig.env).usable,
+        false,
+        "the marker of an earlier snapshot must not vouch for a failed save",
+      );
+      assertStringIncludes(await Deno.readTextFile(join(rig.sdk.dir, "adb-calls")), "emu kill");
+    } finally {
+      await rig.remove();
+    }
+  },
+);
+
+androidTest(
+  "prepare: no KVM, an unknown AVD and an AVD without a directory stop it before boot",
+  async () => {
+    const rig = await prepareRig(SAVE_OK);
+    try {
+      const tools = findAndroidTools();
+      const run = (avd: string, checkKvm: () => string | null) =>
+        assertRejects(() => prepareSnapshot(tools, avd, { checkKvm, env: rig.env }), BoardError);
+      assertStringIncludes((await run("pixel8", () => "no /dev/kvm")).message, "no /dev/kvm");
+      assertStringIncludes(
+        (await run("nope", () => null)).message,
+        "no AVD named nope (found: pixel8, tablet)",
+      );
+      // "tablet" is listed by the fake emulator but has no directory under the AVD home
+      assertStringIncludes(
+        (await run("tablet", () => null)).message,
+        "no directory found for the AVD tablet",
+      );
+      await assertRejects(
+        () => Deno.readTextFile(join(rig.sdk.dir, "emulator-args")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await rig.remove();
+    }
+  },
+);

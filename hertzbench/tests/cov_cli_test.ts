@@ -4,6 +4,8 @@
 // they are. The child inherits DENO_COVERAGE_DIR, so `deno test --coverage`
 // counts what it runs.
 
+import { join } from "node:path";
+import { FAKE_EMULATOR_VERSION, fakeAvdHome, fakeSdk } from "./android_fake_sdk.ts";
 import { forward, signalTest } from "./platform.ts";
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -69,6 +71,65 @@ Deno.test("cli: an empty --seed or --port is refused, not read as 0", async () =
 });
 
 // ── arguments ───────────────────────────────────────────────────────────────
+
+// ── android prepare ─────────────────────────────────────────────────────────
+
+Deno.test("cli: android needs prepare and an AVD name, and says so with the usage", async () => {
+  const cases: [string[], string][] = [
+    [["android"], "android needs a subcommand"],
+    [["android", "frobnicate"], 'unknown android subcommand "frobnicate"'],
+    [["android", "prepare"], "android prepare needs the name of an AVD"],
+    [["android", "prepare", "--wipe"], "android prepare needs the name of an AVD"],
+    [["android", "prepare", "pixel8", "extra"], "unexpected argument extra"],
+  ];
+  for (const [args, words] of cases) {
+    const outcome = await cli(args);
+    assertEquals(outcome.code, 2, args.join(" "));
+    assertStringIncludes(outcome.stderr, words);
+    assertStringIncludes(outcome.stderr, "hertzbench android prepare <avd>");
+    assertEquals(outcome.stdout, "");
+  }
+  const help = await cli(["android", "--help"]);
+  assertEquals(help.code, 0, help.stderr);
+  assertStringIncludes(help.stderr, "hertzbench android prepare <avd>");
+  assertStringIncludes((await cli(["--help"])).stderr, "hertzbench android prepare <avd>");
+});
+
+// The fake emulator and adb are sh scripts, and the CLI's KVM check is only wired for Linux.
+Deno.test({
+  name: "cli: android prepare saves the snapshot and exits 0, or exits 2 with the reason " +
+    "[skipped off Linux: sh fake tools, and KVM acceleration is Linux-only]",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const avd = await fakeAvdHome("pixel8", null);
+    const sdk = await fakeSdk(
+      `shell) echo 1 ;;
+wait-for-device) exit 0 ;;
+emu) if [ "$1" = avd ]; then echo OK; exit 0; fi; kill "$(cat "$DIR/emulator-pid")" ;;`,
+    );
+    try {
+      const env = { ANDROID_AVD_HOME: avd.home };
+      const done = await cli(["android", "prepare", "pixel8"], env);
+      assertEquals(done.code, 0, done.stderr);
+      assertStringIncludes(
+        done.stdout,
+        `pixel8: snapshot hertzbench saved in ${join(avd.avdDir, "snapshots", "hertzbench")} ` +
+          `(emulator ${FAKE_EMULATOR_VERSION})`,
+      );
+      const marker = await Deno.readTextFile(
+        join(avd.avdDir, "snapshots", "hertzbench", "hertzbench.json"),
+      );
+      assertEquals(JSON.parse(marker), { emulator: FAKE_EMULATOR_VERSION });
+
+      const missing = await cli(["android", "prepare", "nope"], env);
+      assertEquals(missing.code, 2);
+      assertStringIncludes(missing.stderr, "hertzbench: no AVD named nope (found: pixel8, tablet)");
+    } finally {
+      await sdk.restore();
+      await avd.remove();
+    }
+  },
+});
 
 Deno.test("cli: --help and -h print the usage and exit 0, wherever they are", async () => {
   for (const args of [["--help"], ["-h"], ["run", "x.yaml", "--help"], ["validate", "-h"]]) {

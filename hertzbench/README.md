@@ -189,6 +189,7 @@ hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
 hertzbench validate <scenario.yaml>
 hertzbench view <scenario.yaml> [--port N] [--out DIR] [--seed N]
 hertzbench mcp [--workspace DIR] [--view-port N]
+hertzbench android prepare <avd>
 ```
 
 To get the `hertzbench` and `hzb` commands on your PATH (they go to Deno's bin directory, usually

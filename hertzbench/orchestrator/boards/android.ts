@@ -14,7 +14,10 @@ import {
   LAST_CONSOLE_PORT,
   launchEmulator,
   listAvds,
+  preparedSnapshot,
   type RunningEmulator,
+  snapshotBootArgs,
+  wifiSocketArgs,
 } from "./android/tooling.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 
@@ -39,13 +42,7 @@ export function consolePortForMac(mac: string): number | null {
   return port % 2 === 0 && port >= FIRST_CONSOLE_PORT && port <= LAST_CONSOLE_PORT ? port : null;
 }
 
-/**
- * `-feature -WiFiPacketStream` makes the guest's virtio Wi-Fi a plain socket netdev; without it
- * netsim owns Wi-Fi and the socket stays silent. It is an undocumented emulator feature flag.
- */
-export function wifiSocketArgs(netPort: number): string[] {
-  return ["-feature", "-WiFiPacketStream", "-wifi-socket", `connect=127.0.0.1:${netPort}`];
-}
+export { wifiSocketArgs };
 
 export interface AndroidLauncherOptions {
   /** Replaces the /dev/kvm check; tests on hosts without KVM pass `() => null`. */
@@ -95,9 +92,15 @@ async function startAndroid(
   const { node } = ctx;
   if (ctx.netPort === null) throw new BoardError(`${node.id}: an android node needs a Wi-Fi port`);
   const { tools, spec, apk, version } = await preflight(node, checkKvm);
+  const snapshot = spec.snapshot === true;
+  if (snapshot) {
+    const prepared = preparedSnapshot(spec.avd, version);
+    if (!prepared.usable) throw new BoardError(`${node.id}: ${prepared.reason}`);
+  }
 
   const logPath = `${ctx.outDir}/${node.id}-emulator.log`;
-  const port = consolePortForMac(node.mac);
+  // A snapshot boot sets the MAC itself, so the console port does not matter to it.
+  const port = snapshot ? null : consolePortForMac(node.mac);
   if (port !== null && !consolePortFree(port)) {
     throw new BoardError(
       `${node.id}: emulator console port ${port} is taken, and the AVD takes its Wi-Fi MAC ` +
@@ -108,14 +111,17 @@ async function startAndroid(
   const emulator = launchEmulator(tools, {
     avd: spec.avd,
     ...(port !== null ? { port } : {}),
-    extraArgs: wifiSocketArgs(ctx.netPort),
+    extraArgs: [...(snapshot ? snapshotBootArgs(node.mac) : []), ...wifiSocketArgs(ctx.netPort)],
   });
   let logcat: { stop(): Promise<void> } | undefined;
   const shutDown = async () => {
     // The log is written last: it holds what the emulator said up to its death.
     await logcat?.stop();
     await emulator.kill();
-    await Deno.writeTextFile(logPath, `emulator ${version}\n${emulator.logTail()}\n`);
+    await Deno.writeTextFile(
+      logPath,
+      `emulator ${version} (${snapshot ? "snapshot boot" : "cold boot"})\n${emulator.logTail()}\n`,
+    );
   };
   try {
     await emulator.waitForBoot(spec.bootTimeoutMs);

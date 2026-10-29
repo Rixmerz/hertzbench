@@ -89,6 +89,11 @@ export interface AndroidSpec {
   launchTimeoutMs: number;
   /** Instrumented UI tests to run during the scenario (section 4, item 4). */
   instrument?: AndroidInstrument;
+  /**
+   * Boot the snapshot `hertzbench android prepare` saved, with the node's MAC on `wlan0`, instead
+   * of cold-booting with the AVD's own MAC. Present only when true.
+   */
+  snapshot?: true;
 }
 
 /** `am instrument -w -r <runner>` at `atMs` after time zero; its test results become serial lines. */
@@ -800,6 +805,7 @@ const ANDROID_FIELDS = [
   "install_timeout",
   "launch_timeout",
   "instrument",
+  "snapshot",
 ] as const;
 
 const AVD_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -895,6 +901,9 @@ function parseAndroid(
       return name;
     });
   if (tags.length === 0) fail(`${path}.logcat`, "needs at least one tag");
+  if (obj.snapshot !== undefined && typeof obj.snapshot !== "boolean") {
+    fail(`${path}.snapshot`, "expected true or false");
+  }
   const spec: AndroidSpec = {
     avd,
     package: pkg,
@@ -919,6 +928,7 @@ function parseAndroid(
     ...(obj.instrument !== undefined
       ? { instrument: parseInstrument(obj.instrument, `${path}.instrument`) }
       : {}),
+    ...(obj.snapshot === true ? { snapshot: true as const } : {}),
   };
   return { spec, firmware: { kind: "apk", path: apk } };
 }
@@ -965,9 +975,12 @@ export function macForIndex(index: number): string {
   return mac;
 }
 
-/** An android node's MAC: the AVD's own unless the scenario says the guest was set to another. */
-function androidMac(value: unknown, path: string): string {
-  if (value === undefined) return ANDROID_DEFAULT_MAC;
+/**
+ * An android node's MAC: the AVD's own unless the scenario says the guest was set to another. A
+ * snapshot boot sets it, so such a node gets the MAC every board gets, and several can share a run.
+ */
+function androidMac(value: unknown, path: string, snapshot: boolean, index: number): string {
+  if (value === undefined) return snapshot ? macForIndex(index) : ANDROID_DEFAULT_MAC;
   const mac = text(value, path).toLowerCase();
   let bytes: Uint8Array;
   try {
@@ -1061,7 +1074,9 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
         position: positionFor(obj.position, k, count, `${path}.position`),
         radio,
         ip: explicitIp ?? `${subnetPrefix}.${FIRST_HOST + index - 1}`,
-        mac: board === "android" ? androidMac(obj.mac, `${path}.mac`) : macForIndex(index),
+        mac: android
+          ? androidMac(obj.mac, `${path}.mac`, android.spec.snapshot === true, index)
+          : macForIndex(index),
         internetGateway,
         ...(android ? { android: android.spec } : {}),
       });
@@ -1073,9 +1088,14 @@ function parseNodes(value: unknown, subnetPrefix: string): ScenarioNode[] {
   const ids = new Set<string>();
   const ips = new Set<string>();
   const macs = new Set<string>();
-  // One AVD cold-boots with one MAC; several nodes need the snapshot boot of a later piece.
-  if (nodes.filter((n) => n.board === "android").length > 1) {
-    fail("nodes", "a run has at most one android node");
+  // A cold boot gives the guest the one MAC the AVD derives from its console port; only the
+  // snapshot boot sets the MAC, so several android nodes need `snapshot: true`.
+  if (nodes.filter((n) => n.android !== undefined && n.android.snapshot !== true).length > 1) {
+    fail(
+      "nodes",
+      "a run has at most one android node that cold-boots; for several, run `hertzbench android " +
+        "prepare <avd>` and set `snapshot: true` in each android section",
+    );
   }
   for (const node of nodes) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(node.id)) {
