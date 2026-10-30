@@ -42,9 +42,12 @@ nodes:
     board: scripted
     position: [-4, 0]
     radios: [{ phy: wifi, channel: 5 }]
+    # A scripted board's sends start when that board is up, not at time zero, and the Android
+    # emulator takes about a minute to boot first (63 s on the CI runner). So the count covers
+    # 300 s: the run stops the board after its 60 s, and both phases see readings.
     firmware:
       send:
-        - { to: web, via: espnow, every: 500ms, count: 110, payload: reading }
+        - { to: web, via: espnow, every: 500ms, count: 600, payload: reading }
 timeline:
   - at: 30s
     label: out-of-range
