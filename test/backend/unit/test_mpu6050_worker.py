@@ -262,17 +262,15 @@ class TestIntTimerCost:
         w = worker(sensors=[record(int_pin=INT_GPIO)])
         write_reg(w, INT_ENABLE, 0x01)     # DATA_RDY_EN; SMPLRT_DIV 0, DLPF off: 8 kHz
         write_reg(w, PWR_MGMT_1, 0x00)
-        # A shared CI runner can stall the thread for a whole window and
-        # bunch its wake-ups, so a window over the bound is measured again:
-        # the bound must hold in one of three windows, not in every one.
-        for _ in range(3):
-            takes, pulses = self._measure(w)
-            if takes <= 2200:
-                break
-        print(f'chip timer lock takes: {takes:.0f}/s, INT pulses delivered: {pulses:.0f}/s')
+        takes, pulses, seconds = self._measure(w)
+        print(f'chip timer lock takes: {takes:.0f}/s, INT pulses delivered: {pulses:.0f}/s'
+              f' (per second of guest time, over {seconds:.2f} s of it)')
         # One sample per millisecond at most is looked at between bus events,
-        # and its pulse end: 2,000 a second, with room for the host's jitter.
-        assert takes <= 2200, f'{takes:.0f} lock takes a second'
+        # and its pulse end: 2,000 a second of the guest's time, with room for
+        # the edges of the window. The thread cannot burst past it: its next
+        # look is a millisecond of guest time after the last, however late
+        # the last one ran, so a host that stalls it only makes this lower.
+        assert takes <= 2200, f'{takes:.0f} lock takes a second of guest time'
         # And a pulse per look: a look past the floor finds samples that
         # pulsed since the last one and gives the guest one edge for them;
         # the only other look is the end of a pulse it caught live. So at
@@ -331,18 +329,66 @@ class TestIntTimerCost:
         assert wait_levels(w, [0, 1, 0, 1, 0]) == [0, 1, 0, 1, 0], \
             'and the samples that pulsed after it get one pulse there'
 
-    def _measure(self, w):
+    def test_a_long_gap_in_the_guest_time_is_not_made_up(self, worker, monkeypatch):
+        """A host that deschedules the thread lets the guest run on without
+        it. The next look comes a millisecond after the one that ends the gap,
+        not a millisecond after the last before it: looks counted from the
+        old one would replay the missed milliseconds, a look at every sample
+        until they caught up."""
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        monkeypatch.setenv('BB_FAKE_BQL', '1')
+        w = worker(sensors=[record(int_pin=INT_GPIO)])
+        write_reg(w, INT_ENABLE, 0x01)     # DATA_RDY_EN; SMPLRT_DIV 0, DLPF off: 8 kHz
+        write_reg(w, PWR_MGMT_1, 0x00)     # awake at guest time 0
+        w.guest('clock', ns=1_000_010)     # inside the pulse of the sample at 1 ms
+        assert wait_levels(w, [0, 1]) == [0, 1]
+        w.guest('clock', ns=1_060_000)     # past its end: the pad lets go
+        assert wait_levels(w, [0, 1, 0]) == [0, 1, 0]
+        w.guest('clock', ns=500_060_000)   # half a second later, between two pulses
+        assert wait_levels(w, [0, 1, 0, 1, 0]) == [0, 1, 0, 1, 0], \
+            'one pulse for the samples of the gap'
+        takes = w.guest('bql')['takes'].get(self.TAG, 0)
+        for ns in (500_130_000, 500_380_000, 500_630_000, 500_880_000):
+            w.guest('clock', ns=ns)        # inside the pulse of a sample before the floor
+            time.sleep(0.05)
+        assert int_levels(w) == [0, 1, 0, 1, 0], 'no look before the floor after the gap'
+        assert w.guest('bql')['takes'].get(self.TAG, 0) == takes
+        w.guest('clock', ns=501_130_000)   # past the floor, inside a pulse
+        assert wait_levels(w, [0, 1, 0, 1, 0, 1]) == [0, 1, 0, 1, 0, 1]
+
+    def test_a_stalled_test_process_does_not_move_the_bound(self, worker, monkeypatch):
+        """The rates are per second of the guest's time, read on the worker's
+        side at both ends of the window. A window timed on the test process's
+        clock reads high when a CI runner deschedules the process between the
+        guest's clock starting and its own: the guest ran longer than the
+        window it is divided by. A test process stalled inside the window
+        must leave the rate where it was."""
+        monkeypatch.setenv('BB_FAKE_GUEST_CLOCK', '1')
+        monkeypatch.setenv('BB_FAKE_BQL', '1')
+        w = worker(sensors=[record(int_pin=INT_GPIO)])
+        write_reg(w, INT_ENABLE, 0x01)
+        write_reg(w, PWR_MGMT_1, 0x00)
+        takes, pulses, seconds = self._measure(w, stall=1.5)
+        print(f'stalled window, per guest second: {takes:.0f} takes, {pulses:.0f} pulses, '
+              f'{seconds:.2f} s of guest time')
+        assert takes <= 2200, f'{takes:.0f} lock takes a second'
+
+    def _measure(self, w, stall=0.0):
+        """Lock takes and INT pulses per second of the guest's time, over a
+        window the worker's side opens and closes (clock_run, clock_stop):
+        the guest runs at the host's pace in between, and the counts are
+        divided by the guest time that passed, not by a stretch the test
+        process timed on its own. Returns (takes, pulses, guest seconds)."""
         seen = len(int_levels(w))    # levels of an earlier window
         before = w.guest('bql')['takes'].get(self.TAG, 0)
         start = w.guest('clock_run')['ns']
-        t0 = time.monotonic()
-        time.sleep(1.0)
-        w.guest('clock', ns=start + int((time.monotonic() - t0) * 1e9))
-        seconds = time.monotonic() - t0
+        time.sleep(1.0 + stall)    # a stall: the process descheduled while the guest runs
+        stop = w.guest('clock_stop')['ns']
+        seconds = (stop - start) / 1e9
         takes = (w.guest('bql')['takes'].get(self.TAG, 0) - before) / seconds
         edges = int_levels(w)[max(seen - 1, 0):]
         pulses = sum(1 for a, b in zip(edges, edges[1:]) if a == 0 and b == 1) / seconds
-        return takes, pulses
+        return takes, pulses, seconds
 
 
 class TestI2cTrace:

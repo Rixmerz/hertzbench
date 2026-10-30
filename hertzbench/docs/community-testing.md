@@ -79,10 +79,31 @@ welcome; each one links the evidence.
 - [x] **ESP-NOW mesh test in `tests/cli_test.ts` is flaky on macOS CI.** Mitigated: the Wi-Fi
       medium runs sub-millisecond deliveries without a timer tick (`orchestrator/medium-clock.ts`).
       A stall of the whole process can still push an ACK past 10 ms.
-- [ ] **`test_mpu6050_worker.py::TestIntTimerCost` (compiled) fails on loaded CI runners.** It
-      measured 3228 lock takes a second against a bound of 2200, even with three 1 s windows.
-      That is too far over the bound to be jitter: likely timer catch-up bursts after the thread
-      is descheduled, or a real cost bug in the compiled worker. Do not just raise the bound.
+- [x] **`test_mpu6050_worker.py::TestIntTimerCost` (compiled) fails on loaded CI runners.** Fixed
+      in the worker by 0662c32f, after this item was written; the bound stays 2200. It measured
+      3228 lock takes a second, even with three 1 s windows. Neither catch-up bursts nor the
+      test's window can reach that: the INT driver's next look is a millisecond of guest time
+      after the last look, however late that ran, so it never replays missed ticks (at most
+      2,000 takes a second), and a stalled test process inflates one window at most. The cause
+      was a race in `_MpuIntPin`: a look that came to end a pulse and found the next 8 kHz sample
+      already pulsing changed nothing and left the end due at once, so on a host where one round
+      of the compiled model's deadlines lasts about a sample period the thread took the lock for
+      nearly every sample. `test_a_pulse_that_starts_before_the_floor_waits_for_it` and
+      `test_a_pulse_found_over_by_the_next_one_ends_and_owes_it` fail on the driver before that
+      commit and pass after it. The 3228 itself was not reproduced locally: the driver before the
+      fix reads 1,998 takes a second in CI's shape (Python 3.11, two CPUs shared with four busy
+      loops), against about 1,000 now.
+      The test is also robust to descheduling now. Rates are per second of guest time, with both
+      ends of the window read on the worker's side (`clock_run` and the new `clock_stop` of the
+      fake libqemu), and the three-window retry, which hid bad windows, is gone.
+      `test_a_stalled_test_process_does_not_move_the_bound` stalls the test process inside the
+      window. `test_a_long_gap_in_the_guest_time_is_not_made_up` jumps the guest clock by half a
+      second and checks the next look waits a full millisecond. Each one fails when it should:
+      with `_MPU_INT_LOOK_NS = 0` (7,478 takes a second), with looks counted from the previous
+      look instead of from now, and with the window divided by 1 s of the test's time (2,340).
+      The test runs in `backend-unit-tests.yml` (`pytest test/backend/unit/`, Python 3.11);
+      `backend-e2e-tests.yml` does not run it. The compiled variant builds nothing in CI: it loads
+      the committed `frontend/public/bus-chips/mpu6050.wasm`.
 - An unfinished attempt at the first two is on the branch
   [`wip/ci-flakes`](https://github.com/Rixmerz/hertzbench/tree/wip/ci-flakes): a Chromium
   cold-start budget and a sub-tick clock for the medium. It was never verified; start from it or
