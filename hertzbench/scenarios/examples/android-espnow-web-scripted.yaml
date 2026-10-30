@@ -1,0 +1,62 @@
+# Three nodes, two of them talking without wires and one of those also serving an Android phone:
+# `sensor` sends ESP-NOW readings to `web`, and `web` serves HTTP to the app in the emulator
+# (examples/android/iot-app), which polls GET /status once a second. Both boards are scripted, so
+# the Android emulator is all this needs: no libqemu.
+#
+# All three share Wi-Fi channel 5, so the ESP-NOW frames and the phone's TCP traffic go over the
+# same simulated medium. At 30 s the phone moves 200 m away and its GETs are lost; the sensor stays
+# put, so the ESP-NOW link must keep working while the phone is out of range.
+#
+# Needs Linux with KVM, the Android SDK (in ~/Android or $ANDROID_HOME) and an AVD named pixel8.
+# Build the app, then run the scenario (more in examples/android/iot-app/README.md):
+#   cd examples/android/iot-app && gradle assembleDebug
+#   cd ../.. && deno task hertzbench run scenarios/examples/android-espnow-web-scripted.yaml
+#
+# Nodes take their IP in order: the board is 192.168.4.11, the address the app is given in
+# `extras`, the phone 192.168.4.12 and the sensor 192.168.4.13.
+name: android-espnow-web-scripted
+seed: 11
+duration: 60s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: web
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      serve:
+        - { port: 80, protocol: http }
+  - id: phone
+    board: android
+    position: [6, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    android:
+      avd: pixel8
+      apk: ../../examples/android/iot-app/app/build/outputs/apk/debug/app-debug.apk
+      package: dev.hertzbench.iotapp
+      activity: .MainActivity
+      extras: { board_url: "http://192.168.4.11/" }
+  - id: sensor
+    board: scripted
+    position: [-4, 0]
+    radios: [{ phy: wifi, channel: 5 }]
+    firmware:
+      send:
+        - { to: web, via: espnow, every: 500ms, count: 110, payload: reading }
+timeline:
+  - at: 30s
+    label: out-of-range
+    move: { node: phone, to: [200, 0] }
+assertions:
+  - serial: { node: web, contains: "tcp listening on 80 (http)", within: 10s }
+  - serial: { node: web, contains: "espnow rx reading", within: 5s }
+  - serial: { node: phone, contains: "status ok 200", within: 25s }
+  - serial: { node: web, contains: "http GET /status from 192.168.4.12", within: 25s }
+  # The phone's frames: delivered while near, all lost once out of range.
+  - metric: { link: "phone->web", phase: start, loss_pct: { lt: 10 } }
+  - metric: { link: "phone->web", phase: out-of-range, loss_pct: { gt: 90 } }
+  # The ESP-NOW link is not affected by the phone leaving, in either phase.
+  - metric: { link: "sensor->web", phase: start, kind: espnow, acked_pct: { gt: 90 } }
+  - metric: { link: "sensor->web", phase: out-of-range, kind: espnow, acked_pct: { gt: 90 } }
