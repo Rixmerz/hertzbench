@@ -24,6 +24,8 @@ env:
   # below can name the directory; Hertzbench itself finds the SDK through $ANDROID_HOME.
   ANDROID_HOME: /usr/local/lib/android/sdk
   SYSTEM_IMAGE: system-images;android-36;google_apis;x86_64
+  # Newer cmdline-tools and the emulator can disagree on the default AVD folder; pin it.
+  ANDROID_AVD_HOME: /home/runner/.android/avd
 
 jobs:
   android-e2e:
@@ -121,11 +123,17 @@ jobs:
             exit 1
           fi
           echo "using device definition $device for the pixel8 AVD"
+          mkdir -p "$ANDROID_AVD_HOME"
           echo no | "$avdmanager" create avd \
             --force --name pixel8 --device "$device" --package "$SYSTEM_IMAGE"
           # avdmanager can exit 0 without writing the AVD; fail here, not in the scenario.
           "$ANDROID_HOME/emulator/emulator" -list-avds | tee "$RUNNER_TEMP/avds.txt"
-          grep -qxF pixel8 "$RUNNER_TEMP/avds.txt"
+          if ! grep -qxF pixel8 "$RUNNER_TEMP/avds.txt"; then
+            echo "no pixel8 AVD in $ANDROID_AVD_HOME; avdmanager sees:" >&2
+            "$avdmanager" list avd >&2
+            find "$HOME" -maxdepth 4 -name 'pixel8*' >&2
+            exit 1
+          fi
 
       # The plan verified `-feature -WiFiPacketStream` on emulator 37.1.11; this prints the build
       # a run uses, so a red job after an emulator update names the version. `sed` reads all of the
