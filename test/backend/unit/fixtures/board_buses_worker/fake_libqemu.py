@@ -23,7 +23,8 @@ worker takes the same fallback it takes on an older libqemu build. The guest
 clock (qemu_clock_get_ns, QEMU_CLOCK_VIRTUAL) is one of those: it is exported
 only when the test sets BB_FAKE_GUEST_CLOCK, and then the `clock` op moves it
 (board-buses F7: the chips a worker hosts read that clock), or `clock_run`
-lets it run with the host's time. The I/O-thread lock (bql_lock_impl,
+lets it run with the host's time until `clock_stop` freezes it where it
+stands. The I/O-thread lock (bql_lock_impl,
 bql_unlock) is exported only when the test sets BB_FAKE_BQL; it excludes
 nothing, it counts the takes by the tag the worker passes (`bql` op).
 """
@@ -189,6 +190,15 @@ class FakeLibQemu:
             # until the next `clock` op stops it.
             self._clock_ns = self._guest_ns()
             self._clock_run_from = time.monotonic_ns()
+            return {'ns': self._clock_ns}
+        if kind == 'clock_stop':
+            # Freeze the clock where it stands and say where: both ends of a
+            # window of guest time are then read on the worker's side, so a
+            # test process that is descheduled between its own steps cannot
+            # move them (and the clock never goes backwards, as QEMU's does
+            # not).
+            self._clock_ns = self._guest_ns()
+            self._clock_run_from = None
             return {'ns': self._clock_ns}
         if kind == 'bql':
             with self._calls_cv:
