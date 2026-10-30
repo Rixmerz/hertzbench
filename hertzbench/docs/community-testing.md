@@ -106,7 +106,7 @@ welcome; each one links the evidence.
       engine only after the sender's next frame. That test is unchanged.
 - [x] **Publish Docker Image fails on master.** It is Velxio's workflow and needs Velxio's Docker
       Hub secrets and build license; it now runs only in the upstream repository.
-- [ ] **Dependency review always fails** because the repository's dependency graph is disabled.
+- [x] **Dependency review passes again**: it was red while the repository's dependency graph was disabled; it passed on PRs #82 to #85.
 
 ## Done
 
