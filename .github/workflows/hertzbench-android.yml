@@ -89,6 +89,14 @@ jobs:
           # The runner's preinstalled cmdline-tools predates the pixel_8 device definition, so
           # avdmanager below would not know it. Updating it in place gives a recent avdmanager.
           "$sdkmanager" --install "cmdline-tools;latest"
+          # sdkmanager will not overwrite the running copy, so it unpacks the update beside it as
+          # latest-2; move it into place or the old avdmanager is still the one called below.
+          tools="$ANDROID_HOME/cmdline-tools"
+          if [ -d "$tools/latest-2" ]; then
+            sudo rm -rf "$tools/latest"
+            sudo mv "$tools/latest-2" "$tools/latest"
+          fi
+          sdkmanager="$tools/latest/bin/sdkmanager"
           "$sdkmanager" --install "emulator" "platform-tools" "platforms;android-35" \
             "build-tools;35.0.0" "$SYSTEM_IMAGE"
 
@@ -115,7 +123,9 @@ jobs:
           echo "using device definition $device for the pixel8 AVD"
           echo no | "$avdmanager" create avd \
             --force --name pixel8 --device "$device" --package "$SYSTEM_IMAGE"
-          "$ANDROID_HOME/emulator/emulator" -list-avds
+          # avdmanager can exit 0 without writing the AVD; fail here, not in the scenario.
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee "$RUNNER_TEMP/avds.txt"
+          grep -qxF pixel8 "$RUNNER_TEMP/avds.txt"
 
       # The plan verified `-feature -WiFiPacketStream` on emulator 37.1.11; this prints the build
       # a run uses, so a red job after an emulator update names the version. `sed` reads all of the
