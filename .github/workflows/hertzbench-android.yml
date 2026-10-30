@@ -24,6 +24,8 @@ env:
   # below can name the directory; Hertzbench itself finds the SDK through $ANDROID_HOME.
   ANDROID_HOME: /usr/local/lib/android/sdk
   SYSTEM_IMAGE: system-images;android-36;google_apis;x86_64
+  # Newer cmdline-tools and the emulator can disagree on the default AVD folder; pin it.
+  ANDROID_AVD_HOME: /home/runner/.android/avd
 
 jobs:
   android-e2e:
@@ -49,6 +51,14 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
+
+      # The emulator's qemu binary links libpulse even when run headless, and the
+      # runner image no longer ships it.
+      - name: Install the emulator's shared libraries
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse0
 
       - name: Setup Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
@@ -78,16 +88,52 @@ jobs:
         run: |
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$sdkmanager" --licenses > /dev/null || true # `yes` ends with SIGPIPE
+          # The runner's preinstalled cmdline-tools predates the pixel_8 device definition, so
+          # avdmanager below would not know it. Updating it in place gives a recent avdmanager.
+          "$sdkmanager" --install "cmdline-tools;latest"
+          # sdkmanager will not overwrite the running copy, so it unpacks the update beside it as
+          # latest-2; move it into place or the old avdmanager is still the one called below.
+          tools="$ANDROID_HOME/cmdline-tools"
+          if [ -d "$tools/latest-2" ]; then
+            sudo rm -rf "$tools/latest"
+            sudo mv "$tools/latest-2" "$tools/latest"
+          fi
+          sdkmanager="$tools/latest/bin/sdkmanager"
           "$sdkmanager" --install "emulator" "platform-tools" "platforms;android-35" \
             "build-tools;35.0.0" "$SYSTEM_IMAGE"
 
       # Hertzbench never creates an AVD. `echo no` answers avdmanager's "custom hardware profile?"
-      # prompt on stdin; the command has no flag to skip it.
+      # prompt on stdin; the command has no flag to skip it. The AVD is named pixel8 whatever the
+      # device definition: scenarios and the plan only depend on the name. pixel_8 is preferred;
+      # if the avdmanager still does not list it, the newest Pixel it does list is used instead.
       - name: Create the pixel8 AVD
         run: |
-          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd \
-            --force --name pixel8 --device pixel_8 --package "$SYSTEM_IMAGE"
-          "$ANDROID_HOME/emulator/emulator" -list-avds
+          avdmanager="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          "$avdmanager" list device -c > "$RUNNER_TEMP/devices.txt"
+          device=
+          for candidate in pixel_8 pixel_7 pixel_6 pixel_5; do
+            if grep -qxF "$candidate" "$RUNNER_TEMP/devices.txt"; then
+              device="$candidate"
+              break
+            fi
+          done
+          if [ -z "$device" ]; then
+            echo "avdmanager lists no pixel_8, pixel_7, pixel_6 or pixel_5 device:" >&2
+            cat "$RUNNER_TEMP/devices.txt" >&2
+            exit 1
+          fi
+          echo "using device definition $device for the pixel8 AVD"
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | "$avdmanager" create avd \
+            --force --name pixel8 --device "$device" --package "$SYSTEM_IMAGE"
+          # avdmanager can exit 0 without writing the AVD; fail here, not in the scenario.
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee "$RUNNER_TEMP/avds.txt"
+          if ! grep -qxF pixel8 "$RUNNER_TEMP/avds.txt"; then
+            echo "no pixel8 AVD in $ANDROID_AVD_HOME; avdmanager sees:" >&2
+            "$avdmanager" list avd >&2
+            find "$HOME" -maxdepth 4 -name 'pixel8*' >&2
+            exit 1
+          fi
 
       # The plan verified `-feature -WiFiPacketStream` on emulator 37.1.11; this prints the build
       # a run uses, so a red job after an emulator update names the version. `sed` reads all of the
