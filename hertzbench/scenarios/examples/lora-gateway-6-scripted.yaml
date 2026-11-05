@@ -7,11 +7,14 @@
 # Urban path loss (exponent 3.5), no shadowing, 14 dBm, SF7 BW125 CR4/5: the
 # SF7 floor is -124.5 dBm, so the link budget runs out between 900 m and 1.5 km.
 # Expected: node-1 to node-3 lose nothing, node-4 (1.2 km) sits on the edge,
-# node-5 and node-6 never reach the gateway. Sends are staggered by 100 ms so
-# no two of the 57 ms packets overlap.
+# node-5 and node-6 never reach the gateway. Sends are staggered by 200 ms so
+# no two of the 57 ms packets overlap. A scripted board paces its sends on the
+# wall clock, so the 143 ms gap is the slack a slow host (a loaded CI runner)
+# has before two packets collide; 100 ms (43 ms of slack) was not enough on
+# macOS and cost node-3 frames to a capture by node-2.
 name: lora-gateway-6-scripted
 seed: 7
-duration: 5s
+duration: 8s
 environment:
   preset: urban
   shadowing_sigma_db: 0
@@ -25,32 +28,32 @@ nodes:
     board: scripted
     position: [300, 0]
     radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
-    firmware: { send: [{ every: 700ms, count: 6, start: 0ms, payload: reading }] }
+    firmware: { send: [{ every: 1200ms, count: 6, start: 0ms, payload: reading }] }
   - id: node-2
     board: scripted
     position: [600, 0]
     radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
-    firmware: { send: [{ every: 700ms, count: 6, start: 100ms, payload: reading }] }
+    firmware: { send: [{ every: 1200ms, count: 6, start: 200ms, payload: reading }] }
   - id: node-3
     board: scripted
     position: [900, 0]
     radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
-    firmware: { send: [{ every: 700ms, count: 6, start: 200ms, payload: reading }] }
+    firmware: { send: [{ every: 1200ms, count: 6, start: 400ms, payload: reading }] }
   - id: node-4
     board: scripted
     position: [1200, 0]
     radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
-    firmware: { send: [{ every: 700ms, count: 6, start: 300ms, payload: reading }] }
+    firmware: { send: [{ every: 1200ms, count: 6, start: 600ms, payload: reading }] }
   - id: node-5
     board: scripted
     position: [1500, 0]
     radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
-    firmware: { send: [{ every: 700ms, count: 6, start: 400ms, payload: reading }] }
+    firmware: { send: [{ every: 1200ms, count: 6, start: 800ms, payload: reading }] }
   - id: node-6
     board: scripted
     position: [1800, 0]
     radios: [{ phy: lora, frequency_mhz: 868.1, sf: 7, bw_khz: 125, cr: 4/5, tx_power_dbm: 14 }]
-    firmware: { send: [{ every: 700ms, count: 6, start: 500ms, payload: reading }] }
+    firmware: { send: [{ every: 1200ms, count: 6, start: 1000ms, payload: reading }] }
 assertions:
   - serial: { node: gw, contains: 'rx "reading:0 from node-1"', within: 2s }
   - metric: { link: "node-1->gw", kind: lora, loss_pct: { eq: 0 }, rssi_dbm: { gt: -105 } }
