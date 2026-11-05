@@ -5,7 +5,8 @@ name: Hertzbench Android E2E
 # example scenario names, and runs hertzbench/scenarios/examples/android-web-scripted.yaml: the
 # app in the emulator polls a scripted web board over the simulated Wi-Fi. It then runs a copy of
 # the scenario with one assertion inverted and requires exit status 1, so a green first run means
-# something. The ESP32 variant needs libqemu, which no CI image has, and is not run here.
+# something. It also runs android-espnow-web-scripted.yaml, where a second scripted board sends
+# ESP-NOW to the web board while the phone polls it. The ESP32 variant needs libqemu, which no CI image has, and is not run here.
 # Design and open assumptions (A8): hertzbench/docs/android-device-plan.md, section 5.
 on:
   workflow_dispatch:
@@ -153,6 +154,12 @@ jobs:
       - name: Run the scenario (must pass)
         run: deno task hertzbench run scenarios/examples/android-web-scripted.yaml --out "$RUNNER_TEMP/android-green"
 
+      # Three nodes: a sensor sends ESP-NOW to the web board while the phone polls that board.
+      - name: Run the ESP-NOW and Android scenario (must pass)
+        run: |
+          deno task hertzbench validate scenarios/examples/android-espnow-web-scripted.yaml
+          deno task hertzbench run scenarios/examples/android-espnow-web-scripted.yaml --out "$RUNNER_TEMP/android-espnow"
+
       # The same scenario asking the app for a status it never logs. Exit status 1 alone is not
       # enough: it also means "a board reported a problem", and 2 is an environment problem (no
       # emulator, boot timeout). So the report must show that assertion, and only that one, as FAIL.
@@ -193,6 +200,7 @@ jobs:
           name: android-e2e-run
           path: |
             ${{ runner.temp }}/android-green
+            ${{ runner.temp }}/android-espnow
             ${{ runner.temp }}/android-red
             ${{ runner.temp }}/android-red-report.txt
           if-no-files-found: ignore
