@@ -363,9 +363,11 @@ assertions:
     assertEquals(verdicts(result.assertions), [[true, "seen"], [true, "seen"]]);
 
     const call = (text: string) => adbCalls.find((line) => line.includes(text));
+    // GUEST_MAC is not derived from a console port, so the run takes the first free pair: a
+    // developer's own emulator on 5554 moves it to 5556, and the serial is not what this checks.
     assertEquals(
-      call("am broadcast"),
-      "-s emulator-5554 shell am broadcast -a 'dev.example.REFRESH' -p 'dev.example.app' " +
+      call("am broadcast")?.replace(/^-s emulator-\d+ /, ""),
+      "shell am broadcast -a 'dev.example.REFRESH' -p 'dev.example.app' " +
         "--es msg 'it'\\''s ok'",
     );
     assertStringIncludes(
