@@ -355,6 +355,32 @@ for (const leg of ["a->b", "b->a"] as const) {
   });
 }
 
+Deno.test("espnow on the medium: 15 ms more on the a->b leg fails all 20 sends as ack_timeout, on a virtual clock", () => {
+  // The scenario of the runner test of the same latency (6 m, seed 5, 20 sends 50 ms apart),
+  // where no host stall can move a verdict from ack_timeout to no_ack.
+  const { clock, log, medium, a, b } = forkPair(6, { seed: 5 });
+  medium.setLinkOverride("a", "b", { extraLossPct: 0, extraLatencyMs: 15 });
+  const frames = 20;
+  for (let i = 0; i < frames; i++) {
+    clock.advanceTo(i * 50);
+    a.model.send(B, body(`hello:${i}`));
+  }
+  clock.advanceTo(frames * 50 + 100);
+  medium.close();
+
+  const metrics = computeMetrics(log.events, clock.now());
+  const link = metrics.total.find((l) => l.from === "a" && l.to === "b")!;
+  assertEquals(link.espnow!.sends, frames);
+  assertEquals(link.espnow!.outcomes, { ack_timeout: frames });
+  assertEquals(a.done.map((d) => d.status), Array(frames).fill("nack"));
+  assertEquals(
+    b.rx.length,
+    frames,
+    "the frames arrived: the failure is the ACK window, not the radio",
+  );
+  assert(metrics.warnings.some((w) => w.includes("a->b") && w.includes("10 ms ACK wait")));
+});
+
 Deno.test("espnow: a lost frame is frame_lost, and an ACK answering nothing is dropped", () => {
   const { clock, log, medium, a, b } = forkPair(5);
   medium.setLinkOverride("a", "b", { extraLossPct: 100, extraLatencyMs: 0 });
@@ -512,7 +538,15 @@ Deno.test("runner: 15 ms more on the a->b leg fails every ESP-NOW send at the se
   const { result } = await runYaml(espnowPair(15));
   const link = result.metrics.total.find((l) => l.from === "a" && l.to === "b")!;
   assertEquals(link.espnow!.sends, 20);
-  assertEquals(link.espnow!.outcomes, { ack_timeout: 20 });
+  // Every ACK is 15 ms past the fork's 10 ms wait, so the engine can never count one as acked. Which
+  // failure it records is the wall clock's: after a host stall the sender's next-send timer can run
+  // before the socket read that carries b's ACK, and the engine then closes the earlier send as
+  // no_ack (the ACK arrives unmatched). The exact { ack_timeout: 20 } is pinned on a virtual clock
+  // by "espnow on the medium: 15 ms more on the a->b leg ..." above.
+  const { ack_timeout = 0, no_ack = 0, ...unexpected } = link.espnow!.outcomes;
+  assertEquals(unexpected, {}, "no send is acked or lost: only the ACK window fails them");
+  assertEquals(ack_timeout + no_ack, 20);
+  assert(ack_timeout > 0, "the last send has no successor, so its late ACK is always ack_timeout");
   assertEquals(serial(result, "a").filter((t) => t === "espnow tx fail to b").length, 20);
   assert(
     !serial(result, "a").some((t) => t.includes("tx ok to b") || t.includes("nothing in flight")),
