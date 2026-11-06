@@ -1,6 +1,12 @@
 # Plan: an Android app as a node of the simulation
 
-Status: design only, nothing here is built yet. Written 2026-10-28.
+Status: written 2026-10-28 as a design; updated 2026-11-05. **Wi-Fi is built and shipped in v0.2.0**:
+`board: android` joins the simulated Wi-Fi medium, and the Android e2e CI runs it on a real emulator
+(`.github/workflows/hertzbench-android.yml`, scenarios `android-web-scripted.yaml` and
+`android-espnow-web-scripted.yaml`). **BLE (piece 7) is built but unverified**: `peripheral: netsim`
+is tested only against a fake H4 controller and a fake SDK; it has never run on a real emulator, no
+example scenario or BLE test app exists, and assumptions A5 and A6 are still open
+([missing-tests.md](missing-tests.md)).
 
 **Goal.** An Android app, running unmodified in the Android emulator, talks to the simulated boards
 over the simulated radio: over Wi-Fi/IP to ESP32 boards under QEMU (and, through such a board, to
