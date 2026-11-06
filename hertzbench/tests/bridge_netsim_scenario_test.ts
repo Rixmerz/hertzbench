@@ -251,7 +251,7 @@ assertions:
         "(cold boot)",
       );
       const calls = await Deno.readTextFile(join(sdk.dir, "adb-calls"));
-      assertStringIncludes(calls, "install -r -t");
+      assertStringIncludes(calls, "install -r -t -g");
       assertStringIncludes(calls, "emu kill");
     } finally {
       await sdk.restore();

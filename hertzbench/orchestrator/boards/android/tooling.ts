@@ -407,12 +407,12 @@ export class RunningEmulator {
     }
   }
 
-  /** `adb install -r -t`; a failure quotes adb's own output. */
+  /** `adb install -r -t -g` (-g grants runtime permissions, e.g. Bluetooth, with no dialog); a failure quotes adb's own output. */
   async install(apk: string, timeoutMs = DEFAULT_TIMEOUTS.installMs): Promise<void> {
     const result = await runBounded(
       "install",
       this.tools.adb,
-      ["-s", this.serial, "install", "-r", "-t", apk],
+      ["-s", this.serial, "install", "-r", "-t", "-g", apk],
       timeoutMs,
       `installing ${apk}`,
     );

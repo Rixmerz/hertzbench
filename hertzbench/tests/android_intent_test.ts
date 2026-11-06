@@ -465,7 +465,7 @@ assertions:
     assert(gapMs >= 800, `the second result came ${gapMs} ms after the first`);
 
     const at = (call: string) => adbCalls.findIndex((line) => line.includes(call));
-    assert(at("install -r -t") >= 0 && at("test.apk") > at("app.apk"), adbCalls.join("\n"));
+    assert(at("install -r -t -g") >= 0 && at("test.apk") > at("app.apk"), adbCalls.join("\n"));
     assert(at("am instrument -w -r") > at("am start -W"), adbCalls.join("\n"));
     assertStringIncludes(adbCalls[at("am instrument")]!, `-r '${RUNNER}'`);
   },
