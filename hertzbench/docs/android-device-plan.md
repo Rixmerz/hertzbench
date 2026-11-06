@@ -89,8 +89,8 @@ time, so a real-time Android emulator fits either.
 |---|---|
 | A3: `VirtualGateway` answering the DISCOVER gives `wlan0` its lease and Android marks the network usable (no captive-portal block on plain HTTP to a /24 without internet) | piece 2 |
 | A4: `-wifi-mac-address` sets `wlan0`'s MAC when booting a read-only snapshot, so several Android nodes from one AVD get distinct MACs | piece 6 |
-| A5: an app's scan sees a device that a client created through netsim's HCI port (the same netsim instance as the emulator), and can connect and run GATT against it | piece 7 |
-| A6: `-netsim-args --hci-port N` reaches the emulator's netsimd, so a run picks its own HCI port instead of the default 6402 | piece 7 |
+| A5 (**verified 2026-11-05**, `android-ble-scripted.yaml`): an app's scan sees a device that a client created through netsim's HCI port (the same netsim instance as the emulator), and can connect and run GATT against it | piece 7 |
+| A6 (**verified 2026-11-05**, `android-ble-scripted.yaml`): `-netsim-args --hci-port N` reaches the emulator's netsimd, so a run picks its own HCI port instead of the default 6402 | piece 7 |
 | A7: a snapshot saved with `-feature -WiFiPacketStream` loads with the socket netdev reconnected | piece 6 |
 | A8: GitHub-hosted Linux runners give `/dev/kvm` after the udev step (source below), and an x86_64 API 36 image boots there within the boot timeout | piece 8 |
 | A9: `10.0.2.2` reaches the host's loopback from the default user-mode network | the fallback note, piece 2 |

@@ -1,0 +1,46 @@
+# An Android app in the emulator reaches a simulated BLE sensor through the BLE bridge's netsim
+# backend (docs/mobile-bridge.md, "5b with netsim"). The app (examples/android/ble-app) scans for
+# "hzb sensor-1", connects, subscribes to 0xFF01 and reads it once a second. netsim carries the
+# app-to-bridge leg; the bridge replays every operation on the simulated air from 3 m away.
+#
+# Needs Linux with KVM, the Android SDK (in ~/Android or $ANDROID_HOME) and an AVD named pixel8.
+#   cd examples/android/ble-app && gradle assembleDebug
+#   cd ../.. && deno task hertzbench run scenarios/examples/android-ble-scripted.yaml
+name: android-ble-scripted
+seed: 11
+duration: 60s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: sensor-1
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 50ms }
+      send: [{ to: phone, every: 500ms, count: 240, payload: reading }]
+  - id: gw                      # a second node: a scenario runs 2 to 10 boards
+    board: scripted
+    position: [5, 20]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware:
+      advertise: { interval: 100ms }
+bridge:
+  id: phone
+  position: [3, 0]
+  mirror: sensor-1
+  name: hzb sensor-1
+  peripheral: netsim
+  netsim_hci: 127.0.0.1:6402
+  interval: 30ms
+  timeout: 1s
+android:
+  avd: pixel8
+  apk: ../../examples/android/ble-app/app/build/outputs/apk/debug/app-debug.apk
+  package: dev.hertzbench.bleapp
+  activity: .MainActivity
+assertions:
+  - serial: { node: phone, contains: "bridge connected to sensor-1", within: 5s }
+  - serial: { node: phone, contains: "bridge phone connected", within: 30s }
+  - serial: { node: phone, contains: "got reading", within: 40s }

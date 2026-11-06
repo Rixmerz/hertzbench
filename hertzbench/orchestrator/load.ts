@@ -81,10 +81,13 @@ export async function loadScenario(file: string, outDirOverride?: string): Promi
 export async function checkFirmwareFiles(scenario: Scenario): Promise<string[]> {
   const missing: string[] = [];
   if (scenario.android !== null) {
+    // Worded as a node's app APK, so an unbuilt app reads the same wherever the app is declared.
     try {
-      if (!(await Deno.stat(scenario.android.apk)).isFile) throw new Error("not a file");
+      if (!(await Deno.stat(scenario.android.apk)).isFile) {
+        missing.push(`android: ${scenario.android.apk} should be a .apk file`);
+      }
     } catch {
-      missing.push(`android: ${scenario.android.apk} is not an .apk file that exists`);
+      missing.push(`android: ${scenario.android.apk} does not exist`);
     }
   }
   for (const node of scenario.nodes) {
