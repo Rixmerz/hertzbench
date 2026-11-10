@@ -1383,6 +1383,10 @@ export class BleController implements AirReceiver {
       return this.#lock(frame, () => this.#endEvent(conn));
     }
     if (this.#active) return "deaf";
+    // The link layer leaves the advertising channels before a connection event is
+    // due: a reception still running then would take the event's turn, even for an
+    // advert too weak to decode, and the ACL it carried would wait one more interval.
+    if (this.#eventDueBefore(now + frame.airtimeMs + RX_SLACK_MS)) return "deaf";
     const pdu = parseAdvPdu(frame.payload);
     if (!pdu) return "deaf";
     const listen = this.#adv.listen;
@@ -1407,6 +1411,15 @@ export class BleController implements AirReceiver {
       if (advertising) return this.#lock(frame, () => {});
     }
     return "deaf";
+  }
+
+  /** Whether any connection's next event starts before `untilMs`. */
+  #eventDueBefore(untilMs: number): boolean {
+    for (const c of this.#conns.values()) {
+      const start = c.role === "central" ? c.anchorMs : c.anchorMs - RX_SLACK_MS;
+      if (start < untilMs) return true;
+    }
+    return false;
   }
 
   #lock(frame: AirFrame<BleAirHeader>, onMiss: () => void): Hearing {
