@@ -91,10 +91,16 @@ jobs:
           sed 's/--enable-debug --enable-debug-info/--enable-debug-info/' build_libqemu-esp32.sh \
             > ../build_libqemu-esp32-optimized.sh
           PATH="$HOME/.local/opt/qemu-build-venv/bin:$PATH" bash ../build_libqemu-esp32-optimized.sh
-          mkdir -p "$HOME/.local/opt/velxio-qemu"
-          cp build/libqemu-xtensa.dylib build/libqemu-riscv32.dylib "$HOME/.local/opt/velxio-qemu/"
+          # Stage the files and move the directory into place last: the cache path then exists
+          # only after a complete build, so a failure cannot leave an empty directory to be saved
+          # under the key (a later run would hit it, skip the build and find no library).
+          stage="$HOME/.local/opt/velxio-qemu.stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp build/libqemu-xtensa.dylib build/libqemu-riscv32.dylib "$stage/"
           cp pc-bios/esp32-v3-rom.bin pc-bios/esp32-v3-rom-app.bin pc-bios/esp32c3-rom.bin \
-            pc-bios/esp32s3_rev0_rom.bin "$HOME/.local/opt/velxio-qemu/"
+            pc-bios/esp32s3_rev0_rom.bin "$stage/"
+          mv "$stage" "$HOME/.local/opt/velxio-qemu"
 
       - name: Locate libqemu-xtensa
         id: locate
