@@ -174,11 +174,24 @@ Deno.test("validate: accepts the examples and the firmware they name", async () 
   }
 });
 
-Deno.test("validate: accepts the scripted BLE example, and names the firmware the ESP32 one needs built", async () => {
+Deno.test("validate: accepts the scripted BLE example, and the ESP32 one once its firmware is built", async () => {
   const scripted = await hertzbench(["validate", `${EXAMPLES}ble-sensors-scripted.yaml`]);
   assertEquals(scripted.code, 0, scripted.stdout + scripted.stderr);
   assertStringIncludes(scripted.stdout, "ok (4 nodes");
   const esp32 = await hertzbench(["validate", `${EXAMPLES}ble-sensors-3-nodes.yaml`]);
+  // The image is gitignored: a host that followed docs/e2e-esp32.md has it, a fresh clone does not.
+  const built = await Deno.stat(`${EXAMPLES}fw/ble-sensor/build/ble-sensor-flash.bin`).then(
+    () => true,
+    (error) => {
+      if (error instanceof Deno.errors.NotFound) return false;
+      throw error;
+    },
+  );
+  if (built) {
+    assertEquals(esp32.code, 0, esp32.stdout + esp32.stderr);
+    assertStringIncludes(esp32.stdout, "ok (4 nodes");
+    return;
+  }
   // The scenario itself is valid: the only complaint is the image docs/e2e-esp32.md says to build.
   assertEquals(esp32.code, 2, esp32.stdout + esp32.stderr);
   assertStringIncludes(esp32.stderr, "firmware not found");
