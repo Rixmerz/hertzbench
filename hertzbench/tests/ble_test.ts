@@ -303,6 +303,33 @@ Deno.test("ble controller: a peripheral that walks out of range is lost to the s
   assertAlmostEquals(gwDown.t - moved, 500, 40);
 });
 
+Deno.test("ble controller: a central still initiating keeps every connection event; adverts it cannot use do not take them", async () => {
+  // gw is connected to sensor and keeps initiating towards far, out of range, whose
+  // adverts still reach gw's radio. A link layer ends scanning before a connection
+  // event is due, so each 30 ms event goes out on time and an ACL never waits two.
+  const r = rig({ gw: [0, 0], sensor: [4, 0], far: [150, 0] });
+  const { gw } = await connected(r);
+  const far = r.node("far");
+  await far.host.init();
+  await far.host.advertise("far", 20);
+  await gw.host.setAcceptList([far.host.address]);
+  await gw.host.connectAcceptList(30, 500);
+  const from = r.clock.now();
+  await r.run(3000);
+  assert(
+    kinds(r.log.events, "ble-adv").some((e) =>
+      e.type === "drop" && e.from === "far" && e.to === "gw" && e.reason === "noise"
+    ),
+    "gw's radio hears far's adverts, too weak to decode",
+  );
+  const polls = r.log.events.flatMap((e) =>
+    e.type === "tx" && e.node === "gw" && e.kind === "ble-data" && e.t >= from ? [e.t] : []
+  );
+  assert(polls.length > 90, `gw polled ${polls.length} times`);
+  const skipped = polls.slice(1).filter((t, i) => t - polls[i]! > 45);
+  assertEquals(skipped.map((t) => Math.round(t)), [], "connection events gw skipped");
+});
+
 Deno.test("ble controller: a host disconnect reaches the peer as 'remote user terminated'", async () => {
   const r = rig({ gw: [0, 0], sensor: [4, 0] });
   const { gw, sensor } = await connected(r);

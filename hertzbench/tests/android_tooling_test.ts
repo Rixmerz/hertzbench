@@ -145,7 +145,7 @@ logcat) if [ "$1" = "-c" ]; then exit 0; fi; echo "HZB got temp 21.5"; exec slee
     assertStringIncludes(args, "-avd pixel8 -no-window -no-audio -no-boot-anim -read-only");
     assertStringIncludes(args, "-no-snapshot-save -gpu swiftshader_indirect -port ");
     const calls = await Deno.readTextFile(join(sdk_dir(), "adb-calls"));
-    assertStringIncludes(calls, `-s ${emulator.serial} install -r -t /tmp/app.apk`);
+    assertStringIncludes(calls, `-s ${emulator.serial} install -r -t -g /tmp/app.apk`);
     assertStringIncludes(
       calls,
       // the device's shell sees each value as one word, whatever it contains
