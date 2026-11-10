@@ -8,8 +8,9 @@
 #   cd examples/android/iot-app && gradle assembleDebug
 #   cd ../.. && deno task hertzbench run scenarios/examples/android-web-esp32.yaml
 #
-# NEVER RUN: the host this was written on has no libqemu. The Android half was not run either;
-# see docs/missing-tests.md.
+# Run on a real emulator and libqemu on 2026-11-09: 3 of 3 runs passed (see docs/missing-tests.md).
+# The sketch compile calls python3 with pyserial, so put the venv's bin first on PATH (see
+# docs/e2e-esp32.md, "The environment for every run below").
 name: android-web-esp32
 seed: 11
 duration: 90s
