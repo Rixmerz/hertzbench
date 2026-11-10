@@ -1,0 +1,54 @@
+# The same app and walk as android-ble-scripted.yaml, against real firmware: an ESP32 running
+# Bluedroid (fw/ble-sensor: service 0xFF00, characteristic 0xFF01, read and notify) is the sensor
+# the BLE bridge mirrors. The app (examples/android/ble-app) scans for "hzb sensor", connects,
+# subscribes to 0xFF01 and reads it once a second; netsim carries the app-to-bridge leg, and the
+# bridge replays every operation on the simulated air, as ATT against the firmware's own GATT
+# server over the engine's virtual controller (HCI over UART1, F3).
+#
+# The firmware notifies "reading:<n>" every 200 ms once a central is connected, and its read-only
+# characteristic keeps the stored "reading:-" for reads, so `got notification "reading:` can only
+# come from the firmware's running Bluedroid stack.
+#
+# Needs libqemu-xtensa (docs/e2e-esp32.md) and the Android emulator (Linux with KVM, the SDK, an AVD
+# named pixel8). The sensor image is not compiled by the run: build it first (docs/e2e-esp32.md,
+# "The BLE example"), then the app, then run:
+#   cd examples/android/ble-app && gradle assembleDebug
+#   cd ../.. && deno task hertzbench run scenarios/examples/android-ble-esp32.yaml
+name: android-ble-esp32
+seed: 11
+duration: 60s
+environment:
+  preset: indoor_office
+  shadowing_sigma_db: 0
+nodes:
+  - id: sensor
+    board: esp32
+    firmware: ./fw/ble-sensor/build/ble-sensor-flash.bin
+    position: [0, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0, hci_uart: 1 }]
+  - id: listener                # a second node: a scenario runs 2 to 10 boards
+    board: scripted
+    position: [10, 0]
+    radios: [{ phy: ble, tx_power_dbm: 0 }]
+    firmware: { scan: true }
+bridge:
+  id: phone
+  position: [3, 0]
+  mirror: sensor
+  name: hzb sensor
+  peripheral: netsim
+  netsim_hci: 127.0.0.1:6402
+  interval: 30ms
+  timeout: 1s
+android:
+  avd: pixel8
+  apk: ../../examples/android/ble-app/app/build/outputs/apk/debug/app-debug.apk
+  package: dev.hertzbench.bleapp
+  activity: .MainActivity
+  extras: { device_name: "hzb sensor" }
+assertions:
+  - serial: { node: sensor, contains: "ble up addr=02:68:7a:62:01:01", within: 30s }
+  - serial: { node: phone, contains: "bridge connected to sensor", within: 30s }
+  - serial: { node: phone, contains: "bridge phone connected", within: 40s }
+  - serial: { node: phone, contains: "got reading", within: 50s }
+  - serial: { node: phone, contains: 'got notification "reading:', within: 50s }
