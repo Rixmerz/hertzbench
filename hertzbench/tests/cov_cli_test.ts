@@ -264,7 +264,7 @@ Deno.test("cli: validate accepts every example; the only refusals are unbuilt ES
     }
     refused.push(name);
   }
-  // At most the two that need `idf.py build` of scenarios/examples/fw/ble-sensor first, and the
+  // At most the three that need `idf.py build` of scenarios/examples/fw/ble-sensor first, and the
   // four that need `gradle assembleDebug` of examples/android/iot-app or examples/android/ble-app.
   const unbuilt = [
     "ble-sensors-3-nodes.yaml",
@@ -273,6 +273,7 @@ Deno.test("cli: validate accepts every example; the only refusals are unbuilt ES
     "android-web-esp32.yaml",
     "android-espnow-web-scripted.yaml",
     "android-ble-scripted.yaml",
+    "android-ble-esp32.yaml",
   ];
   for (const name of refused) assert(unbuilt.includes(name), `${name} was refused`);
 });
