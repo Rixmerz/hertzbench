@@ -17,7 +17,7 @@ serial lines of the bridge's id:
 | `got notification "<value>"`       | the sensor notified `0xFF01` through the bridge |
 | `disconnected status=<n>`          | the link ended; it scans again after 2 s        |
 
-`scenarios/examples/android-ble-scripted.yaml` runs it against a scripted `sensor-1`.
+`scenarios/examples/android-ble-scripted.yaml` runs it against a scripted `sensor-1`, and `scenarios/examples/android-ble-esp32.yaml` against the real `fw/ble-sensor` ESP32 firmware.
 
 It needs the `BLUETOOTH_SCAN` and `BLUETOOTH_CONNECT` runtime permissions, which the launcher
 grants by installing with `adb install -g`; it does not ask for them itself. `minSdk` is 33.
