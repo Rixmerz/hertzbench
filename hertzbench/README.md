@@ -48,20 +48,96 @@ serves until Ctrl-C, and its scenario runs for two minutes.
 
 ## Status
 
-| Part                                                                                                   | State                                                                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| RF engine: medium, nodes, positions, path loss, rate and retries, jitter, loss, seeded RNG, event log  | done, unit-tested on a manual clock                                                                                                                                                                                                                                                                                                           |
-| `qemu-wifi-l2` adapter: each board's QEMU network device on the engine instead of SLIRP                | done, tested against a fake QEMU peer over real sockets                                                                                                                                                                                                                                                                                       |
-| Orchestrator and CLI: `hertzbench run`, `validate`                                                     | done, tested through the real CLI                                                                                                                                                                                                                                                                                                             |
-| `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                 | done                                                                                                                                                                                                                                                                                                                                          |
-| ESP32 boards under QEMU                                                                                | **run on real firmware** (2026-10-23) with a libqemu built from the public QEMU fork, no root or Docker: UDP between three boards passes, and ESP-NOW between five passes with a patch to the fork (2026-10-24); see [docs/e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware) for every scenario, its result and the exact commands    |
-| MCP server: `hertzbench mcp`, 25 tools, examples and fidelity table as resources, live move and fault  | done, tested through the real `hertzbench mcp` process with scripted boards; ESP32 through MCP not run (the ESP32 runs used the CLI)                                                                                                                                                                                                          |
-| View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline             | done, tested over HTTP and in headless Chromium with scripted boards, dragging a node included; **on real firmware** (2026-10-24) `udp-3-nodes`, `espnow-mesh-5-nodes`, `lora-gateway-6-nodes` and `ble-sensors-3-nodes` pass in the view; dragging an ESP32 node not tried                                                                   |
-| `docker-compose.hertzbench.yml`                                                                        | not started                                                                                                                                                                                                                                                                                                                                   |
-| ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and with scripted boards; **`espnow-mesh-5-nodes.yaml` passes 7/7 on real firmware** (2026-10-24) with a small patch to the fork's Wi-Fi MAC (its 20-frame injection queue never resumed reading, [docs/upstream-sync.md](docs/upstream-sync.md) patch 3), see [ESP-NOW](#esp-now) |
-| LoRa (SX127x) and nRF24L01+ chip models over `spi-link` (Phase 3)                                      | done; `lora-gateway-6-nodes.yaml` **passes on real firmware** (arduino-LoRa on an SX1276 model). No nRF24 example has an ESP32 board                                                                                                                                                                                                          |
-| BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and with scripted hosts; `ble-sensors-3-nodes.yaml` **passes on real firmware** (Bluedroid host-only, ESP-IDF v5.3.6), see [BLE](#ble)                                                                                                                                                                         |
-| Mobile bridge (Phase 5): IP proxy with mDNS (5a), BlueZ GATT mirror (5b), the phone as a node          | done, tested with scripted boards and stand-ins; **on real firmware** the IP bridge serves the ESP32's `WebServer` to the host's `curl` and BlueZ advertises the firmware's GATT on `hci0`; **no phone or LAN mDNS from another host used**, see [Mobile bridge](#mobile-bridge)                                                              |
+<!-- Update Milestones and Not yet validated in the same PR that changes them. -->
+
+| Part                                                                                                            | State                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| RF engine: medium, nodes, positions, path loss, rate and retries, jitter, loss, seeded RNG, event log           | done, unit-tested on a manual clock                                                                                                                                                                                                                                                                                                                                                |
+| `qemu-wifi-l2` adapter: each board's QEMU network device on the engine instead of SLIRP                         | done, tested against a fake QEMU peer over real sockets                                                                                                                                                                                                                                                                                                                            |
+| Orchestrator and CLI: `hertzbench run`, `validate`                                                              | done, tested through the real CLI                                                                                                                                                                                                                                                                                                                                                  |
+| `metrics.json`, `air.pcap`, `events.jsonl`, assertions                                                          | done                                                                                                                                                                                                                                                                                                                                                                               |
+| ESP32 boards under QEMU                                                                                         | **run on real firmware** with a libqemu built from the public fork (2026-10-23, 2026-10-24), see [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware)                                                                                                                                                                                                                        |
+| MCP server: 25 tools, examples and fidelity table as resources, live move and fault                             | done, tested with scripted boards; ESP32 through MCP not run                                                                                                                                                                                                                                                                                                                       |
+| View: `hertzbench view`, map, links colored by RSSI or loss, drag to move, packet timeline                      | done, tested over HTTP and in headless Chromium with scripted boards; four ESP32 examples pass in the view; dragging an ESP32 node not validated                                                                                                                                                                                                                                   |
+| `docker-compose.hertzbench.yml`                                                                                 | not started                                                                                                                                                                                                                                                                                                                                                                        |
+| ESP-NOW                                                                                                         | done; **`espnow-mesh-5-nodes.yaml` passes 7/7 on real firmware** (2026-10-24, with a patch to the fork), see [ESP-NOW](#esp-now)                                                                                                                                                                                                                                                   |
+| LoRa (SX127x) and nRF24L01+                                                                                     | done; `lora-gateway-6-nodes.yaml` **passes on real firmware**; no nRF24 example has an ESP32 board                                                                                                                                                                                                                                                                                 |
+| BLE                                                                                                             | done; `ble-sensors-3-nodes.yaml` **passes on real firmware** (Bluedroid host-only, ESP-IDF v5.3.6), see [BLE](#ble)                                                                                                                                                                                                                                                                |
+| Mobile bridge (Phase 5)                                                                                         | done; on real firmware the IP bridge serves the ESP32's `WebServer` to the host's `curl`, and BlueZ advertises `hzb sensor` on `hci0`. On the maintainer's host no phone was used, but community report [#37](https://github.com/Rixmerz/hertzbench/issues/37) has a real phone reaching the IP bridge over HTTP (WebSocket and MQTT not run), see [Mobile bridge](#mobile-bridge) |
+| Android app over Wi-Fi to real ESP32 firmware ([PR #96](https://github.com/Rixmerz/hertzbench/pull/96))         | **passes**: `android-web-esp32.yaml` 3 of 3 on the `pixel8` AVD (2026-11-09, again 2026-11-10); Linux with KVM, not in CI                                                                                                                                                                                                                                                          |
+| Android app over simulated BLE to real ESP32 firmware ([PR #98](https://github.com/Rixmerz/hertzbench/pull/98)) | **passes**: `android-ble-esp32.yaml` 3 of 3 on `pixel8` (2026-11-10, 96 to 103 s each); one Linux host only, not in CI                                                                                                                                                                                                                                                             |
+| Releases                                                                                                        | v0.3.0 and v0.3.1 (2026-11-11) publish binaries for Linux, macOS and Windows, x64 and arm64; v0.3.1 adds unsigned, non-notarized macOS `.dmg` images                                                                                                                                                                                                                               |
+| CI                                                                                                              | lint, type check and tests pass on `ubuntu-latest`, `windows-latest` and `macos-latest` (arm64), run 40083042461                                                                                                                                                                                                                                                                   |
+
+### Milestones
+
+Newest first. Each entry links the PR, release or document that holds the result.
+
+- **2026-11-11**: v0.3.1 released, with unsigned, non-notarized macOS `.dmg` images
+  ([PR #100](https://github.com/Rixmerz/hertzbench/pull/100)).
+- **2026-11-11**: v0.3.0 released ([PR #99](https://github.com/Rixmerz/hertzbench/pull/99)).
+- **2026-11-10**: Android app talks to real ESP32 firmware over simulated BLE, 3 of 3 runs pass
+  ([PR #98](https://github.com/Rixmerz/hertzbench/pull/98),
+  [missing-tests.md](docs/missing-tests.md)).
+- **2026-11-09**: Android app talks to real ESP32 firmware over simulated Wi-Fi, 3 of 3 runs pass,
+  repeated 2026-11-10 ([PR #96](https://github.com/Rixmerz/hertzbench/pull/96),
+  [android-device-plan.md](docs/android-device-plan.md)).
+- **2026-11-05**: Android app runs GATT through the BLE bridge's netsim backend against the scripted
+  sensor, 3 of 3 runs pass ([missing-tests.md](docs/missing-tests.md)).
+- **2026-10-29**: v0.2.0 released ([PR #83](https://github.com/Rixmerz/hertzbench/pull/83)).
+- **2026-10-28**: ESP32 scenarios pass in Debian 13 and Fedora 44 containers
+  ([e2e-esp32.md](docs/e2e-esp32.md#other-linux-distributions)).
+- **2026-10-24**: ESP-NOW mesh passes 7/7 on real firmware, with the fork patched
+  ([e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware)).
+- **2026-10-24**: v0.1.0 released, with six binaries and `SHA256SUMS`
+  ([release tag](https://github.com/Rixmerz/hertzbench/releases/tag/v0.1.0)).
+- **2026-10-23**: first ESP32 on real firmware: UDP between three boards passes 5 of 5
+  ([e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware)).
+
+### Not yet validated
+
+- **Android Wi-Fi and BLE scenarios on a real Mac.** The `android:` launcher is Linux with KVM only;
+  the Mac checklist is in draft [PR #97](https://github.com/Rixmerz/hertzbench/pull/97), not merged.
+- **The macOS `.dmg` opened on a real Mac.** Released unsigned and not notarized, and nobody has
+  opened one on a Mac yet. Plan: [community-testing.md](docs/community-testing.md#platforms).
+- **Android scenarios in CI.** The opt-in `android-e2e` job has no green run recorded, and the ESP32
+  and BLE Android scenarios are not in it. Plan: [missing-tests.md](docs/missing-tests.md) and
+  [android-device-plan.md](docs/android-device-plan.md#5-ci-feasibility).
+- **A physical phone.** Not used through the BLE bridge, over WebSocket or MQTT on the IP bridge,
+  against real ESP32 firmware, or with the Android app on a device. Plan:
+  [mobile-bridge.md](docs/mobile-bridge.md) and
+  [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
+- **LAN mDNS seen from another host.** Not run. Plan:
+  [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
+- **Dragging an ESP32 node in the view.** [view.md](docs/view.md#with-real-firmware-esp32) says drag
+  was tested with scripted boards only, and
+  [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware) cites a 2026-10-27 run with no result
+  recorded. Plan: [community-testing.md](docs/community-testing.md#esp32-firmware).
+- **ESP32 through MCP.** The MCP runs used scripted boards; the ESP32 runs used the CLI. Plan:
+  [mcp.md](docs/mcp.md) and [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware).
+- **nRF24 with an ESP32 board.** No example has one; the nRF24 scenario uses scripted hosts. Plan:
+  [PLAN.md](docs/PLAN.md), Phase 3.
+- **`docker-compose.hertzbench.yml`.** Not started. Plan: [PLAN.md](docs/PLAN.md), the repository
+  layout.
+- **Flaky LoRa distance test (issue [#90](https://github.com/Rixmerz/hertzbench/issues/90)).**
+  Intermittent, not reproduced in this check. No plan is written yet; a related fix is commit
+  `b2969f2d`, which staggers the LoRa example's sends.
+- **Other platforms.** The Intel Mac and Windows arm64 test suites have not run; the macOS x64 and
+  arm64 binaries have not run either; the arm64 Linux suite has run only under emulation. Plan:
+  [community-testing.md](docs/community-testing.md#platforms).
+- **ESP32 scenarios on macOS.** Untested; the blockers and a build outline are in
+  [e2e-esp32.md](docs/e2e-esp32.md#macos), with
+  [issue #54](https://github.com/Rixmerz/hertzbench/issues/54) for reports.
+- **Android timeline intents and `instrument:`.** Only a fake `adb` ran; a real app's receiver and
+  an instrumented test APK are untested. Plan: [missing-tests.md](docs/missing-tests.md), the
+  timeline intents row.
+- **Android snapshot boot and two Android nodes in one run.** Not run; boot time and the snapshot's
+  MAC and netdev behaviour (A4, A7) are open. Plan:
+  [android-device-plan.md](docs/android-device-plan.md), piece 6.
+- **Android BLE scripted run, one of three.** On 2026-11-05 one run's log stopped at 13.7 s, and the
+  cause is not found. Plan: [missing-tests.md](docs/missing-tests.md), the netsim row.
+- **Windows firewall prompt for the IP bridge.** Not seen. Plan:
+  [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
 
 ## Limits
 
@@ -82,7 +158,7 @@ it.
 
 **A release binary** (nothing else to install). Download the file for your system from the GitHub
 Release of a `v*` tag, together with `SHA256SUMS`, and check it. `v0.1.0` is published (2026-10-24)
-with all six binaries and `SHA256SUMS`:
+with all six binaries and `SHA256SUMS`; later tags are listed under [Milestones](#milestones):
 
 | System  | x64                          | arm64                          |
 | ------- | ---------------------------- | ------------------------------ |
