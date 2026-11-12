@@ -111,8 +111,7 @@ Newest first. Each entry links the PR, release or document that holds the result
   [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
 - **Dragging an ESP32 node in the view.** [view.md](docs/view.md#with-real-firmware-esp32) says drag
   was tested with scripted boards only, and
-  [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware) cites a 2026-10-27 run with no result
-  recorded. Plan: [community-testing.md](docs/community-testing.md#esp32-firmware).
+  [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware) has the test but no recorded run. Plan: [community-testing.md](docs/community-testing.md#esp32-firmware).
 - **ESP32 through MCP.** The MCP runs used scripted boards; the ESP32 runs used the CLI. Plan:
   [mcp.md](docs/mcp.md) and [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware).
 - **nRF24 with an ESP32 board.** No example has one; the nRF24 scenario uses scripted hosts. Plan:
