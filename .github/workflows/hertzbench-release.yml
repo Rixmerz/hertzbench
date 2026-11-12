@@ -43,3 +43,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/hertzbench-* dist/SHA256SUMS --title "Hertzbench $GITHUB_REF_NAME" --generate-notes
+
+  # Unsigned disk images for macOS. They are not notarized, so Gatekeeper still
+  # asks: right-click the binary and choose Open, or clear the quarantine flag
+  # (see INSTALL.txt inside the image).
+  dmg:
+    needs: release
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Build disk images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern 'hertzbench-macos-*' --pattern SHA256SUMS
+          for arch in arm64 x64; do
+            stage="stage-$arch"
+            mkdir "$stage"
+            install -m 0755 "hertzbench-macos-$arch" "$stage/hertzbench"
+            cat > "$stage/INSTALL.txt" <<TXT
+          Hertzbench $GITHUB_REF_NAME for macOS ($arch)
+
+          This build is not signed or notarized. To install it:
+
+            sudo cp /Volumes/Hertzbench/hertzbench /usr/local/bin/
+            sudo xattr -d com.apple.quarantine /usr/local/bin/hertzbench
+            hertzbench --help
+          TXT
+            hdiutil create -volname Hertzbench -srcfolder "$stage" -format UDZO -ov "hertzbench-macos-$arch.dmg"
+          done
+          shasum -a 256 hertzbench-macos-*.dmg >> SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" hertzbench-macos-*.dmg
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" SHA256SUMS --clobber
