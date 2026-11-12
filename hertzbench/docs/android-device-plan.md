@@ -1,6 +1,9 @@
 # Plan: an Android app as a node of the simulation
 
-Status: design only, nothing here is built yet. Written 2026-10-28.
+Status: written 2026-10-28 as a design; the Android launcher, the Wi-Fi run to real ESP32 firmware
+(`android-web-esp32.yaml`) and the netsim BLE run (`android-ble-esp32.yaml`) are now built and passed
+3 of 3 each on Linux ([missing-tests.md](missing-tests.md)). Not validated: macOS, CI (the opt-in
+`android-e2e` job has not run) and a physical phone.
 
 **Goal.** An Android app, running unmodified in the Android emulator, talks to the simulated boards
 over the simulated radio: over Wi-Fi/IP to ESP32 boards under QEMU (and, through such a board, to
