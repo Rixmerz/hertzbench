@@ -147,7 +147,9 @@ Deno.test("bad arguments exit 2", async () => {
 
 Deno.test("the bundle is current: regenerating it from scenarios/examples changes nothing", async () => {
   const text = renderBundle(await collectExamples());
-  const committed = await Deno.readTextFile(new URL("../cli/examples_bundle.ts", import.meta.url));
+  // A Windows checkout may hold the file with CRLF line endings; the generator writes LF.
+  const committed = (await Deno.readTextFile(new URL("../cli/examples_bundle.ts", import.meta.url)))
+    .replaceAll("\r\n", "\n");
   assertEquals(
     committed,
     text,
