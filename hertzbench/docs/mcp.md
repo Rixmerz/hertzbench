@@ -11,20 +11,42 @@ server is separate, new code. It does not use Velxio's server.
 
 ## Register it with Claude Code
 
-With the commands installed (`deno task install-cli`):
+Pick the line for how you got Hertzbench. Each one names the program that runs `mcp`; the
+`--workspace` path is the project the agent works in.
+
+| How you got it                                    | The program to name                                                        |
+| ------------------------------------------------- | -------------------------------------------------------------------------- |
+| Installed with `deno task install-cli`            | `hertzbench` (on your PATH)                                                |
+| A downloaded release binary                       | the path of the file, e.g. `/path/to/hertzbench-linux-x64`                 |
+| From a clone, without installing                  | `deno run ... /path/to/repo/hertzbench/cli/main.ts` (see below)           |
+
+With the installed command:
 
 ```bash
 claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project
 ```
 
-Without installing them:
+With a downloaded binary, give the path of the file you downloaded. A binary is not on your PATH
+unless you put it there, so `hertzbench` alone does not start:
+
+```bash
+# Linux
+claude mcp add hertzbench -- /path/to/hertzbench-linux-x64 mcp --workspace /path/to/your/project
+# macOS (Apple silicon; use hertzbench-macos-x64 on Intel)
+claude mcp add hertzbench -- /path/to/hertzbench-macos-arm64 mcp --workspace /path/to/your/project
+# Windows, PowerShell
+claude mcp add hertzbench -- C:\path\to\hertzbench-windows-x64.exe mcp --workspace C:\path\to\your\project
+```
+
+Without installing, from a clone:
 
 ```bash
 claude mcp add hertzbench -- deno run --allow-net=127.0.0.1 --allow-read --allow-write \
   --allow-run --allow-env /path/to/repo/hertzbench/cli/main.ts mcp --workspace /path/to/your/project
 ```
 
-Or, for everyone working on a project, in its `.mcp.json`:
+For everyone working on a project, put the server in its `.mcp.json`. The `command` is the same
+program as above, so the three forms look like this:
 
 ```json
 {
@@ -33,6 +55,20 @@ Or, for everyone working on a project, in its `.mcp.json`:
       "command": "hertzbench",
       "args": ["mcp", "--workspace", "."],
       "env": { "QEMU_ESP32_LIB": "/path/to/libqemu-xtensa.so" }
+    }
+  }
+}
+```
+
+With a downloaded binary, replace `"command"` with its path. On Windows, double each backslash in
+the JSON string:
+
+```json
+{
+  "mcpServers": {
+    "hertzbench": {
+      "command": "C:\\path\\to\\hertzbench-windows-x64.exe",
+      "args": ["mcp", "--workspace", "."]
     }
   }
 }
