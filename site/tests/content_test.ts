@@ -56,3 +56,20 @@ Deno.test("content: a scenario printed on the page is the one the CLI test runs"
   assertEquals(printed.split("\n")[0], "name: nrf24-scripted");
   assert(test.includes(printed), "the nRF24 scenario on the page differs from tests/cli_test.ts");
 });
+
+Deno.test("content: no release number is typed into the page outside its run record", () => {
+  // The newest release comes from the GitHub API in download.js, so the text must not name one
+  // that goes stale. The only release number allowed is in the dated run record (a <figure>),
+  // which says what was run on which day. ESP-IDF's own version is not a release.
+  const outside = html
+    .replace(/<figure class="frame">[\s\S]*?<\/figure>/g, "")
+    .replaceAll(/ESP-IDF\s+v\d+\.\d+\.\d+/g, "");
+  const found = outside.match(/\bv\d+\.\d+\.\d+\b/g) ?? [];
+  assertEquals(found, [], "a release number is typed into the page: it goes stale");
+});
+
+Deno.test("content: the Download section takes its release from the API, not from text", () => {
+  const section = /<section id="download"[\s\S]*?<\/section>/.exec(html)![0];
+  assert(section.includes('id="release-status"'), "no status line for the API's answer");
+  assert(/<script src="download\.js"/.test(html), "download.js is not loaded");
+});

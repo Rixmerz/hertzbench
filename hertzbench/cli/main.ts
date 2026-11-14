@@ -4,9 +4,11 @@
 // was invalid or the environment cannot run it, 130 interrupted. `view` and
 // `mcp` are servers: Ctrl-C is how they end, and they exit 0.
 
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { PRODUCT } from "../brand.ts";
 import { androidCommand } from "./android.ts";
+import { openBrowserSafely, type Opener, shouldOpenBrowser } from "./browser_open.ts";
+import { examplesCommand } from "./examples.ts";
 import { runMcpServer, Session, ToolError } from "../mcp/mod.ts";
 import { BoardError } from "../orchestrator/boards/board.ts";
 import { sketchLimitWarnings } from "../orchestrator/board-limits.ts";
@@ -15,13 +17,20 @@ import { renderReport } from "../orchestrator/report.ts";
 import { RunInterrupted, runScenario } from "../orchestrator/runner.ts";
 import { ScenarioError } from "../orchestrator/scenario.ts";
 import { serveView } from "../view/server.ts";
+import {
+  ownsConsoleWindow,
+  shouldShowWelcome,
+  waitForEnter,
+  welcomeText,
+} from "./windows_console.ts";
 
 const USAGE = `${PRODUCT.displayName}: simulate the radio network between boards
 
 Usage:
   ${PRODUCT.cli} run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
   ${PRODUCT.cli} validate <scenario.yaml>
-  ${PRODUCT.cli} view <scenario.yaml> [--port N] [--out DIR] [--seed N]
+  ${PRODUCT.cli} view <scenario.yaml> [--port N] [--out DIR] [--seed N] [--no-open]
+  ${PRODUCT.cli} examples [name] [--out <dir>]
   ${PRODUCT.cli} mcp [--workspace DIR] [--view-port N]
   ${PRODUCT.cli} android prepare <avd>
 
@@ -33,6 +42,8 @@ validate   Check the scenario file and the firmware paths it names.
 view       Run the scenario and draw it live in the browser: a map of the
            nodes, links colored by signal or loss, a packet timeline; drag a
            node to move it (see docs/view.md). Serves until Ctrl-C.
+examples   List the bundled example scenarios, or copy one out as <name>.yaml
+           (into the current directory, or --out). Never overwrites a file.
 mcp        Serve the Model Context Protocol on stdin and stdout, for an AI
            agent such as Claude Code (see docs/mcp.md).
 android    prepare: save the AVD snapshot that \`snapshot: true\` android nodes boot
@@ -42,6 +53,7 @@ Options:
   --out DIR   Write every output file into DIR instead of the scenario's own.
   --seed N    Override the scenario seed.
   --quiet     Print only the result line.
+  --no-open   view: do not open the browser; just print the address.
   --port N    view: the loopback port to serve on. Default 7480; 0 picks a
               free one. The address is printed on stderr.
   --workspace DIR
@@ -58,6 +70,7 @@ interface Args {
   out: string | undefined;
   seed: number | undefined;
   quiet: boolean;
+  noOpen: boolean;
   workspace: string | undefined;
   port: number | undefined;
   viewPort: number | undefined;
@@ -83,6 +96,7 @@ function parseArgs(argv: string[]): Args | string {
     out: undefined,
     seed: undefined,
     quiet: false,
+    noOpen: false,
     workspace: undefined,
     port: undefined,
     viewPort: undefined,
@@ -110,6 +124,8 @@ function parseArgs(argv: string[]): Args | string {
       else args.viewPort = port;
     } else if (arg === "--quiet") {
       args.quiet = true;
+    } else if (arg === "--no-open") {
+      args.noOpen = true;
     } else if (arg === "--help" || arg === "-h") {
       return USAGE;
     } else if (arg.startsWith("-")) {
@@ -123,8 +139,37 @@ function parseArgs(argv: string[]): Args | string {
   return args;
 }
 
-async function main(argv: string[]): Promise<number> {
+/** The parts of the host `main` reads, replaceable so tests need no console, browser or Windows. */
+export interface MainDeps {
+  os?: string;
+  ownsConsole?: () => boolean;
+  waitForEnter?: () => Promise<void>;
+  /** The name the welcome text tells a person to type. */
+  exeName?: string;
+  /** Opens the view's address in a browser; only called when `shouldOpenBrowser` allows it. */
+  openBrowser?: Opener;
+  stdoutIsTerminal?: boolean;
+  ci?: boolean;
+  /** `view` ends, as on Ctrl-C, when this aborts. */
+  stop?: AbortSignal;
+}
+
+export async function main(argv: string[], deps: MainDeps = {}): Promise<number> {
+  const os = deps.os ?? Deno.build.os;
+  // Only on Windows is it worth asking: a double-click there opens a console that vanishes on exit.
+  if (
+    shouldShowWelcome({
+      os,
+      ownsConsole: os === "windows" && (deps.ownsConsole ?? ownsConsoleWindow)(),
+      argCount: argv.length,
+    })
+  ) {
+    console.log(welcomeText(deps.exeName ?? basename(Deno.execPath())));
+    await (deps.waitForEnter ?? waitForEnter)();
+    return 0;
+  }
   if (argv[0] === "android") return await androidCommand(argv.slice(1));
+  if (argv[0] === "examples") return await examplesCommand(argv.slice(1));
   const args = parseArgs(argv);
   if (typeof args === "string") {
     console.error(args === USAGE ? args : `${args}\n\n${USAGE}`);
@@ -145,12 +190,16 @@ async function main(argv: string[]): Promise<number> {
     console.error(`unknown command ${JSON.stringify(args.command)}\n\n${USAGE}`);
     return 2;
   }
+  if (args.noOpen && args.command !== "view") {
+    console.error(`--no-open only applies to view\n\n${USAGE}`);
+    return 2;
+  }
   if (args.file === undefined) {
     console.error(`${args.command} needs a scenario file\n\n${USAGE}`);
     return 2;
   }
 
-  if (args.command === "view") return await view(args.file, args);
+  if (args.command === "view") return await view(args.file, args, deps);
 
   try {
     const loaded = await loadScenario(args.file, args.out);
@@ -212,7 +261,7 @@ async function main(argv: string[]): Promise<number> {
  * out/<scenario>/<run id>/ in the current directory, which is also the only
  * place this command writes.
  */
-async function view(file: string, args: Args): Promise<number> {
+async function view(file: string, args: Args, deps: MainDeps): Promise<number> {
   const log = (line: string) => console.error(`[${PRODUCT.slug}] ${line}`);
   const out = args.out === undefined ? undefined : resolve(args.out);
   // The session's workspace must exist; `run --out` creates its directory too.
@@ -229,6 +278,8 @@ async function view(file: string, args: Args): Promise<number> {
   const signals: Deno.Signal[] = Deno.build.os === "windows" ? ["SIGINT"] : ["SIGINT", "SIGTERM"];
   const quit = Promise.withResolvers<void>();
   for (const signal of signals) Deno.addSignalListener(signal, quit.resolve);
+  deps.stop?.addEventListener("abort", () => quit.resolve(), { once: true });
+  if (deps.stop?.aborted) quit.resolve();
   try {
     let run;
     try {
@@ -244,6 +295,15 @@ async function view(file: string, args: Args): Promise<number> {
       throw error;
     }
     log(`view: ${server.url}`);
+    if (
+      shouldOpenBrowser({
+        stdoutIsTerminal: deps.stdoutIsTerminal ?? Deno.stdout.isTerminal(),
+        ci: deps.ci ?? Boolean(Deno.env.get("CI")),
+        noOpen: args.noOpen,
+      })
+    ) {
+      await openBrowserSafely(server.url, deps.openBrowser);
+    }
     let quitting = false;
     run.done.then(() => {
       if (quitting) return;

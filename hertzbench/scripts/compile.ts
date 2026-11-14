@@ -46,6 +46,10 @@ const PERMISSIONS = [
   "--allow-env",
 ];
 
+// The Windows build asks Windows whether the process owns its console (cli/windows_console.ts),
+// which needs FFI; the other targets never call it.
+const WINDOWS_PERMISSIONS = ["--allow-ffi"];
+
 const args = Deno.args;
 if (args.includes("--list")) {
   console.log(Object.keys(TARGETS).join("\n"));
@@ -56,6 +60,24 @@ const unknown = wanted.filter((name) => !(name in TARGETS));
 if (unknown.length > 0) {
   console.error(`unknown target ${unknown.join(", ")}; known: ${Object.keys(TARGETS).join(", ")}`);
   Deno.exit(2);
+}
+
+// cli/examples_bundle.ts is committed but generated: regenerate it so a binary never ships a
+// stale copy of scenarios/examples/.
+const bundle = await new Deno.Command(Deno.execPath(), {
+  args: [
+    "run",
+    "--allow-read",
+    `--allow-write=${join(ROOT, "cli", "examples_bundle.ts")}`,
+    "scripts/bundle-examples.ts",
+  ],
+  cwd: ROOT,
+  stdout: "inherit",
+  stderr: "inherit",
+}).output();
+if (bundle.code !== 0) {
+  console.error(`bundle-examples failed (exit ${bundle.code})`);
+  Deno.exit(bundle.code);
 }
 
 const dist = join(ROOT, "dist");
@@ -69,6 +91,7 @@ for (const name of wanted) {
       "--target",
       TARGETS[name]!,
       ...PERMISSIONS,
+      ...(name.startsWith("windows") ? WINDOWS_PERMISSIONS : []),
       ...EMBEDDED.flatMap((path) => ["--include", path]),
       "--output",
       output,
