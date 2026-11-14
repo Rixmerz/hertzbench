@@ -7,8 +7,9 @@ browser and a mobile bridge to a real phone. It is built on Velxio, which does t
 
 ![Live view of a finished run: five ESP32 boards on real ESP-NOW firmware](site/img/hero-light.png)
 
-- **Start here:** [hertzbench/README.md](hertzbench/README.md) (quick start, install, status,
-  limits, every radio, MCP, view, tests)
+- **Start here:** [hertzbench/README.md](hertzbench/README.md) (getting started with the release
+  binary, install, status, limits, every radio, MCP, view, tests). Downloaded a binary? Begin at
+  [Getting started with the binary](hertzbench/README.md#getting-started-with-the-binary).
 - **Website and downloads:** <https://rixmerz.github.io/hertzbench/>
 - **Status:** community-maintained. What has not been tested or fixed yet is listed in
   [hertzbench/docs/community-testing.md](hertzbench/docs/community-testing.md#known-problems-open-for-contributions).

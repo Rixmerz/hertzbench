@@ -27,24 +27,170 @@ talking over simulated radio links. The only Velxio file it patches is `esp32_wo
 ESP-NOW, BLE, the mobile bridge and the view touch no Velxio file
 ([docs/upstream-sync.md](docs/upstream-sync.md)).
 
-## Quick start
+## Getting started with the binary
 
-Hertzbench is one binary per system, with nothing else to install. Download the file for your system
-from the GitHub Release of a `v*` tag, with `SHA256SUMS`; the file names and the check commands are
-in [Install](#install). The example scenarios are read from disk, so run the binary from a checkout
-of this repository:
+Hertzbench runs several microcontroller boards at once and simulates the radio links between them,
+with distance, walls, latency and loss. You describe the boards and their links in a scenario file
+(YAML); `run` plays it, prints a report and writes the metrics, a packet capture and an event log.
+The same run can be watched live in a browser, and an AI agent can drive it through MCP.
+
+### What the binary does on its own
+
+Scripted boards are traffic generators, not firmware. A scenario that uses only them needs the
+binary and a scenario file, and nothing else: no Deno, no QEMU, no Android SDK. The example
+scenarios are in `scenarios/examples/` of a clone of this repository. The `examples` command below
+will write them out for you.
+
+Other boards need more software:
+
+| To use                               | You also need                                                                                                                                              |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ESP32 boards running real firmware   | `libqemu-xtensa` built from the public QEMU fork, with `QEMU_ESP32_LIB` set to it. See [e2e-esp32.md](docs/e2e-esp32.md).                                  |
+| Android app nodes (`board: android`) | The Android SDK, an AVD, the app's APK and hardware acceleration. KVM on Linux is validated; Windows and macOS are not. See [android.md](docs/android.md). |
+| The BLE bridge to a real phone       | Linux with BlueZ. See [mobile-bridge.md](docs/mobile-bridge.md).                                                                                           |
+
+### Download and check the file
+
+Each `v*` tag is a GitHub Release with one binary per system and a `SHA256SUMS` file. The
+[latest release](https://github.com/Rixmerz/hertzbench/releases/latest) lists them. Put the binary
+and `SHA256SUMS` in one folder and check the binary against its line.
+
+Linux:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+chmod +x hertzbench-linux-x64
+```
+
+macOS (`shasum` instead of `sha256sum`):
+
+```bash
+shasum -a 256 -c --ignore-missing SHA256SUMS
+xattr -d com.apple.quarantine hertzbench-macos-arm64   # first run only: the file is not notarized
+```
+
+Windows, in PowerShell from the download folder:
+
+```powershell
+$name = 'hertzbench-windows-x64.exe'
+$want = (Select-String -Path SHA256SUMS -Pattern $name).Line.Split(' ')[0]
+if ((Get-FileHash $name -Algorithm SHA256).Hash -eq $want) { 'OK' } else { 'MISMATCH' }
+```
+
+The Windows file is a command-line tool, not a window. Open PowerShell in the download folder and
+run it there, as in the next section. Double-clicking it runs the same program with no arguments: it
+prints the usage text and exits. The release workflow does not sign the Windows file, so SmartScreen
+may say "Windows protected your PC" the first time. Check the hash first, then choose "More info"
+and "Run anyway".
+
+### First run
+
+Get the example scenarios from a clone, and put the binary in the folder that holds `scenarios/`:
 
 ```bash
 git clone https://github.com/Rixmerz/hertzbench.git
-cd hertzbench/hertzbench                  # the directory that holds scenarios/
-# put the downloaded binary here, then:
-chmod +x hertzbench-linux-x64
+cd hertzbench/hertzbench                  # the folder that holds scenarios/
+./hertzbench-linux-x64 validate scenarios/examples/udp-3-scripted.yaml
 ./hertzbench-linux-x64 run scenarios/examples/udp-3-scripted.yaml --out /tmp/hzb-out
-./hertzbench-linux-x64 view scenarios/examples/live-3-scripted.yaml   # open http://127.0.0.1:7480/
 ```
 
-On Windows, use `.\hertzbench-windows-x64.exe` in PowerShell, with the same arguments. The view
-serves until Ctrl-C, and its scenario runs for two minutes.
+On Windows, the same two commands are:
+
+```powershell
+.\hertzbench-windows-x64.exe validate scenarios\examples\udp-3-scripted.yaml
+.\hertzbench-windows-x64.exe run scenarios\examples\udp-3-scripted.yaml --out hzb-out
+```
+
+`run` plays three scripted boards for 6 s. Board `c` walks behind a wall at 2.5 s, so its links to
+`a` lose frames while the link to `b` holds. The last lines of the report from v0.3.1's Linux binary
+(the `seen at` times change from run to run):
+
+```
+Assertions
+  PASS  serial a contains "dhcp bound ip=192.168.4.11" within 1000 ms  (seen at 15.527 ms)
+  PASS  serial c contains "rx pong" within 2000 ms  (seen at 35.509 ms)
+  PASS  metric *->* (phase start, udp frames): loss_pct lt 5, latency_p95_ms lt 2  (6 link(s) satisfy it)
+  PASS  metric c->a (phase behind-wall, udp frames): loss_pct gt 20, latency_p95_ms gt 4  (1 link(s) satisfy it)
+  PASS  metric c->b (phase behind-wall, udp frames): loss_pct lt 10  (1 link(s) satisfy it)
+
+RESULT: PASS
+```
+
+The exit status is 0 when the run passes, 1 when an assertion fails, and 2 when the scenario is
+invalid or the environment cannot run it. The files are `metrics.json`, `air.pcap` (open it in
+Wireshark), `events.jsonl` and one `serial-<node>.log` per board, in the `--out` folder.
+
+### Your first scenario
+
+Save this as `two-boards.yaml` next to the binary. Two scripted boards send 20 pings to each other,
+100 ms apart, for 4 s:
+
+```yaml
+# Two scripted boards, 4 s: each sends 20 pings to the other, 100 ms apart.
+name: two-boards
+seed: 1
+duration: 4s
+nodes:
+  - id: a
+    board: scripted
+    position: [0, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: b, every: 100ms, count: 20, payload: ping }
+  - id: b
+    board: scripted
+    position: [5, 0]
+    radios: [{ phy: wifi, channel: 5, tx_power_dbm: 15 }]
+    firmware:
+      send:
+        - { to: a, every: 100ms, count: 20, payload: ping }
+assertions:
+  - metric: { link: "a->b", kind: udp, loss_pct: { lt: 5 } }
+```
+
+```bash
+./hertzbench-linux-x64 validate two-boards.yaml
+./hertzbench-linux-x64 run two-boards.yaml --out out
+```
+
+`validate` prints `two-boards.yaml: ok (2 nodes, 4000 ms, seed 1)`, and `run` ends with
+`PASS  metric a->b (udp frames): loss_pct lt 5` and `RESULT: PASS`. Positions are in metres, and a
+path in a scenario is relative to the scenario file. Every field is in
+[scenario-format.md](docs/scenario-format.md).
+
+### Watch a run
+
+```bash
+./hertzbench-linux-x64 view scenarios/examples/live-3-scripted.yaml
+```
+
+It prints `[hertzbench] view: http://127.0.0.1:7480/`. Open that address in a browser. The view
+serves until Ctrl-C, and the scenario runs for 120 s. Use `--port N` if 7480 is taken.
+
+Planned, not in v0.3.1 or on this branch: `view` opens the default browser by itself, unless you
+pass `--no-open`.
+
+### Examples from the binary (planned)
+
+Planned, not in v0.3.1 or on this branch: the binary will carry the example scenarios, so you need
+no clone:
+
+```bash
+./hertzbench-linux-x64 examples                                  # list the scenarios in the binary
+./hertzbench-linux-x64 examples udp-3-scripted --out my-scenarios  # write one to disk, never overwriting
+```
+
+Until then, `examples` is an unknown command and the scenarios are the ones in a clone.
+
+### Where to go next
+
+- [scenario-format.md](docs/scenario-format.md): every scenario field and the output files.
+- [mcp.md](docs/mcp.md): driving a run from an AI agent, with the binary's path in the setup.
+- [view.md](docs/view.md): what the live view shows and how to move a node in it.
+- [android.md](docs/android.md) and [e2e-esp32.md](docs/e2e-esp32.md): the boards that need more
+  software, and what is validated for them.
+- [Status](#status): what has run on real firmware and what has not.
 
 ## Status
 
@@ -61,7 +207,83 @@ serves until Ctrl-C, and its scenario runs for two minutes.
 | ESP-NOW (F1): action frames from the QEMU fork's MAC on the switch, the 10 ms ACK wait, 802.11 capture | done against a model of the fork, tested on a manual clock and with scripted boards; **`espnow-mesh-5-nodes.yaml` passes 7/7 on real firmware** (2026-10-24) with a small patch to the fork's Wi-Fi MAC (its 20-frame injection queue never resumed reading, [docs/upstream-sync.md](docs/upstream-sync.md) patch 3), see [ESP-NOW](#esp-now) |
 | LoRa (SX127x) and nRF24L01+ chip models over `spi-link` (Phase 3)                                      | done; `lora-gateway-6-nodes.yaml` **passes on real firmware** (arduino-LoRa on an SX1276 model). No nRF24 example has an ESP32 board                                                                                                                                                                                                          |
 | BLE (F3, Phase 6): virtual HCI controller per node on the chip-level air, ESP32 HCI UART relay         | done, tested on a manual clock and with scripted hosts; `ble-sensors-3-nodes.yaml` **passes on real firmware** (Bluedroid host-only, ESP-IDF v5.3.6), see [BLE](#ble)                                                                                                                                                                         |
+| Android app nodes (`board: android`) on Linux with KVM                                                 | **passes**: `android-web-esp32.yaml` 3 of 3 on the `pixel8` AVD (2026-11-09, again 2026-11-10); `android-ble-esp32.yaml` 3 of 3 (2026-11-10). Windows (WHPX, AEHD, HAXM) and macOS (HVF) are implemented but **not validated**; see [android.md](docs/android.md)                                                                             |
 | Mobile bridge (Phase 5): IP proxy with mDNS (5a), BlueZ GATT mirror (5b), the phone as a node          | done, tested with scripted boards and stand-ins; **on real firmware** the IP bridge serves the ESP32's `WebServer` to the host's `curl` and BlueZ advertises the firmware's GATT on `hci0`; **no phone or LAN mDNS from another host used**, see [Mobile bridge](#mobile-bridge)                                                              |
+
+### Milestones
+
+Newest first. Each entry links the PR, release or document that holds the result.
+
+- **2026-11-11**: v0.3.1 released, with unsigned, non-notarized macOS `.dmg` images
+  ([PR #100](https://github.com/Rixmerz/hertzbench/pull/100)).
+- **2026-11-11**: v0.3.0 released ([PR #99](https://github.com/Rixmerz/hertzbench/pull/99)).
+- **2026-11-10**: Android app talks to real ESP32 firmware over simulated BLE, 3 of 3 runs pass
+  ([PR #98](https://github.com/Rixmerz/hertzbench/pull/98),
+  [missing-tests.md](docs/missing-tests.md)).
+- **2026-11-09**: Android app talks to real ESP32 firmware over simulated Wi-Fi, 3 of 3 runs pass,
+  repeated 2026-11-10 ([PR #96](https://github.com/Rixmerz/hertzbench/pull/96),
+  [android-device-plan.md](docs/android-device-plan.md)).
+- **2026-11-05**: Android app runs GATT through the BLE bridge's netsim backend against the scripted
+  sensor, 3 of 3 runs pass ([missing-tests.md](docs/missing-tests.md)).
+- **2026-10-29**: v0.2.0 released ([PR #83](https://github.com/Rixmerz/hertzbench/pull/83)).
+- **2026-10-28**: ESP32 scenarios pass in Debian 13 and Fedora 44 containers
+  ([e2e-esp32.md](docs/e2e-esp32.md#other-linux-distributions)).
+- **2026-10-24**: ESP-NOW mesh passes 7/7 on real firmware, with the fork patched
+  ([e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware)).
+- **2026-10-24**: v0.1.0 released, with six binaries and `SHA256SUMS`
+  ([release tag](https://github.com/Rixmerz/hertzbench/releases/tag/v0.1.0)).
+- **2026-10-23**: first ESP32 on real firmware: UDP between three boards passes 5 of 5
+  ([e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware)).
+
+### Not yet validated
+
+- **Android on Windows and macOS.** The launcher now checks acceleration with
+  `emulator -accel-check` (WHPX, AEHD or HAXM on Windows, HVF on macOS) instead of KVM only. Neither
+  path has run on a real machine. [Issue #102](https://github.com/Rixmerz/hertzbench/issues/102)
+  reports the Linux-only refusal on Windows. Plan: [android.md](docs/android.md#platforms).
+- **Two real Android nodes in one run.** The `android prepare` procedure is implemented and tested
+  with a fake SDK. No run has booted two emulators. Plan: [android.md](docs/android.md).
+- **Android snapshot boot time, and the snapshot's MAC and network steps.** Not measured; see
+  [android-device-plan.md](docs/android-device-plan.md), piece 6.
+- **Android scenarios in CI.** The opt-in `android-e2e` job has no green run recorded, and the ESP32
+  and BLE Android scenarios are not in it. Plan: [missing-tests.md](docs/missing-tests.md) and
+  [android-device-plan.md](docs/android-device-plan.md#5-ci-feasibility).
+- **The `examples` command and `view --no-open`.** Planned, not in v0.3.1 or on this branch; see
+  [Examples from the binary](#examples-from-the-binary-planned).
+- **Android on a real Mac.** The Mac checklist is in draft
+  [PR #97](https://github.com/Rixmerz/hertzbench/pull/97), not merged.
+- **The macOS `.dmg` opened on a real Mac.** Released unsigned and not notarized, and nobody has
+  opened one on a Mac yet. Plan: [community-testing.md](docs/community-testing.md#platforms).
+- **A physical phone.** Not used through the BLE bridge, over WebSocket or MQTT on the IP bridge,
+  against real ESP32 firmware, or with the Android app on a device. Plan:
+  [mobile-bridge.md](docs/mobile-bridge.md) and
+  [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
+- **LAN mDNS seen from another host.** Not run. Plan:
+  [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
+- **Dragging an ESP32 node in the view.** [view.md](docs/view.md#with-real-firmware-esp32) says drag
+  was tested with scripted boards only. Plan:
+  [community-testing.md](docs/community-testing.md#esp32-firmware).
+- **ESP32 through MCP.** The MCP runs used scripted boards; the ESP32 runs used the CLI. Plan:
+  [mcp.md](docs/mcp.md) and [e2e-esp32.md](docs/e2e-esp32.md#results-on-real-firmware).
+- **nRF24 with an ESP32 board.** No example has one; the nRF24 scenario uses scripted hosts. Plan:
+  [PLAN.md](docs/PLAN.md), Phase 3.
+- **`docker-compose.hertzbench.yml`.** Not started. Plan: [PLAN.md](docs/PLAN.md), the repository
+  layout.
+- **Flaky LoRa distance test (issue [#90](https://github.com/Rixmerz/hertzbench/issues/90)).**
+  Intermittent, not reproduced in the latest check. No plan is written yet.
+- **Other platforms.** The Intel Mac and Windows arm64 test suites have not run; the macOS x64 and
+  arm64 binaries have not run either; the arm64 Linux suite has run only under emulation. Plan:
+  [community-testing.md](docs/community-testing.md#platforms).
+- **ESP32 scenarios on macOS.** Untested; the blockers and a build outline are in
+  [e2e-esp32.md](docs/e2e-esp32.md#macos), with
+  [issue #54](https://github.com/Rixmerz/hertzbench/issues/54) for reports.
+- **Android timeline intents and `instrument:`.** Only a fake `adb` ran; a real app's receiver and
+  an instrumented test APK are untested. Plan: [missing-tests.md](docs/missing-tests.md), the
+  timeline intents row.
+- **Android BLE scripted run, one of three.** On 2026-11-05 one run's log stopped at 13.7 s, and the
+  cause is not found. Plan: [missing-tests.md](docs/missing-tests.md), the netsim row.
+- **Windows firewall prompt for the IP bridge.** Not seen. Plan:
+  [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
 
 ## Limits
 
@@ -80,28 +302,16 @@ Hertzbench runs on Linux, macOS and Windows, on x64 and arm64. The CI runs lint,
 test suite on all three systems (`.github/workflows/hertzbench-ci.yml`). There are two ways to get
 it.
 
-**A release binary** (nothing else to install). Download the file for your system from the GitHub
-Release of a `v*` tag, together with `SHA256SUMS`, and check it. `v0.1.0` is published (2026-10-24)
-with all six binaries and `SHA256SUMS`:
+**A release binary** (nothing else to install). The
+[latest release](https://github.com/Rixmerz/hertzbench/releases/latest) has one file per system,
+with `SHA256SUMS`. Each file name below is the one the release uses; check them against the list and
+the commands in [Getting started with the binary](#download-and-check-the-file):
 
 | System  | x64                          | arm64                          |
 | ------- | ---------------------------- | ------------------------------ |
 | Linux   | `hertzbench-linux-x64`       | `hertzbench-linux-arm64`       |
 | macOS   | `hertzbench-macos-x64`       | `hertzbench-macos-arm64`       |
 | Windows | `hertzbench-windows-x64.exe` | `hertzbench-windows-arm64.exe` |
-
-```bash
-# Linux and macOS
-sha256sum -c --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
-chmod +x hertzbench-linux-x64 && ./hertzbench-linux-x64 --help
-# macOS only, the first run of an unsigned download: xattr -d com.apple.quarantine hertzbench-macos-arm64
-```
-
-```powershell
-# Windows (PowerShell)
-Get-FileHash .\hertzbench-windows-x64.exe -Algorithm SHA256   # compare with the line in SHA256SUMS
-.\hertzbench-windows-x64.exe --help
-```
 
 A binary carries the permissions `deno task lan` grants (network, read, write, run, env). Rename or
 copy it to `hertzbench` / `hzb` somewhere on your PATH. To build the binaries yourself, from this
@@ -413,9 +623,20 @@ is tested are in [docs/mobile-bridge.md](docs/mobile-bridge.md). No Velxio file 
 
 ## Use it from Claude Code (MCP)
 
+With the command on your PATH (`deno task install-cli`, or a renamed binary):
+
 ```bash
 claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/your/project
 ```
+
+With a downloaded binary, give its path. `hertzbench` is not on your PATH in that case:
+
+```bash
+claude mcp add hertzbench -- /path/to/hertzbench-linux-x64 mcp --workspace /path/to/your/project
+```
+
+The same for every system, with the path of the file you downloaded, is in
+[docs/mcp.md](docs/mcp.md#register-it-with-claude-code).
 
 The agent gets 25 tools, grouped here as in [docs/mcp.md](docs/mcp.md):
 
@@ -526,6 +747,8 @@ check when it is not.
 - [docs/fidelity.md](docs/fidelity.md): fidelity levels, the channel model, what is not modelled
 - [docs/mcp.md](docs/mcp.md): the MCP server, its tools and resources, registering it with Claude
   Code
+- [docs/android.md](docs/android.md): Android app nodes, the platforms that are validated, two nodes
+  in one run
 - [docs/mobile-bridge.md](docs/mobile-bridge.md): a real phone to a simulated board, over IP (with
   mDNS) or BLE (through BlueZ)
 - [docs/view.md](docs/view.md): the live view, what its colors mean, what it reuses from Velxio

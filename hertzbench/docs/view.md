@@ -51,6 +51,9 @@ The MCP server can draw the agent's run too:
 claude mcp add hertzbench -- hertzbench mcp --workspace /path/to/project --view-port 7480
 ```
 
+With a downloaded binary, put its path in place of `hertzbench`, as in
+[mcp.md](mcp.md#register-it-with-claude-code).
+
 Open `http://127.0.0.1:7480/` and watch what the agent starts. A drag on the page goes through the
 same `move_node` tool the agent calls, so the agent sees it in `get_status` and in the move events,
 and the page sees the agent's moves and faults. The page shows "idle" until the agent starts a run,

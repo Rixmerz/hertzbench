@@ -13,6 +13,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Hardware serial seams: `appendHardwareSerial` feeds real-UART bytes through
   the serial batcher, and `lib/proHardwareSerial.ts` lets an installed monitor
   intercept a board's serial input while attached
+- Hertzbench: "Getting started with the binary" in `hertzbench/README.md`, with the download and
+  checksum steps for each system, a first run, a first scenario and how to watch a run
+- Hertzbench: `hertzbench/docs/android.md`, which says what is validated per platform (Linux with
+  KVM) and how to run two Android nodes in one run, with their memory need (#102)
+- Hertzbench: the MCP setup for a downloaded binary, next to the installed command and the
+  from-source form, in `hertzbench/docs/mcp.md`
+- Hertzbench: the `Milestones` and `Not yet validated` lists in the README's Status section
+
+### Changed
+- Hertzbench: the Android launcher checks hardware acceleration with `emulator -accel-check` on
+  Windows (WHPX, AEHD or HAXM) and macOS (HVF), instead of refusing anything but Linux/KVM (#102).
+  Neither system has been validated on a real machine yet
+- Hertzbench site: the Download section takes the newest release from the GitHub API and its text
+  names no version; it said v0.1.0 while the latest release was newer
+- Hertzbench site: the install blocks give the release binary's commands first for each system,
+  with the from-source commands after them; the Windows block is PowerShell for the `.exe`
 
 ## [2.0.1] - 2026-04-22
 
