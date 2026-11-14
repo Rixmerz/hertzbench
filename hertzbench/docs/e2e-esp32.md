@@ -38,6 +38,10 @@ Everything goes under `~/.local` and `~/.espressif`; nothing needs sudo. The hos
    cd ~/.local/src/lcgamboa-qemu
    # ESP-NOW needs the fork's Wi-Fi MAC patched first: the `git apply` heredoc in
    # docs/upstream-sync.md, patch 3. Wi-Fi/IP, LoRa and BLE run without it.
+   # Patch 4 keeps CCOUNT and the timer counts continuous across a CPU clock
+   # switch; without it Arduino boards reset on their watchdogs during boot
+   # (see "Boot resets and patch 4" below):
+   git apply /path/to/hertzbench/docs/qemu-esp32-clock-switch.patch
    sed 's/--enable-debug --enable-debug-info/--enable-debug-info/' build_libqemu-esp32.sh > ../build_libqemu-esp32-optimized.sh
    PATH="$HOME/.local/opt/qemu-build-venv/bin:$PATH" bash ../build_libqemu-esp32-optimized.sh
    mkdir -p ~/.local/opt/velxio-qemu
@@ -171,6 +175,41 @@ Dragging an ESP32 node in the view was run on 2026-10-27 (`tests/view_esp32_brow
 Not run: the scenarios through `hertzbench mcp` with ESP32 boards, a phone on either bridge, and LAN mDNS seen from another host. No nRF24 scenario has an ESP32 board.
 
 Three faults found on the way are fixed in this tree: the worker's NIC arguments (step 1), unicast between boards that the engine flooded as broadcast (step 2), and the BLE bridge handing BlueZ Bluedroid's GAP and GATT services (BLE bridge step 1). Two more are in the fork's Wi-Fi MAC and are fixed by a patch applied to the fork's source before building (ESP-NOW step 4).
+
+### Boot resets and patch 4
+
+Arduino boards on the fork reset on `TG1WDT_SYS_RESET` and then `TG0WDT_SYS_RESET` about 2 s after `entry 0x400805e4`, before `setup()`, a few times per boot. The cause is the fork's CCOUNT, which jumps when `initArduino()` switches the CPU clock (160 -> 40 -> 240 MHz), so one core stops ticking and the interrupt watchdog resets the chip. The TG0 reset is a cascade of that one. [Patch 4](upstream-sync.md#patch-4-the-qemu-forks-clocks-across-a-cpu-clock-switch-outside-this-tree) keeps CCOUNT, and the timer-group and FRC counts, continuous across the switch. That page has the analysis.
+
+Run on 2026-11-14 on the CachyOS host (14 cores), with `udp-3-nodes.yaml` through hertzbench and default threading (MTTCG). Each run boots 3 boards from a fresh flash image. The command was `deno task hertzbench run scenarios/examples/udp-3-nodes.yaml --out DIR` with a copy of `deno` under another name, inside `systemd-run --user --scope -q -p CPUWeight=10000`. "Under load" means 10 `sh -c 'while :; do :; done'` loops for the whole batch. A reset is any `rst:` line other than `POWERON_RESET`; a watchdog line is any line matching `watchdog` or `wdt` in any case.
+
+| Library | Host | Runs | Resets / watchdog lines in the serial logs | Result |
+|---|---|---|---|---|
+| installed (patch 3 only) | idle | 3 | 10, 9 and 23 resets per run (40 of the 42 on the watchdogs) | 2 PASS, 1 FAIL; 8 of 9 boards logged `wifi up`, at 4.1 to 35.0 s |
+| **patch 3 + patch 4** | idle | 10 in a row | **0 / 0 in all 30 boots** | **10/10 PASS**; `wifi up` at 3.6 to 4.6 s |
+| installed (patch 3 only) | 10 busy loops | 3 | 17, 26 and 25 resets per run (61 of the 68 on the watchdogs) | 3 FAIL; 8 of 9 boards logged `wifi up`, at 13.7 to 88.7 s |
+| **patch 3 + patch 4** | 10 busy loops (load average 16 to 34) | 10 in a row | **0 / 0 in all 30 boots** | **8 PASS, 2 FAIL**; `wifi up` at 7.1 to 16.7 s. In the 2 failing runs no board associated and none sent a frame (see below) |
+
+The idle batch ran at load average 3.8 to 10.6: another session was building on the host. An earlier build of patch 4, with the CPU part only, gave the same 0 resets idle (10 runs) and in 8 loaded runs. Two loaded runs that overlapped other QEMU runs (load average 36 to 37) logged a task watchdog and one `TG0WDT_SYS_RESET`.
+
+**Still open, with what was measured.**
+
+- **Under load, Wi-Fi does not always associate. This predates patch 4.** The probe was a copy of the sketch that logs Arduino's Wi-Fi events, run standalone with SLIRP, 3 boards at a time beside 10 busy loops.
+  - A board that fails gets `STA_DISCONNECTED` with reason 39 (`WIFI_REASON_TIMEOUT`), 201 (`NO_AP_FOUND`) or 2 (`AUTH_EXPIRE`).
+  - After the first retry, Arduino 2.0.17 does not reconnect for 39 or 201 (`_isReconnectableReason`), so the sketch waits forever.
+  - The installed library with `-global driver=timer.esp32.timg,property=wdt_disable,value=true` fails the same way. Two A/Bs ran 4 rounds of 3 boards per build, 30 s each:
+    - First A/B, with the host's load average rising to 86 from other work: 6, 5 and 2 of 12 boards associated (installed without watchdogs, patch 4 CPU part only, full patch 4).
+    - Second A/B, with the order reversed and the load average at 7 to 15 before the busy loops: 11 of 12 for each build.
+    - The failure rate follows the host load, not the build.
+  - A board caught in that state under gdb ticks normally (tick count 1:1 with the host clock) with both cores idle in `WAITI`. It is not stuck in boot.
+  - Cause not found. It looks like the guest's connect timeouts expiring when its vCPUs get less host time than its clocks advance, since guest time is host time without `-icount`.
+- **The task watchdog in the `wifi` task.** Under load, the `wifi` task sometimes keeps CPU 0 for 5 s (`task_wdt: ... CPU 0: wifi`, `abort()` at `0x400de91d`). This predates patch 4: the installed library logged it in 2 of its 6 runs here, with the same PC. With patch 4 it showed once in 60 standalone loaded boards, in one of the two overlapped hertzbench runs, and in none of the 20 batch runs above.
+- **`-accel tcg,thread=single` does not reproduce this fault.** It resets 7 to 8 times in 30 s with or without patch 4 (installed library 8 and 7, patch 4 8 and 8, fresh image each run). A trace with patch 4 shows another mechanism.
+  - In the 292 ms without a feed, CPU 0 sat in `esp_ipc_isr_call_and_wait` / `esp_ipc_isr_release_other_cpu`, and CPU 1 in the IPC ISR (`.check_finish_cmd`, `esp_ipc_isr_routines.S`). Each was spinning for the other with interrupts masked.
+  - Round robin runs one vCPU at a time for up to 100 ms (`TCG_KICK_PERIOD`), so each leg of that handshake costs a slice, against a 300 ms interrupt watchdog.
+  - The worker never uses `thread=single`. Not fixed.
+- **TG0 after TG1.** The flash-boot budget after a watchdog reset is halved because the timer group keeps the last boot's 80 MHz APB, and the ROM spends about 300 ms on eFuse reloads (100 ms per command). Patch 4 leaves both alone; with no TG1 reset they are not reached.
+
+**Trap when running QEMU by hand.** `-drive file=IMAGE,if=mtd` writes back to IMAGE. After a panic, IMAGE holds a core dump, and every later boot checksums it 32 bytes per flash read. Under `thread=single` that is about 410 ms per read, so the boot looks hung. Copy a pristine image before each run, as the worker does.
 
 ## Run it
 
