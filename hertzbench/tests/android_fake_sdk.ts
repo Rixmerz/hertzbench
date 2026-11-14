@@ -3,15 +3,30 @@
 
 import { delimiter, join } from "node:path";
 import { buildDhcpClientMessage, DHCPDISCOVER } from "../engine/mod.ts";
+import {
+  adbExecutableName,
+  type AndroidHostEnv,
+  type AndroidPlatform,
+  type CommandResult,
+  type CommandRunner,
+  emulatorExecutableName,
+} from "../orchestrator/boards/android/platform.ts";
 
-/** A temp dir holding fake tools; `adbCases` is the body of the fake adb's `case "$cmd"` (`$serial` is the device). */
+/**
+ * A temp dir holding fake tools; `adbCases` is the body of the fake adb's `case "$cmd"` (`$serial` is the device).
+ * `platform` only names the files (`emulator.exe`, `adb.exe` for windows); the scripts stay POSIX sh,
+ * so a windows or darwin SDK is still run on the Linux host.
+ */
 export async function fakeSdk(
   adbCases: string,
   emulatorBody = 'echo "$@" > "$DIR/emulator-args"; echo $$ > "$DIR/emulator-pid"; exec sleep 60',
-): Promise<{ dir: string; restore(): Promise<void> }> {
+  platform: AndroidPlatform = "linux",
+): Promise<{ dir: string; emulator: string; adb: string; restore(): Promise<void> }> {
+  const emulator = emulatorExecutableName(platform);
+  const adb = adbExecutableName(platform);
   const dir = await Deno.makeTempDir({ prefix: "hzb-android-" });
   await Deno.writeTextFile(
-    join(dir, "emulator"),
+    join(dir, emulator),
     `#!/bin/sh
 DIR="$(dirname "$0")"
 if [ "$1" = "-list-avds" ]; then printf 'INFO | Storing crashdata\\npixel8\\ntablet\\n'; exit 0; fi
@@ -21,7 +36,7 @@ ${emulatorBody}
   );
   // adb -s SERIAL <cmd> ...: the command is the word after the serial.
   await Deno.writeTextFile(
-    join(dir, "adb"),
+    join(dir, adb),
     `#!/bin/sh
 DIR="$(dirname "$0")"
 echo "$@" >> "$DIR/adb-calls"
@@ -50,12 +65,14 @@ ${adbCases}
 esac
 `,
   );
-  await Deno.chmod(join(dir, "emulator"), 0o755);
-  await Deno.chmod(join(dir, "adb"), 0o755);
+  await Deno.chmod(join(dir, emulator), 0o755);
+  await Deno.chmod(join(dir, adb), 0o755);
   const oldPath = Deno.env.get("PATH") ?? "";
   Deno.env.set("PATH", `${dir}${delimiter}${oldPath}`);
   return {
     dir,
+    emulator: join(dir, emulator),
+    adb: join(dir, adb),
     async restore() {
       Deno.env.set("PATH", oldPath);
       await Deno.remove(dir, { recursive: true });
@@ -202,3 +219,31 @@ export async function fakeAvdHome(
 
 /** The version the fake `emulator -version` prints. */
 export const FAKE_EMULATOR_VERSION = "37.1.11.0 (build_id 15917651) (CL:N/A)";
+
+const FAKE_HOMES: Record<AndroidPlatform, Pick<AndroidHostEnv, "home" | "localAppData">> = {
+  linux: { home: "/home/tester" },
+  darwin: { home: "/Users/tester" },
+  windows: { home: "C:\\Users\\tester", localAppData: "C:\\Users\\tester\\AppData\\Local" },
+};
+
+/** A host for `platform` with no environment variables set; `overrides` replaces any field. */
+export function fakeHostEnv(
+  platform: AndroidPlatform,
+  overrides: Partial<AndroidHostEnv> = {},
+): AndroidHostEnv {
+  return { platform, env: {}, ...FAKE_HOMES[platform], ...overrides };
+}
+
+/** A `CommandRunner` that records every call and answers from `script` (default: exit 0, no output). */
+export function fakeCommandRunner(
+  script: (cmd: string, args: string[]) => Partial<CommandResult> | undefined = () => undefined,
+): CommandRunner & { calls: { cmd: string; args: string[] }[] } {
+  const calls: { cmd: string; args: string[] }[] = [];
+  return {
+    calls,
+    run(cmd, args) {
+      calls.push({ cmd, args });
+      return Promise.resolve({ code: 0, stdout: "", stderr: "", ...script(cmd, args) });
+    },
+  };
+}
