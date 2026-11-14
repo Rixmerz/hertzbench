@@ -11,6 +11,7 @@ import {
 } from "./platform.ts";
 import { fileURLToPath } from "node:url";
 import { assert, assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { main } from "../cli/main.ts";
 
 const MAIN = fileURLToPath(new URL("../cli/main.ts", import.meta.url));
 const EXAMPLES = fileURLToPath(new URL("../scenarios/examples/", import.meta.url));
@@ -668,5 +669,127 @@ Deno.test("installed as real commands: hertzbench and hzb run from any directory
       assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
       assertStringIncludes(new TextDecoder().decode(out.stdout), "ok (3 nodes");
     }
+  });
+});
+
+// ── Routing, through main()'s injected seams ───────────────────────────────
+
+/** Runs `body` with console.log and console.error captured, restoring both afterwards. */
+async function captured<T>(
+  body: (lines: { out: string[]; err: string[] }) => Promise<T>,
+): Promise<T> {
+  const lines = { out: [] as string[], err: [] as string[] };
+  const { log, error } = console;
+  console.log = (...parts: unknown[]) => void lines.out.push(parts.join(" "));
+  console.error = (...parts: unknown[]) => void lines.err.push(parts.join(" "));
+  try {
+    return await body(lines);
+  } finally {
+    console.log = log;
+    console.error = error;
+  }
+}
+
+Deno.test("welcome: a bare double-click on Windows prints the welcome text, waits for Enter, exits 0", async () => {
+  let waited = 0;
+  await captured(async (lines) => {
+    const code = await main([], {
+      os: "windows",
+      ownsConsole: () => true,
+      exeName: "hertzbench.exe",
+      waitForEnter: () => {
+        waited++;
+        return Promise.resolve();
+      },
+    });
+    assertEquals(code, 0);
+    assertEquals(waited, 1);
+    assertStringIncludes(lines.out.join("\n"), "hertzbench.exe examples");
+    assertEquals(lines.err, []);
+  });
+});
+
+Deno.test("welcome: not shown from a shell, on another OS, or with arguments; usage and exit code stay", async () => {
+  const never = () => {
+    throw new Error("must not wait for Enter");
+  };
+  await captured(async (lines) => {
+    for (
+      const [os, ownsConsole] of [["windows", false], ["linux", true], ["darwin", true]] as const
+    ) {
+      lines.out.length = lines.err.length = 0;
+      const code = await main([], { os, ownsConsole: () => ownsConsole, waitForEnter: never });
+      assertEquals(code, 0, os);
+      assertStringIncludes(lines.err.join("\n"), "Usage:");
+      assertEquals(lines.out, []);
+    }
+    const withArgs = await main(["frobnicate"], {
+      os: "windows",
+      ownsConsole: () => true,
+      waitForEnter: never,
+    });
+    assertEquals(withArgs, 2);
+  });
+});
+
+Deno.test("examples: routes to the examples command: lists with no name, writes <name>.yaml with --out", async () => {
+  await inTempDir(async (dir) => {
+    await captured(async (lines) => {
+      assertEquals(await main(["examples"]), 0);
+      assertStringIncludes(lines.out.join("\n"), "live-3-scripted");
+      assertEquals(await main(["examples", "live-3-scripted", "--out", dir]), 0);
+      assertStringIncludes(await Deno.readTextFile(`${dir}/live-3-scripted.yaml`), "nodes:");
+      // A second copy must refuse to overwrite and say so, with the command's own exit code.
+      assertEquals(await main(["examples", "live-3-scripted", "--out", dir]), 1);
+      assertStringIncludes(lines.err.join("\n"), "already exists");
+      assertEquals(await main(["examples", "no-such-example"]), 1);
+    });
+  });
+});
+
+/** Starts `view` on a free port with the browser launcher replaced; resolves once it is serving. */
+async function viewWithLauncher(
+  dir: string,
+  extra: string[],
+  host: { stdoutIsTerminal: boolean; ci: boolean },
+): Promise<string[]> {
+  await Deno.writeTextFile(`${dir}/short.yaml`, SHORT);
+  const opened: string[] = [];
+  const stop = new AbortController();
+  await captured(async (lines) => {
+    const done = main(["view", `${dir}/short.yaml`, "--port", "0", "--out", dir, ...extra], {
+      ...host,
+      openBrowser: (url) => {
+        opened.push(url);
+        return Promise.resolve();
+      },
+      stop: stop.signal,
+    });
+    const deadline = performance.now() + 20_000;
+    while (!lines.err.some((line) => line.includes("view: http"))) {
+      assert(performance.now() < deadline, "view never started: " + lines.err.join("\n"));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    stop.abort();
+    assertEquals(await done, 0);
+  });
+  return opened;
+}
+
+Deno.test("view: opens the browser on an interactive run, and --no-open skips the launcher", async () => {
+  await inTempDir(async (dir) => {
+    const interactive = { stdoutIsTerminal: true, ci: false };
+    const opened = await viewWithLauncher(dir, [], interactive);
+    assertEquals(opened.length, 1);
+    assert(opened[0]!.startsWith("http://127.0.0.1:"), opened[0]);
+    assertEquals(await viewWithLauncher(dir, ["--no-open"], interactive), []);
+    assertEquals(await viewWithLauncher(dir, [], { stdoutIsTerminal: true, ci: true }), []);
+    assertEquals(await viewWithLauncher(dir, [], { stdoutIsTerminal: false, ci: false }), []);
+  });
+});
+
+Deno.test("--no-open is refused outside view", async () => {
+  await captured(async () => {
+    assertEquals(await main(["validate", "x.yaml", "--no-open"]), 2);
   });
 });
