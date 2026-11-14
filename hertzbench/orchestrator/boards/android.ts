@@ -4,14 +4,13 @@
 // ./android/tooling.ts; this file strings them together inside `start()`, which resolves
 // only once the app is running, so time zero never comes before the app.
 
+import { join } from "node:path";
 import type { AndroidApp, AndroidIntent, AndroidSpec } from "../scenario.ts";
 import {
   type AndroidTools,
   consolePortFree,
   emulatorVersion,
-  findAndroidTools,
   FIRST_CONSOLE_PORT,
-  kvmProblem,
   LAST_CONSOLE_PORT,
   launchEmulator,
   listAvds,
@@ -21,6 +20,9 @@ import {
   snapshotBootArgs,
   wifiSocketArgs,
 } from "./android/tooling.ts";
+import { checkHardwareAcceleration } from "./android/accel.ts";
+import { detectHost, findAndroidToolsOnHost, processRunner } from "./android/host.ts";
+import { type AndroidHostEnv, type CommandRunner } from "./android/platform.ts";
 import { type BoardContext, BoardError, type BoardLauncher, type RunningBoard } from "./board.ts";
 
 /** The emulator build the `-feature -WiFiPacketStream` behaviour was checked against. */
@@ -47,8 +49,14 @@ export function consolePortForMac(mac: string): number | null {
 export { wifiSocketArgs };
 
 export interface AndroidLauncherOptions {
-  /** Replaces the /dev/kvm check; tests on hosts without KVM pass `() => null`. */
+  /** Replaces the hardware-acceleration check; tests on hosts without it pass `() => null`. */
   checkKvm?: () => string | null;
+  /** The host the launcher runs on; default: this process's. A test stands in for another OS. */
+  host?: AndroidHostEnv;
+  /** Runs the host commands of the launcher itself (`emulator -accel-check`); default: real ones. */
+  runner?: CommandRunner;
+  /** The `emulator` and `adb` to use; default: found on the host's PATH or SDK root. */
+  tools?: AndroidTools;
   /** How long to wait for `ip route get` to name wlan0; tests that expect eth0 shorten it. */
   routeTimeoutMs?: number;
 }
@@ -56,7 +64,7 @@ export interface AndroidLauncherOptions {
 export function createAndroidLauncher(options: AndroidLauncherOptions = {}): BoardLauncher {
   return {
     fidelity: ANDROID_FIDELITY,
-    start: (ctx) => startAndroid(ctx, options.checkKvm ?? kvmProblem, options.routeTimeoutMs),
+    start: (ctx) => startAndroid(ctx, options),
   };
 }
 
@@ -83,11 +91,21 @@ async function preflight(
   id: string,
   spec: AndroidSpec,
   apk: string,
-  checkKvm: () => string | null,
+  options: AndroidLauncherOptions,
+  host: AndroidHostEnv,
 ) {
-  const tools = findAndroidTools();
-  const kvm = checkKvm();
-  if (kvm !== null) throw new BoardError(`${id}: ${kvm}`);
+  const tools = options.tools ?? findAndroidToolsOnHost(host);
+  if (options.checkKvm !== undefined) {
+    const problem = options.checkKvm();
+    if (problem !== null) throw new BoardError(`${id}: ${problem}`);
+  } else {
+    const accel = await checkHardwareAcceleration(
+      host,
+      options.runner ?? processRunner,
+      tools.emulator,
+    );
+    if (!accel.ok) throw new BoardError(`${id}: ${accel.message}`);
+  }
   const avds = await listAvds(tools.emulator);
   if (!avds.includes(spec.avd)) {
     throw new BoardError(
@@ -109,9 +127,10 @@ async function preflight(
 
 async function startAndroid(
   ctx: BoardContext,
-  checkKvm: () => string | null,
-  routeTimeoutMs?: number,
+  options: AndroidLauncherOptions,
 ): Promise<RunningBoard> {
+  const { routeTimeoutMs } = options;
+  const host = options.host ?? detectHost();
   const { node } = ctx;
   if (ctx.netPort === null) throw new BoardError(`${node.id}: an android node needs a Wi-Fi port`);
   const spec = node.android;
@@ -119,7 +138,7 @@ async function startAndroid(
     throw new BoardError(`${node.id}: an android node needs an android section`);
   }
   const apk = node.firmware.path;
-  const { tools, version } = await preflight(node.id, spec, apk, checkKvm);
+  const { tools, version } = await preflight(node.id, spec, apk, options, host);
   const snapshot = spec.snapshot === true;
   if (snapshot) {
     const prepared = preparedSnapshot(spec.avd, version);
@@ -164,7 +183,7 @@ async function bootApp(
   hint: string,
 ): Promise<{ emulator: RunningEmulator; shutDown: () => Promise<void> }> {
   const { id, spec, apk } = boot;
-  const logPath = `${boot.outDir}/${id}-emulator.log`;
+  const logPath = join(boot.outDir, `${id}-emulator.log`);
   const emulator = launchEmulator(tools, {
     avd: spec.avd,
     ...(boot.port !== null ? { port: boot.port } : {}),
@@ -228,12 +247,8 @@ export interface AndroidAppLauncher {
 export function createAndroidAppLauncher(options: AndroidLauncherOptions = {}): AndroidAppLauncher {
   return {
     async start(ctx) {
-      const { tools, version } = await preflight(
-        ctx.id,
-        ctx.app,
-        ctx.app.apk,
-        options.checkKvm ?? kvmProblem,
-      );
+      const host = options.host ?? detectHost();
+      const { tools, version } = await preflight(ctx.id, ctx.app, ctx.app.apk, options, host);
       const { emulator, shutDown } = await bootApp(tools, version, {
         id: ctx.id,
         spec: ctx.app,
