@@ -6,6 +6,10 @@
 
 import { delimiter, join } from "node:path";
 import { BoardError } from "../board.ts";
+import { checkHardwareAcceleration } from "./accel.ts";
+import { detectHost, processRunner } from "./host.ts";
+import type { AndroidHostEnv, CommandRunner } from "./platform.ts";
+import { processRamReaders, warnIfLowRam } from "./ram.ts";
 
 /** The steps that have a timeout, as a timeout or failure message names them. */
 export type AndroidStep =
@@ -43,6 +47,8 @@ const LOG_TAIL_LINES = 20;
 /** How long `preferWifi` waits for the route to name wlan0: the DHCP lease lands just after boot. */
 const ROUTE_TIMEOUT_MS = 10_000;
 const ROUTE_POLL_MS = 500;
+/** How long `preferWifi` waits for Android's telephony service, which `svc data` needs. */
+const TELEPHONY_TIMEOUT_MS = 60_000;
 export const FIRST_CONSOLE_PORT = 5554;
 export const LAST_CONSOLE_PORT = 5682;
 
@@ -249,25 +255,8 @@ export async function emulatorVersion(emulator: string): Promise<string> {
   return match[1]!.trim();
 }
 
-/**
- * Whether /dev/kvm can be opened for read and write; null when it can, else the reason. Also
- * null when Deno's own permissions forbid the look: it demands --allow-all for any device
- * node, which the CLI's task never has. The emulator then answers for itself: it exits at
- * once without acceleration and the boot step quotes its log.
- */
-export function kvmProblem(device = "/dev/kvm"): string | null {
-  if (Deno.build.os !== "linux") {
-    return `hardware acceleration for the emulator is only wired for Linux (KVM); this is ${Deno.build.os}`;
-  }
-  try {
-    Deno.openSync(device, { read: true, write: true }).close();
-    return null;
-  } catch (error) {
-    if (error instanceof Deno.errors.NotCapable) return null;
-    return `${device} is not usable: ${(error as Error).message}. ` +
-      `Enable virtualization and add your user to the kvm group.`;
-  }
-}
+// Where it lives now: the Linux check is the Linux branch of `checkHardwareAcceleration`.
+export { kvmProblem } from "./accel.ts";
 
 /** Whether a console port pair (console, adb) can be opened on loopback. */
 export function consolePortFree(port: number): boolean {
@@ -429,21 +418,35 @@ export class RunningEmulator {
    * `eth0`, which Android keeps as the default network while mobile data is on), then `ip route
    * get <boardIp>` until it names `wlan0`. The lease arrives a moment after boot, so a route
    * through anything else is polled for `routeTimeoutMs` before the step fails quoting the last
-   * route line (issue #70).
+   * route line (issue #70). `svc data disable` is retried for `telephonyTimeoutMs` while Android
+   * answers that its telephony service does not exist yet.
    */
-  async preferWifi(boardIp: string, routeTimeoutMs = ROUTE_TIMEOUT_MS): Promise<void> {
-    const disable = await runBounded(
-      "network",
-      this.tools.adb,
-      ["-s", this.serial, "shell", "svc", "data", "disable"],
-      DEFAULT_TIMEOUTS.launchMs,
-      "svc data disable",
-    );
-    if (!disable.success) {
-      throw new AndroidStepError(
+  async preferWifi(
+    boardIp: string,
+    routeTimeoutMs = ROUTE_TIMEOUT_MS,
+    telephonyTimeoutMs = TELEPHONY_TIMEOUT_MS,
+  ): Promise<void> {
+    // `sys.boot_completed` can come before the telephony service is registered (seen on a busy
+    // host, where the boot took 77 s): `svc data disable` then fails with "Can't find service:
+    // phone". That one is asked again until the service is there; any other failure is final.
+    const telephonyDeadline = performance.now() + telephonyTimeoutMs;
+    for (;;) {
+      const disable = await runBounded(
         "network",
-        `svc data disable failed (step: network), adb said:\n${disable.text}`,
+        this.tools.adb,
+        ["-s", this.serial, "shell", "svc", "data", "disable"],
+        DEFAULT_TIMEOUTS.launchMs,
+        "svc data disable",
       );
+      if (disable.success) break;
+      const serviceNotUp = /Can't find service/i.test(disable.text);
+      if (!serviceNotUp || performance.now() >= telephonyDeadline) {
+        throw new AndroidStepError(
+          "network",
+          `svc data disable failed (step: network), adb said:\n${disable.text}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, ROUTE_POLL_MS));
     }
     const deadline = performance.now() + routeTimeoutMs;
     for (;;) {
@@ -661,6 +664,7 @@ export class RunningEmulator {
 
 /** Start the AVD headless with the flags of the plan; returns before it has booted. */
 export function launchEmulator(tools: AndroidTools, options: EmulatorOptions): RunningEmulator {
+  warnIfLowRam(avdDirectory(options.avd), detectHost(), processRamReaders);
   const port = options.port ?? pickConsolePort();
   claimedPorts.add(port);
   const child = new Deno.Command(tools.emulator, {
@@ -750,8 +754,11 @@ export function preparedSnapshot(
 }
 
 export interface PrepareOptions {
-  /** Replaces the /dev/kvm check; tests on hosts without KVM pass `() => null`. */
+  /** Replaces the hardware-acceleration check; tests on hosts without it pass `() => null`. */
   checkKvm?: () => string | null;
+  /** The host and runner the acceleration check uses; default: this machine. */
+  host?: AndroidHostEnv;
+  runner?: CommandRunner;
   bootTimeoutMs?: number;
   env?: EnvReader;
 }
@@ -767,8 +774,17 @@ export async function prepareSnapshot(
   avd: string,
   options: PrepareOptions = {},
 ): Promise<{ snapshotDir: string; emulatorVersion: string }> {
-  const kvm = (options.checkKvm ?? kvmProblem)();
-  if (kvm !== null) throw new BoardError(kvm);
+  if (options.checkKvm) {
+    const problem = options.checkKvm();
+    if (problem !== null) throw new BoardError(problem);
+  } else {
+    const accel = await checkHardwareAcceleration(
+      options.host ?? detectHost(),
+      options.runner ?? processRunner,
+      tools.emulator,
+    );
+    if (!accel.ok) throw new BoardError(accel.message);
+  }
   const avds = await listAvds(tools.emulator);
   if (!avds.includes(avd)) {
     throw new BoardError(

@@ -401,6 +401,24 @@ androidRun(
   },
 );
 
+// Seen on a busy host: boot_completed came before the telephony service, and the run stopped.
+androidRun(
+  "android run: svc data disable is asked again while the telephony service is not up yet",
+  async () => {
+    const { sdk, work, run } = await runWithFakeGuest(ANDROID_DEFAULT_MAC);
+    try {
+      await Deno.writeTextFile(join(sdk.dir, "svc-failures"), "2");
+      const result = await run();
+      assertEquals(result.problems, []);
+      const calls = (await Deno.readTextFile(join(sdk.dir, "adb-calls"))).split("\n");
+      assertEquals(calls.filter((c) => c.includes("shell svc data disable")).length, 3);
+    } finally {
+      await sdk.restore();
+      await Deno.remove(work, { recursive: true });
+    }
+  },
+);
+
 // Issue #70: Android keeps eth0 (mobile data) as the default network unless data is disabled.
 androidRun(
   "android run: mobile data is disabled and the route to a board is checked before the app starts",
