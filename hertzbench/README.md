@@ -214,7 +214,9 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 Newest first. Each entry links the PR, release or document that holds the result.
 
 - **2026-11-14**: the binary carries its scripted example scenarios (`examples`), `view` opens the
-  browser, and a double-clicked Windows binary shows a welcome instead of closing.
+  browser, and a double-clicked Windows binary shows a welcome instead of closing. The Windows x64
+  binary was run in a Windows 10 VM: the welcome on double click, `examples`, and
+  `run udp-3-scripted.yaml` with `RESULT: PASS`.
 - **2026-11-14**: the Android launcher checks acceleration per platform, WHPX on Windows and HVF on
   macOS, tested with a fake SDK only ([PR #104](https://github.com/Rixmerz/hertzbench/pull/104),
   [issue #102](https://github.com/Rixmerz/hertzbench/issues/102)).
@@ -252,8 +254,8 @@ Newest first. Each entry links the PR, release or document that holds the result
 - **Android scenarios in CI.** The opt-in `android-e2e` job has no green run recorded, and the ESP32
   and BLE Android scenarios are not in it. Plan: [missing-tests.md](docs/missing-tests.md) and
   [android-device-plan.md](docs/android-device-plan.md#5-ci-feasibility).
-- **The Windows double-click welcome on a real Windows machine.** The decision is unit-tested and
-  the Linux binary was run; the Windows binary's console check has not run on Windows.
+- **`view` opening the browser on Windows and macOS.** The launcher command per system is
+  unit-tested; it has opened a browser on Linux only.
 - **Android on a real Mac.** The Mac checklist is in draft
   [PR #97](https://github.com/Rixmerz/hertzbench/pull/97), not merged.
 - **The macOS `.dmg` opened on a real Mac.** Released unsigned and not notarized, and nobody has
