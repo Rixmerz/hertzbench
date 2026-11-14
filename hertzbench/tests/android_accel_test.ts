@@ -69,6 +69,15 @@ Deno.test("windows: an emulator that cannot be started fails with its error quot
   const result = await checkHardwareAcceleration(fakeHostEnv("windows"), runner, "emulator.exe");
   assert(!result.ok);
   assertStringIncludes(result.message, "program not found");
+  assert(!result.message.includes(WINDOWS_FIX));
+});
+
+Deno.test("windows: exit 0 with a negated accelerator line is not usable", async () => {
+  const runner = fakeCommandRunner(() => ({ stdout: "accel:\n0\nWHPX NOT usable\naccel" }));
+  const result = await checkHardwareAcceleration(fakeHostEnv("windows"), runner, "emulator.exe");
+  assert(!result.ok);
+  assertStringIncludes(result.message, "WHPX NOT usable");
+  assertStringIncludes(result.message, WINDOWS_FIX);
 });
 
 Deno.test("darwin accepts HVF", async () => {

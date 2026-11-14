@@ -71,12 +71,13 @@ export async function checkHardwareAcceleration(
     code = result.code;
     output = `${result.stdout}${result.stderr}`.trim();
   } catch (error) {
-    code = -1;
-    output = `could not run ${emulatorPath} -accel-check: ${(error as Error).message}`;
+    // The emulator could not even start: the hypervisor fix would be a guess, so name the cause.
+    const output = `could not run ${emulatorPath} -accel-check: ${(error as Error).message}`;
+    return { ok: false, output, message: `hardware acceleration could not be checked: ${output}` };
   }
   if (code === 0) {
-    const named = new RegExp(`\\b(${rule.accelerators.join("|")})\\b`, "i").exec(output);
-    if (named) return { ok: true, accelerator: named[1]!.toUpperCase() };
+    const accelerator = acceleratorNamed(output, rule.accelerators);
+    if (accelerator) return { ok: true, accelerator };
   }
   return {
     ok: false,
@@ -84,4 +85,16 @@ export async function checkHardwareAcceleration(
     message: `hardware acceleration for the emulator is not usable: ` +
       `\`emulator -accel-check\` said (exit ${code}): ${output || "nothing"}\n${rule.fix}`,
   };
+}
+
+/** A negated line ("WHPX NOT usable", "HVF is not supported") does not count as the accelerator. */
+const NEGATION = /\b(not|no|cannot|unavailable|unsupported|disabled|failed)\b|n't/i;
+
+function acceleratorNamed(output: string, accelerators: readonly string[]): string | undefined {
+  const named = new RegExp(`\\b(${accelerators.join("|")})\\b`, "i");
+  for (const line of output.split(/\r?\n/)) {
+    const match = named.exec(line);
+    if (match && !NEGATION.test(line)) return match[1]!.toUpperCase();
+  }
+  return undefined;
 }
