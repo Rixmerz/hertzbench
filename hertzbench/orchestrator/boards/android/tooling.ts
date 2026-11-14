@@ -43,6 +43,8 @@ const LOG_TAIL_LINES = 20;
 /** How long `preferWifi` waits for the route to name wlan0: the DHCP lease lands just after boot. */
 const ROUTE_TIMEOUT_MS = 10_000;
 const ROUTE_POLL_MS = 500;
+/** How long `preferWifi` waits for Android's telephony service, which `svc data` needs. */
+const TELEPHONY_TIMEOUT_MS = 60_000;
 export const FIRST_CONSOLE_PORT = 5554;
 export const LAST_CONSOLE_PORT = 5682;
 
@@ -429,21 +431,35 @@ export class RunningEmulator {
    * `eth0`, which Android keeps as the default network while mobile data is on), then `ip route
    * get <boardIp>` until it names `wlan0`. The lease arrives a moment after boot, so a route
    * through anything else is polled for `routeTimeoutMs` before the step fails quoting the last
-   * route line (issue #70).
+   * route line (issue #70). `svc data disable` is retried for `telephonyTimeoutMs` while Android
+   * answers that its telephony service does not exist yet.
    */
-  async preferWifi(boardIp: string, routeTimeoutMs = ROUTE_TIMEOUT_MS): Promise<void> {
-    const disable = await runBounded(
-      "network",
-      this.tools.adb,
-      ["-s", this.serial, "shell", "svc", "data", "disable"],
-      DEFAULT_TIMEOUTS.launchMs,
-      "svc data disable",
-    );
-    if (!disable.success) {
-      throw new AndroidStepError(
+  async preferWifi(
+    boardIp: string,
+    routeTimeoutMs = ROUTE_TIMEOUT_MS,
+    telephonyTimeoutMs = TELEPHONY_TIMEOUT_MS,
+  ): Promise<void> {
+    // `sys.boot_completed` can come before the telephony service is registered (seen on a busy
+    // host, where the boot took 77 s): `svc data disable` then fails with "Can't find service:
+    // phone". That one is asked again until the service is there; any other failure is final.
+    const telephonyDeadline = performance.now() + telephonyTimeoutMs;
+    for (;;) {
+      const disable = await runBounded(
         "network",
-        `svc data disable failed (step: network), adb said:\n${disable.text}`,
+        this.tools.adb,
+        ["-s", this.serial, "shell", "svc", "data", "disable"],
+        DEFAULT_TIMEOUTS.launchMs,
+        "svc data disable",
       );
+      if (disable.success) break;
+      const serviceNotUp = /Can't find service/i.test(disable.text);
+      if (!serviceNotUp || performance.now() >= telephonyDeadline) {
+        throw new AndroidStepError(
+          "network",
+          `svc data disable failed (step: network), adb said:\n${disable.text}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, ROUTE_POLL_MS));
     }
     const deadline = performance.now() + routeTimeoutMs;
     for (;;) {

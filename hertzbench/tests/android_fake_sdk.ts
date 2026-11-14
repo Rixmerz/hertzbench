@@ -30,7 +30,17 @@ shift 2
 cmd="$1"; shift
 # The two commands the launcher issues to make wlan0 the network app sockets use. A test that
 # wants another route writes it to $DIR/route; the default is the healthy one.
-if [ "$cmd" = shell ] && [ "$1" = svc ]; then exit 0; fi
+# A test that wants the telephony service to come up late writes how many calls fail first to
+# $DIR/svc-failures.
+if [ "$cmd" = shell ] && [ "$1" = svc ]; then
+  left="$(cat "$DIR/svc-failures" 2>/dev/null || echo 0)"
+  if [ "$left" -gt 0 ]; then
+    echo $((left - 1)) > "$DIR/svc-failures"
+    echo "cmd: Can't find service: phone"
+    exit 20
+  fi
+  exit 0
+fi
 if [ "$cmd" = shell ] && [ "$1" = ip ]; then
   if [ -f "$DIR/route" ]; then cat "$DIR/route"; else echo "$5 dev wlan0 table 1016 src 192.168.4.12 uid 2000"; fi
   exit 0
