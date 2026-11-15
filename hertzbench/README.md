@@ -213,6 +213,10 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 
 Newest first. Each entry links the PR, release or document that holds the result.
 
+- **2026-11-14**: the cause of the emulated ESP32's watchdog resets at boot is found, a jump of the
+  QEMU fork's cycle counter when Arduino switches the CPU clock, and patch 4 for the fork fixes it:
+  0 resets in 30 boots on a quiet host, down from 9 to 26 per run
+  ([e2e-esp32.md](docs/e2e-esp32.md#boot-resets-and-patch-4)).
 - **2026-11-14**: v0.4.0 released: Android on Windows and macOS hosts, the examples inside the
   binary, `view` opening the browser and the Windows double-click welcome.
 - **2026-11-14**: the binary carries its scripted example scenarios (`examples`), `view` opens the
@@ -258,6 +262,9 @@ Newest first. Each entry links the PR, release or document that holds the result
   [android-device-plan.md](docs/android-device-plan.md#5-ci-feasibility).
 - **`view` opening the browser on Windows and macOS.** The launcher command per system is
   unit-tested; it has opened a browser on Linux only.
+- **ESP32 boot with no watchdog reset on a loaded host.** With patch 4, a run at load average 19
+  still logged 2 resets, and Wi-Fi does not always associate under load. Plan:
+  [e2e-esp32.md](docs/e2e-esp32.md#boot-resets-and-patch-4).
 - **Android on a real Mac.** The Mac checklist is in draft
   [PR #97](https://github.com/Rixmerz/hertzbench/pull/97), not merged.
 - **The macOS `.dmg` opened on a real Mac.** Released unsigned and not notarized, and nobody has

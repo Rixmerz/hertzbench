@@ -191,6 +191,8 @@ Run on 2026-11-14 on the CachyOS host (14 cores), with `udp-3-nodes.yaml` throug
 
 The idle batch ran at load average 3.8 to 10.6: another session was building on the host. An earlier build of patch 4, with the CPU part only, gave the same 0 resets idle (10 runs) and in 8 loaded runs. Two loaded runs that overlapped other QEMU runs (load average 36 to 37) logged a task watchdog and one `TG0WDT_SYS_RESET`.
 
+**A second check, by another hand, the same day.** Five more runs of `udp-3-nodes.yaml` with the patched library installed, while other work on the host took the load average from 6.7 to 24.0: 4 PASS and 1 FAIL. Four runs logged no reset. The failing run, at load average 19.3, logged 2 watchdog resets. So patch 4 removes the resets on a quiet host and most of them under load, and a loaded host can still reset a board.
+
 **Still open, with what was measured.**
 
 - **Under load, Wi-Fi does not always associate. This predates patch 4.** The probe was a copy of the sketch that logs Arduino's Wi-Fi events, run standalone with SLIRP, 3 boards at a time beside 10 busy loops.
