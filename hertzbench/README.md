@@ -213,6 +213,9 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 
 Newest first. Each entry links the PR, release or document that holds the result.
 
+- **2026-11-14**: first report from a real Windows machine: `android prepare` passes the WHPX check
+  with v0.4.0
+  ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259)).
 - **2026-11-14**: the cause of the emulated ESP32's watchdog resets at boot is found, a jump of the
   QEMU fork's cycle counter when Arduino switches the CPU clock, and patch 4 for the fork fixes it:
   0 resets in 30 boots on a quiet host, down from 9 to 26 per run
@@ -249,10 +252,11 @@ Newest first. Each entry links the PR, release or document that holds the result
 
 ### Not yet validated
 
-- **Android on Windows and macOS.** The launcher now checks acceleration with
-  `emulator -accel-check` (WHPX, AEHD or HAXM on Windows, HVF on macOS) instead of KVM only. Neither
-  path has run on a real machine. [Issue #102](https://github.com/Rixmerz/hertzbench/issues/102)
-  reports the Linux-only refusal on Windows. Plan: [android.md](docs/android.md#platforms).
+- **An Android node booted on Windows, and Android on macOS.** On Windows the launcher's WHPX check
+  and tool lookup ran on a real machine with v0.4.0
+  ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259)); the
+  emulator then stopped for lack of RAM (4007 MiB, it asks for 4096), so no AVD has booted there.
+  Nothing has run on a Mac. Plan: [android.md](docs/android.md#platforms).
 - **Two real Android nodes in one run.** The `android prepare` procedure is implemented and tested
   with a fake SDK. No run has booted two emulators. Plan: [android.md](docs/android.md).
 - **Android snapshot boot time, and the snapshot's MAC and network steps.** Not measured; see

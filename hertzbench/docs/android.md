@@ -19,14 +19,21 @@ downloads an AVD.
 | Platform | How Hertzbench checks acceleration                  | State                                                                                       |
 | -------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Linux    | `/dev/kvm` must be readable and writable            | **Validated** on Linux with KVM: `pixel8` AVD, emulator 37.1.11, 2026-11-09 and 2026-11-10 |
-| Windows  | `emulator -accel-check` must name WHPX, AEHD or HAXM | **Implemented, not validated** on a real Windows machine ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102)) |
+| Windows  | `emulator -accel-check` must name WHPX, AEHD or HAXM | **Acceleration gate seen on a real machine, AVD boot not validated** ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259) and below) |
 | macOS    | `emulator -accel-check` must name HVF               | **Implemented, not validated** on a real Mac                                                |
 
 On Windows and macOS the check runs `emulator -accel-check` and accepts it only when the command
 exits 0 and names an accelerator of that system. Otherwise the run stops and quotes what the
 emulator printed. The tests for these paths run on Linux with a fake SDK and an injected command
-runner, so they show the logic, not a real emulator. Until someone runs a node on a Windows or
-macOS host, treat those platforms as untested.
+runner, so they show the logic, not a real emulator.
+
+One report from a real Windows machine exists, by the reporter of [issue #102](https://github.com/Rixmerz/hertzbench/issues/102), on
+2026-11-14 with the v0.4.0 Windows x64 binary and the AVD `Medium_Phone_API_37.0`:
+`android prepare` no longer refused the host, the WHPX check passed, and the low-memory warning
+printed (the AVD needs 2048 MB, 514 MB were free). The emulator then stopped by itself: the machine
+has 4007 MiB of RAM and the emulator asks for at least 4096 MiB. So the gate and the tool lookup ran
+on Windows, and no AVD has booted there yet. Treat a booted Android node on Windows, and everything
+on macOS, as untested.
 
 ## Two Android nodes in one run
 
@@ -62,4 +69,5 @@ been tested here.
   cover it. No run has booted two emulators on a real host.
 - **The snapshot boot time against a cold boot**, and whether two nodes on one AVD get distinct
   `192.168.4.x` leases on a real emulator.
-- **Acceleration on Windows (WHPX, AEHD, HAXM) and macOS (HVF)**, see the table.
+- **An AVD booting on Windows** (the WHPX gate has run on a real machine; AEHD and HAXM have not),
+  and **anything on macOS (HVF)**, see the table.
