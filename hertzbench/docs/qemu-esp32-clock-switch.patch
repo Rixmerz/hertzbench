@@ -1,0 +1,183 @@
+diff --git a/hw/timer/esp32_frc_timer.c b/hw/timer/esp32_frc_timer.c
+index 8aa8065..3dae9c0 100644
+--- a/hw/timer/esp32_frc_timer.c
++++ b/hw/timer/esp32_frc_timer.c
+@@ -171,8 +171,21 @@ static void esp32_frc_timer_set_apb_freq(Object *obj, Visitor *v,
+                                   Error **errp)
+ {
+     Esp32FrcTimerState *s = ESP32_FRC_TIMER(opaque);
+-    visit_type_uint32(v, name, &s->apb_freq, errp);
++    uint64_t ns_now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    uint32_t hz, count_now;
+ 
++    if (!visit_type_uint32(v, name, &hz, errp) || hz == s->apb_freq) {
++        return;
++    }
++    /* As in esp32_timg.c: fold the count at the old rate, re-arm at the new. */
++    count_now = esp32_frc_timer_get_count(s, ns_now);
++    s->count_base = count_now;
++    s->ns_base = ns_now;
++    s->apb_freq = hz;
++    if (s->enable && timer_pending(&s->alarm_timer) &&
++        !timer_expired(&s->alarm_timer, ns_now) && (uint32_t)s->alarm_reg != count_now) {
++        esp32_frc_timer_update_alarm(s, s->alarm_reg, count_now, ns_now);
++    }
+ }
+ 
+ static const MemoryRegionOps esp32_frc_timer_ops = {
+diff --git a/hw/timer/esp32_timg.c b/hw/timer/esp32_timg.c
+index f0f0d64..9f3a4d5 100644
+--- a/hw/timer/esp32_timg.c
++++ b/hw/timer/esp32_timg.c
+@@ -35,6 +35,8 @@ static bool esp32_timg_wdt_protected(Esp32TimgWdtState *ws);
+ static void esp32_timg_wdt_update_config(Esp32TimgWdtState *ws);
+ static void esp32_timg_wdt_feed(Esp32TimgWdtState *ws);
+ static void esp32_timg_wdt_arm(Esp32TimgWdtState *ws, uint64_t ns_now);
++static uint64_t esp32_timg_wdt_get_count(Esp32TimgWdtState *ws, uint64_t ns_now);
++static int esp32_timg_timer_direction(Esp32TimgTimerState *s);
+ 
+ 
+ #define TIMG_DEBUG_LOG(...) // qemu_log(__VA_ARGS__)
+@@ -321,7 +323,42 @@ static void esp32_timg_set_apb_freq(Object *obj, Visitor *v,
+                                   Error **errp)
+ {
+     Esp32TimgState *s = ESP32_TIMG(opaque);
+-    visit_type_uint32(v, name, &s->apb_freq_hz, errp);
++    Esp32TimgTimerState *timers[] = { &s->t0, &s->t1, &s->lact };
++    Esp32TimgWdtState *ws = &s->wdt;
++    uint64_t ns_now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    uint32_t hz;
++
++    if (!visit_type_uint32(v, name, &hz, errp) || hz == s->apb_freq_hz) {
++        return;
++    }
++    /*
++     * The counts are computed from (now - ns_base) at the current APB rate, so
++     * a new rate alone would rescale all the time since the last reload or
++     * config write (the CPU clock switch goes 80 -> 40 -> 80 MHz APB). Fold the
++     * counts at the old rate first, then re-arm what is pending at the new
++     * one. An alarm already due is left to fire.
++     */
++    for (int i = 0; i < ARRAY_SIZE(timers); i++) {
++        timers[i]->count_base = esp32_timg_timer_get_count(timers[i], ns_now);
++        timers[i]->ns_base = ns_now;
++    }
++    if (ws->en) {
++        ws->count_base = esp32_timg_wdt_get_count(ws, ns_now);
++        ws->ns_base = ns_now;
++    }
++    s->apb_freq_hz = hz;
++    for (int i = 0; i < ARRAY_SIZE(timers); i++) {
++        Esp32TimgTimerState *ts = timers[i];
++
++        if (timer_pending(&ts->alarm_timer) && !timer_expired(&ts->alarm_timer, ns_now) &&
++            ((int64_t)ts->alarm_val - (int64_t)ts->count_base) * esp32_timg_timer_direction(ts) > 0) {
++            esp32_timg_timer_update_alarm(ts, ns_now);
++        }
++    }
++    if (ws->en && timer_pending(&ws->stage_timer) && !timer_expired(&ws->stage_timer, ns_now) &&
++        ws->count_base < (uint32_t)ws->timeout[ws->cur_stage]) {
++        esp32_timg_wdt_arm(ws, ns_now);
++    }
+     TIMG_DEBUG_LOG("%s: TG%d apb_freq_hz=%d\n", __func__, s->id, s->apb_freq_hz);
+ }
+ 
+diff --git a/hw/xtensa/esp32.c b/hw/xtensa/esp32.c
+index 082b3b8..7601a8c 100644
+--- a/hw/xtensa/esp32.c
++++ b/hw/xtensa/esp32.c
+@@ -245,8 +245,8 @@ static void esp32_clk_update(void* opaque, int n, int level)
+     qdev_prop_set_int32(DEVICE(&s->frc_timer), "apb_freq", apb_clk_freq);
+     qdev_prop_set_int32(DEVICE(&s->timg[0]), "apb_freq", apb_clk_freq);
+     qdev_prop_set_int32(DEVICE(&s->timg[1]), "apb_freq", apb_clk_freq);
+-    clock_update_hz(s->cpu[0].clock, cpu_clk_freq );
+-    clock_update_hz(s->cpu[1].clock, cpu_clk_freq );
++    xtensa_cpu_set_clock_hz(&s->cpu[0], cpu_clk_freq);
++    xtensa_cpu_set_clock_hz(&s->cpu[1], cpu_clk_freq);
+ }
+ 
+ static void esp32_soc_add_periph_device(MemoryRegion *dest, void* dev, hwaddr dport_base_addr)
+diff --git a/hw/xtensa/esp32_picsimlab.c b/hw/xtensa/esp32_picsimlab.c
+index d8a199d..b6b3a4a 100644
+--- a/hw/xtensa/esp32_picsimlab.c
++++ b/hw/xtensa/esp32_picsimlab.c
+@@ -439,8 +439,8 @@ static void esp32_clk_update(void* opaque, int n, int level)
+     qdev_prop_set_int32(DEVICE(&s->frc_timer), "apb_freq", apb_clk_freq);
+     qdev_prop_set_int32(DEVICE(&s->timg[0]), "apb_freq", apb_clk_freq);
+     qdev_prop_set_int32(DEVICE(&s->timg[1]), "apb_freq", apb_clk_freq);
+-    clock_update_hz(s->cpu[0].clock, cpu_clk_freq );
+-    clock_update_hz(s->cpu[1].clock, cpu_clk_freq );
++    xtensa_cpu_set_clock_hz(&s->cpu[0], cpu_clk_freq);
++    xtensa_cpu_set_clock_hz(&s->cpu[1], cpu_clk_freq);
+ }
+ 
+ static void esp32_soc_add_periph_device(MemoryRegion *dest, void* dev, hwaddr dport_base_addr)
+diff --git a/target/xtensa/cpu.h b/target/xtensa/cpu.h
+index 748e110..b7e8e5d 100644
+--- a/target/xtensa/cpu.h
++++ b/target/xtensa/cpu.h
+@@ -640,6 +640,7 @@ static inline void xtensa_select_static_vectors(CPUXtensaState *env,
+     env->static_vectors = n;
+ }
+ void xtensa_runstall(CPUXtensaState *env, bool runstall);
++void xtensa_cpu_set_clock_hz(XtensaCPU *cpu, unsigned hz);
+ 
+ #define XTENSA_OPTION_BIT(opt) (((uint64_t)1) << (opt))
+ #define XTENSA_OPTION_ALL (~(uint64_t)0)
+diff --git a/target/xtensa/op_helper.c b/target/xtensa/op_helper.c
+index 028d4e0..8141fb8 100644
+--- a/target/xtensa/op_helper.c
++++ b/target/xtensa/op_helper.c
+@@ -71,6 +71,52 @@ void HELPER(update_ccompare)(CPUXtensaState *env, uint32_t i)
+     env->yield_needed = 1;
+ }
+ 
++/*
++ * Change the core clock without disturbing CCOUNT.
++ *
++ * CCOUNT is computed as ccount_base + ticks(now - time_base) at the clock's
++ * current period, so changing the period alone rescales all the time since
++ * time_base: CCOUNT jumps by (elapsed * delta_f), backwards when the clock
++ * slows down, and CCOMPARE timers stay armed for the old frequency. ESP-IDF
++ * switches 160 MHz -> XTAL -> 240 MHz while the FreeRTOS tick runs (Arduino's
++ * setCpuFrequencyMhz); a tick taken in the XTAL window armed the next one
++ * seconds away, the core stopped ticking and the interrupt watchdog reset the
++ * chip. On silicon CCOUNT only changes rate, so fold the count at the old
++ * period first, then re-arm the pending comparators at the new one.
++ *
++ * Callers hold the BQL; under MTTCG this writes the other vCPU's timebase from
++ * this thread, which a CCOUNT read racing the switch can see half-updated.
++ * Clock switches are a handful per boot.
++ */
++void xtensa_cpu_set_clock_hz(XtensaCPU *cpu, unsigned hz)
++{
++    CPUXtensaState *env = &cpu->env;
++    unsigned i;
++
++    if (clock_get(cpu->clock) == CLOCK_PERIOD_FROM_HZ(hz)) {
++        return;
++    }
++    HELPER(update_ccount)(env);
++    env->ccount_base = env->sregs[CCOUNT];
++    env->time_base = env->ccount_time;
++    clock_update_hz(cpu->clock, hz);
++
++    /*
++     * Not HELPER(update_ccompare): it would also drop a tick already raised.
++     * A timer that is due (deadline passed, or CCOUNT already at CCOMPARE)
++     * but has not run yet is left to fire: re-arming it would push the tick
++     * a whole 2^32-cycle wrap away.
++     */
++    for (i = 0; i < env->config->nccompare; ++i) {
++        QEMUTimer *t = env->ccompare[i].timer;
++        uint32_t dcc = env->sregs[CCOMPARE + i] - env->sregs[CCOUNT];
++
++        if (timer_pending(t) && !timer_expired(t, env->ccount_time) && dcc) {
++            timer_mod(t, env->ccount_time + clock_ticks_to_ns(cpu->clock, dcc));
++        }
++    }
++}
++
+ /*!
+  * Check vaddr accessibility/cache attributes and raise an exception if
+  * specified by the ATOMCTL SR.
