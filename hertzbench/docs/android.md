@@ -20,7 +20,7 @@ downloads an AVD.
 | -------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Linux    | `/dev/kvm` must be readable and writable            | **Validated** on Linux with KVM: `pixel8` AVD, emulator 37.1.11, 2026-11-09 and 2026-11-10 |
 | Windows  | `emulator -accel-check` must name WHPX, AEHD or HAXM | **Acceleration gate seen on a real machine, AVD boot not validated** ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259) and below) |
-| macOS    | `emulator -accel-check` must name HVF               | **Implemented, not validated** on a real Mac                                                |
+| macOS    | `emulator -accel-check` must name HVF               | **Implemented, not validated**: an emulator started by hand on an M2 Mac reached the IP bridge ([#110](https://github.com/Rixmerz/hertzbench/issues/110)), but no `board: android` node has booted on a Mac |
 
 On Windows and macOS the check runs `emulator -accel-check` and accepts it only when the command
 exits 0 and names an accelerator of that system. Otherwise the run stops and quotes what the
