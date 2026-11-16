@@ -206,13 +206,18 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 | Mobile bridge (Phase 5)                                                                                         | done; on real firmware the IP bridge serves the ESP32's `WebServer` to the host's `curl`, and BlueZ advertises `hzb sensor` on `hci0`. On the maintainer's host no phone was used, but community report [#37](https://github.com/Rixmerz/hertzbench/issues/37) has a real phone reaching the IP bridge over HTTP, and [#110](https://github.com/Rixmerz/hertzbench/issues/110) has the Android emulator on an Apple Silicon Mac exchanging MQTT both ways with a scripted node through `10.0.2.2` (WebSocket not run), see [Mobile bridge](#mobile-bridge) |
 | Android app over Wi-Fi to real ESP32 firmware ([PR #96](https://github.com/Rixmerz/hertzbench/pull/96))         | **passes**: `android-web-esp32.yaml` 3 of 3 on the `pixel8` AVD (2026-11-09, again 2026-11-10); Linux with KVM, not in CI                                                                                                                                                                                                                                                          |
 | Android app over simulated BLE to real ESP32 firmware ([PR #98](https://github.com/Rixmerz/hertzbench/pull/98)) | **passes**: `android-ble-esp32.yaml` 3 of 3 on `pixel8` (2026-11-10, 96 to 103 s each); one Linux host only, not in CI                                                                                                                                                                                                                                                             |
-| Releases                                                                                                        | v0.4.0 (2026-11-14), after v0.3.0 and v0.3.1 (2026-11-11), publish binaries for Linux, macOS and Windows, x64 and arm64; v0.3.1 adds unsigned, non-notarized macOS `.dmg` images                                                                                                                                                                                                   |
+| Releases                                                                                                        | v0.4.1 (2026-11-16), after v0.4.0 (2026-11-14) and v0.3.0 and v0.3.1 (2026-11-11), publish binaries for Linux, macOS and Windows, x64 and arm64; v0.3.1 adds unsigned, non-notarized macOS `.dmg` images                                                                                                                                                                                                   |
 | CI                                                                                                              | lint, type check and tests pass on `ubuntu-latest`, `windows-latest` and `macos-latest` (arm64), run 40083042461                                                                                                                                                                                                                                                                   |
 
 ### Milestones
 
 Newest first. Each entry links the PR, release or document that holds the result.
 
+- **2026-11-16**: v0.4.1 released: `deno task compile` works with the Deno from Homebrew
+  ([#111](https://github.com/Rixmerz/hertzbench/pull/111)).
+- **2026-11-16**: community report from an Apple Silicon Mac: the Android emulator exchanges MQTT
+  both ways with a scripted node through the IP bridge at `10.0.2.2`
+  ([issue #110](https://github.com/Rixmerz/hertzbench/issues/110)).
 - **2026-11-14**: first report from a real Windows machine: `android prepare` passes the WHPX check
   with v0.4.0
   ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259)).
