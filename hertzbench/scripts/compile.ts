@@ -64,7 +64,9 @@ if (unknown.length > 0) {
 
 // cli/examples_bundle.ts is committed but generated: regenerate it so a binary never ships a
 // stale copy of scenarios/examples/.
-const bundle = await new Deno.Command(Deno.execPath(), {
+// Spawn "deno" by name, not Deno.execPath(): the task grants --allow-run=deno, and on Homebrew
+// execPath() returns the resolved Cellar path, which that permission does not cover (#109).
+const bundle = await new Deno.Command("deno", {
   args: [
     "run",
     "--allow-read",
@@ -85,7 +87,7 @@ await Deno.mkdir(dist, { recursive: true });
 for (const name of wanted) {
   const output = join(dist, `hertzbench-${name}${name.startsWith("windows") ? ".exe" : ""}`);
   console.log(`compile ${name} -> ${output}`);
-  const { code } = await new Deno.Command(Deno.execPath(), {
+  const { code } = await new Deno.Command("deno", {
     args: [
       "compile",
       "--target",
