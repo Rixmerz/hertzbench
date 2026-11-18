@@ -273,7 +273,11 @@ class ScriptedBoard implements RunningBoard {
     const { serve, send, subscribe } = node.firmware;
     if (serve.length === 0 && subscribe.length === 0 && !send.some((s) => s.via === "mqtt")) return;
     const tcp = this.#openTcp(ip);
-    const ctx = { node: node.id, onSerial: (line: string) => this.#ctx.onSerial(line) };
+    const ctx = {
+      node: node.id,
+      onSerial: (line: string) => this.#ctx.onSerial(line),
+      clock: this.#ctx.clock,
+    };
     for (const service of serve) {
       if (service.protocol === "http") tcp.listen(service.port, (conn) => serveHttp(conn, ctx));
       else {
