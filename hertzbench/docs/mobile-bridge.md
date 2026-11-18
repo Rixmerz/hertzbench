@@ -43,9 +43,9 @@ The report and the progress lines say where each service is: `bridge phone: http
 
 **Android emulator.** The emulator reaches the host's loopback at `10.0.2.2`, so the default `listen: 127.0.0.1` is enough: no `listen: 0.0.0.0`, no `deno task lan`, no LAN access. An app in the emulator connects to `10.0.2.2:<listen_port>`, for example `tcp://10.0.2.2:1883` for MQTT when the expose entry has `listen_port: 1883`. Set `listen_port` explicitly for that case: with the default `0` the OS picks the port and the emulator cannot know it. The report then says `bridge phone: mqtt web:1883 at 127.0.0.1:1883`, which is the same port the emulator uses.
 
-**Android 17 (API 37) needs a permission to reach `10.0.2.2`.** From Android 17, an app must hold the
-runtime permission `android.permission.ACCESS_LOCAL_NETWORK` to connect to `10.0.2.2` or to a host on
-the LAN. Without it the TCP connect times out (`SocketTimeoutException: failed to connect to /10.0.2.2
+**An app that targets Android 17 (API 37) needs a permission to reach `10.0.2.2`.** Such an app must
+hold the runtime permission `android.permission.ACCESS_LOCAL_NETWORK` to connect to `10.0.2.2` or to a
+host on the LAN. Without it the TCP connect times out (`SocketTimeoutException: failed to connect to /10.0.2.2
 (port 1883) ... after 5000ms`), while `adb shell nc -w 3 10.0.2.2 1883` still works, because the shell
 is not subject to the permission. The app-side fix, as a community tester ran it in
 [#114](https://github.com/Rixmerz/hertzbench/issues/114) on an Android 17 arm64 emulator with Paho MQTT
@@ -67,9 +67,9 @@ For a test run, grant it from the host instead of asking the user:
 adb shell pm grant <package> android.permission.ACCESS_LOCAL_NETWORK
 ```
 
-`hertzbench android` installs an APK with `adb install -r -t -g`, and `-g` grants the runtime
-permissions the manifest declares. Whether that includes `ACCESS_LOCAL_NETWORK` on API 37 has not been
-checked here, so if the connect still times out, run the `pm grant` line above.
+When Hertzbench launches an `android` node, it installs the APK with `adb install -r -t -g`, and `-g`
+grants the runtime permissions the manifest declares. Whether that includes `ACCESS_LOCAL_NETWORK` on
+API 37 has not been checked here, so if the connect still times out, run the `pm grant` line above.
 
 **mDNS.** With `listen` other than loopback, the bridge advertises each endpoint as a DNS-SD service: `web-80._http._tcp.local`, SRV to `hzb-web.local:8080`, A to the host's first non-loopback IPv4 address, skipping link-local and virtual adapters (VirtualBox, VMware, Hyper-V, WSL, Docker, libvirt) while a real one exists (or `advertise_ip`, or `listen` when it is a specific address), TXT `node=web port=80 via=hertzbench`. It announces at start, withdraws with TTL 0 at the end, and answers multicast, QU and legacy unicast queries. A service browser (`avahi-browse -art` on Linux, a DNS-SD browser app on the phone) lists them; whether the phone's browser resolves `hzb-web.local` depends on its OS, so the host address always works as well. `_ws._tcp` is a convention, not an IANA-registered type. If the socket cannot open (no permission, or port 5353 held by a daemon that does not share it), the report says `mDNS not advertised: <why>` and the run goes on. No probing or conflict resolution: the names carry `hzb-` and the node id.
 

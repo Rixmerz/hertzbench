@@ -51,8 +51,10 @@ ESP-NOW, BLE, the mobile bridge and the view touch no Velxio file
 - IP bridge: a phone, or the Android emulator at `10.0.2.2`, reaches a simulated node over HTTP,
   WebSocket, MQTT or any TCP. mDNS advertises it on the LAN. See
   [mobile-bridge.md](docs/mobile-bridge.md#5a-the-ip-bridge).
-- BLE bridge: a real phone sees a simulated peripheral's GATT through BlueZ. Linux only. See
-  [mobile-bridge.md](docs/mobile-bridge.md#5b-the-ble-bridge).
+- BLE bridge: a real phone sees a simulated peripheral's GATT through BlueZ (Linux only), and an app
+  in the Android emulator sees it through netsim. See
+  [mobile-bridge.md](docs/mobile-bridge.md#5b-the-ble-bridge) and
+  [the netsim path](docs/mobile-bridge.md#5b-with-netsim-an-app-in-the-android-emulator).
 
 **Android app nodes**
 
@@ -288,8 +290,8 @@ Newest first. Each entry links the PR, release or document that holds the result
   runs in the Android 17 emulator, as panel and as node, through the IP bridge at `10.0.2.2`. An
   `inject_fault` that cuts the link sends the app into its safe mode, and it reconnects when the
   link returns. The report was made by the community tester, not rerun by the maintainer
-  ([issue #116](https://github.com/Rixmerz/hertzbench/issues/116)). Android 17 needs the
-  `ACCESS_LOCAL_NETWORK` permission for that
+  ([issue #116](https://github.com/Rixmerz/hertzbench/issues/116)). An app that targets Android 17
+  needs the `ACCESS_LOCAL_NETWORK` permission for that
   ([issue #114](https://github.com/Rixmerz/hertzbench/issues/114),
   [mobile-bridge.md](docs/mobile-bridge.md#5a-the-ip-bridge)).
 - **2026-11-16**: v0.4.1 released: `deno task compile` works with the Deno from Homebrew
@@ -340,7 +342,10 @@ Newest first. Each entry links the PR, release or document that holds the result
   and tool lookup ran on a real machine with v0.4.0
   ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259)); the
   emulator then stopped for lack of RAM (4007 MiB, it asks for 4096), so no AVD has booted there.
-  Nothing has run on a Mac. Plan: [android.md](docs/android.md#platforms).
+  No `board: android` node has run on a Mac. By hand, an emulator on a Mac ran the MQTT apps of
+  [#110](https://github.com/Rixmerz/hertzbench/issues/110) and
+  [#116](https://github.com/Rixmerz/hertzbench/issues/116). Plan:
+  [android.md](docs/android.md#platforms).
 - **Two real Android nodes in one run.** The `android prepare` procedure is implemented and tested
   with a fake SDK. No run has booted two emulators. Plan: [android.md](docs/android.md).
 - **Android snapshot boot time, and the snapshot's MAC and network steps.** Not measured; see

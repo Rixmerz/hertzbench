@@ -13,7 +13,7 @@ downloads an AVD.
 - **An APK** for the app, built beforehand. The example app is in `examples/android/`.
 - **Hardware acceleration** for the emulator (see the platform table below). Without it the run
   stops before it boots anything, with exit status 2 and the reason.
-- **Android 17 (API 37) and the bridge.** An app there needs the runtime permission
+- **An app that targets Android 17 (API 37) and the bridge.** It needs the runtime permission
   `android.permission.ACCESS_LOCAL_NETWORK` to reach `10.0.2.2` or a LAN host. Manifest line, the
   runtime request and `adb shell pm grant` are in [mobile-bridge.md](mobile-bridge.md#5a-the-ip-bridge),
   reported in [#114](https://github.com/Rixmerz/hertzbench/issues/114).
@@ -55,8 +55,10 @@ Windows are not validated; see the notes after the steps.
    avdmanager create avd -n pixel8 -k "system-images;android-36;google_apis;x86_64" -d pixel_8
    ```
 
-4. **Check the RAM** in `~/.android/avd/pixel8.avd/config.ini`. The validated AVD has
-   `hw.ramSize=2048`; set that line if avdmanager wrote another value.
+4. **Set the RAM to 2048** in `~/.android/avd/pixel8.avd/config.ini`: `hw.ramSize=2048`. With
+   `-d pixel_8`, avdmanager wrote `hw.ramSize=2G` on the machine where this was checked. Hertzbench's
+   low-RAM check reads a plain number of MB, so `2G` would be read as 2 MB and the warning would
+   never fire. The validated AVD uses `2048`.
 
 5. **Prepare it for the runs**, then give the scenario's `android:` section `avd: pixel8`:
 
@@ -69,9 +71,11 @@ and `~/Android`, as `emulator/emulator` and `platform-tools/adb` under that fold
 `sdkmanager` or `avdmanager`. AVDs are read from `$ANDROID_AVD_HOME`, then `$ANDROID_USER_HOME/avd`,
 then `~/.android/avd`. `/dev/kvm` must be readable and writable (the check `android prepare` runs).
 
-**macOS (Apple Silicon), not validated by the maintainer.** Use an arm64 image,
-`system-images;android-36;google_apis_playstore;arm64-v8a` or `system-images;android-36;google_apis;arm64-v8a`,
-with `-k` set to it in step 3. Hertzbench checks for HVF with `emulator -accel-check`. No Android node
+**macOS (Apple Silicon), not validated by the maintainer.** Use an arm64 image in steps 2 and 3:
+`system-images;android-36;google_apis;arm64-v8a` or `system-images;android-36;google_apis_playstore;arm64-v8a`
+(both listed by `sdkmanager --list` for API 36). The M2 runs in
+[#110](https://github.com/Rixmerz/hertzbench/issues/110) and [#116](https://github.com/Rixmerz/hertzbench/issues/116)
+used an Android 17 (API 37) `google_apis_playstore` arm64-v8a image; the API 37 package was not listed here. Hertzbench checks for HVF with `emulator -accel-check`. No Android node
 has booted on a Mac yet; see [Platforms](#platforms).
 
 **Windows, not validated by the maintainer.** The same commands with `sdkmanager.bat` and
@@ -84,7 +88,7 @@ RAM check stopped the emulator on one machine (see [Platforms](#platforms)).
 | -------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Linux    | `/dev/kvm` must be readable and writable            | **Validated** on Linux with KVM: `pixel8` AVD, emulator 37.1.11, 2026-11-09 and 2026-11-10 |
 | Windows  | `emulator -accel-check` must name WHPX, AEHD or HAXM | **Acceleration gate seen on a real machine, AVD boot not validated** ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259) and below) |
-| macOS    | `emulator -accel-check` must name HVF               | **Implemented, not validated**: an emulator started by hand on an M2 Mac reached the IP bridge ([#110](https://github.com/Rixmerz/hertzbench/issues/110)), but no `board: android` node has booted on a Mac |
+| macOS    | `emulator -accel-check` must name HVF               | **Implemented, not validated**: an emulator started by hand on an M2 Mac reached the IP bridge ([#110](https://github.com/Rixmerz/hertzbench/issues/110)), and a Kotlin/Compose app ran there as panel and node in the Android 17 emulator ([#116](https://github.com/Rixmerz/hertzbench/issues/116)), but no `board: android` node has booted on a Mac |
 
 On Windows and macOS the check runs `emulator -accel-check` and accepts it only when the command
 exits 0 and names an accelerator of that system. Otherwise the run stops and quotes what the
