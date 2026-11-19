@@ -71,7 +71,7 @@ ESP-NOW, BLE, the mobile bridge and the view touch no Velxio file
 
 **CLI and release binaries**
 
-- Commands: `run`, `validate`, `examples`, `view`, `mcp` and `android prepare`.
+- Commands: `run`, `validate`, `examples`, `view`, `mcp`, `android setup` and `android prepare`.
 - Release binaries for Linux, macOS and Windows, on x64 and arm64, with a `SHA256SUMS` file. See
   [Install](#install).
 
@@ -95,8 +95,9 @@ ESP-NOW, BLE, the mobile bridge and the view touch no Velxio file
 
    The report's last assertion line is followed by `RESULT: PASS`, and the exit status is 0.
 
-The three scripted boards need nothing else. For ESP32 boards and Android app nodes, see
-[Android without Android Studio](docs/android.md#android-without-android-studio) and
+The three scripted boards need nothing else. For Android app nodes, `hertzbench android setup`
+installs the SDK pieces and an AVD without Android Studio
+([android.md](docs/android.md#android-without-android-studio)); ESP32 boards are in
 [e2e-esp32.md](docs/e2e-esp32.md). The full walk-through is in
 [Getting started with the binary](#getting-started-with-the-binary).
 
@@ -286,6 +287,11 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 
 Newest first. Each entry links the PR, release or document that holds the result.
 
+- **2026-11-19**: `hertzbench android setup` installs what Android app nodes need without Android
+  Studio: Google's command-line tools (downloaded from `dl.google.com`, SHA-256 checked),
+  `platform-tools`, the emulator, a system image and an AVD, then checks acceleration. It skips what
+  exists and has `--dry-run`. Tested with fake tools and no network; not yet run from an empty SDK
+  ([android.md](docs/android.md#one-command-hertzbench-android-setup)).
 - **2026-11-17**: community report from an Apple Silicon Mac: a Kotlin/Compose app with Paho MQTT
   runs in the Android 17 emulator, as panel and as node, through the IP bridge at `10.0.2.2`. An
   `inject_fault` that cuts the link sends the app into its safe mode, and it reconnects when the
@@ -347,6 +353,10 @@ Newest first. Each entry links the PR, release or document that holds the result
   [#110](https://github.com/Rixmerz/hertzbench/issues/110) and
   [#116](https://github.com/Rixmerz/hertzbench/issues/116). Plan:
   [android.md](docs/android.md#platforms).
+- **`android setup` from an empty SDK.** The path rules, the plan and the idempotency are tested
+  with fake tools; the pinned Linux zip's checksum and layout were checked against Google's
+  download. The command has not installed an SDK and created an AVD on a real machine, and not on
+  macOS or Windows. Plan: [android.md](docs/android.md#one-command-hertzbench-android-setup).
 - **Two real Android nodes in one run.** The `android prepare` procedure is implemented and tested
   with a fake SDK. No run has booted two emulators. Plan: [android.md](docs/android.md).
 - **Android snapshot boot time, and the snapshot's MAC and network steps.** Not measured; see
@@ -510,6 +520,7 @@ hertzbench run <scenario.yaml> [--out DIR] [--seed N] [--quiet]
 hertzbench validate <scenario.yaml>
 hertzbench view <scenario.yaml> [--port N] [--out DIR] [--seed N]
 hertzbench mcp [--workspace DIR] [--view-port N]
+hertzbench android setup [--sdk DIR] [--image ID] [--avd NAME] [--device ID] [--ram MB] [--accept-licenses] [--dry-run]
 hertzbench android prepare <avd>
 ```
 

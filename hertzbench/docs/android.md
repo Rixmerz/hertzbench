@@ -2,8 +2,9 @@
 
 An Android app runs in the Android emulator as a node (`board: android`, see
 [scenario-format.md](scenario-format.md#board-android-an-app-in-the-android-emulator-on-wi-fi)).
-Hertzbench does not install Android for you. It needs the tools below, and it never creates or
-downloads an AVD.
+A run needs the tools below and never installs or creates anything itself. One command does that
+beforehand, without Android Studio: `hertzbench android setup`
+([below](#android-without-android-studio)).
 
 ## What you need
 
@@ -24,9 +25,54 @@ Android Studio is not required. Hertzbench starts the emulator and `adb` itself,
 the command-line tools, the emulator, `platform-tools` and one system image. Without the Studio IDE
 open beside the emulator, that RAM stays free for the guest.
 
+### One command: `hertzbench android setup`
+
+```bash
+hertzbench android setup --dry-run   # print each step, change nothing
+hertzbench android setup             # sdkmanager asks you to accept the licences
+hertzbench android setup --accept-licenses
+hertzbench android prepare pixel8    # the next step, as the command prints
+```
+
+It goes from an empty machine to a bootable `pixel8` AVD:
+
+1. **SDK folder.** `--sdk <dir>`, else `$ANDROID_HOME`, else `$ANDROID_SDK_ROOT`, else the platform
+   default: `~/Android/Sdk` on Linux, `~/Library/Android/sdk` on macOS, `%LOCALAPPDATA%\Android\Sdk`
+   on Windows. A run looks only in the two variables and that default, so after `--sdk` the command
+   tells you to set `ANDROID_HOME`.
+2. **Command-line tools**, when `<sdk>/cmdline-tools/latest/bin/sdkmanager` is missing. It prints the
+   URL, downloads Google's official zip for your OS from `dl.google.com`, checks its SHA-256 against
+   the value Google publishes for that build, and unpacks it to `<sdk>/cmdline-tools/latest`. Hertzbench
+   does not bundle or redistribute any Google binary. The unpack uses `unzip` (Linux, macOS) or `tar`
+   (Windows 10 and later).
+3. **`platform-tools`, `emulator` and one system image** with `sdkmanager`, for the ones not already
+   installed. The default image is `system-images;android-36;google_apis;x86_64`
+   (`arm64-v8a` on an Arm host); `--image <id>` replaces it. Google's licences are accepted only
+   with `--accept-licenses`; without it `sdkmanager` shows them on your terminal and waits for you,
+   and setup stops before downloading anything when there is no terminal.
+4. **The AVD** with `avdmanager`, unless it exists: `--avd` (default `pixel8`), `--device`
+   (default `pixel_8`) and `--ram` (default `2048`, written as a plain number of MB to `hw.ramSize`,
+   see step 4 of the manual steps).
+5. **The acceleration check** `android prepare` uses, then the next command to run.
+
+Run it again at any time: it skips what exists (the tools, each installed package, the AVD).
+`sdkmanager` and `avdmanager` need a Java 17 or newer runtime (`JAVA_HOME` or `java` on `PATH`).
+The download needs network permission: the release binary has it; from source, run
+`deno run --allow-net ...` or `deno task lan android setup`, as `deno task hertzbench` allows only
+127.0.0.1.
+
+Only the dry run, the path rules and the steps with fake tools are tested
+(`tests/android_setup_test.ts`). The Linux zip's checksum and layout were checked against Google's
+download; the whole command has not been run from an empty SDK, and not on macOS or Windows.
+
+### The manual steps (fallback)
+
+The steps below do by hand what `android setup` does. Use them when the command cannot run, for
+example without network permission, or to see what each tool does.
+
 The maintainer's validated AVD is `pixel8`: device `pixel_8`, system image
 `system-images;android-36;google_apis;x86_64`, `hw.ramSize` 2048, on Linux with KVM (emulator 37.1.11).
-The install steps below were not rerun from an empty SDK for this page. The `pixel8` AVD on the
+The manual steps below were not rerun from an empty SDK for this page. The `pixel8` AVD on the
 maintainer's machine matches them (its `config.ini` and the emulator version were checked). macOS and
 Windows are not validated; see the notes after the steps.
 
@@ -67,8 +113,8 @@ Windows are not validated; see the notes after the steps.
    ```
 
 Hertzbench looks for `emulator` and `adb` on `PATH` first, then in `$ANDROID_HOME`, `$ANDROID_SDK_ROOT`
-and `~/Android`, as `emulator/emulator` and `platform-tools/adb` under that folder. It never runs
-`sdkmanager` or `avdmanager`. AVDs are read from `$ANDROID_AVD_HOME`, then `$ANDROID_USER_HOME/avd`,
+and `~/Android`, as `emulator/emulator` and `platform-tools/adb` under that folder. A run never runs
+`sdkmanager` or `avdmanager`; only `android setup` does. AVDs are read from `$ANDROID_AVD_HOME`, then `$ANDROID_USER_HOME/avd`,
 then `~/.android/avd`. `/dev/kvm` must be readable and writable (the check `android prepare` runs).
 
 **macOS (Apple Silicon), not validated by the maintainer.** Use an arm64 image in steps 2 and 3:

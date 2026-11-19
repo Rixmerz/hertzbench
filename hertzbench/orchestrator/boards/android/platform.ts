@@ -15,6 +15,8 @@ export interface AndroidHostEnv {
   home: string;
   /** `%LOCALAPPDATA%`, Windows only. */
   localAppData?: string;
+  /** `Deno.build.arch` ("x86_64" or "aarch64"); picks the system image and the download. */
+  arch?: string;
 }
 
 export interface CommandResult {

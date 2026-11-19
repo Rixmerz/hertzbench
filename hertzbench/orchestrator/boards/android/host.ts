@@ -33,6 +33,7 @@ export function detectHost(): AndroidHostEnv {
     env,
     home: Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "",
     localAppData: env.LOCALAPPDATA,
+    arch: Deno.build.arch,
   };
 }
 

@@ -32,6 +32,7 @@ Usage:
   ${PRODUCT.cli} view <scenario.yaml> [--port N] [--out DIR] [--seed N] [--no-open]
   ${PRODUCT.cli} examples [name] [--out <dir>]
   ${PRODUCT.cli} mcp [--workspace DIR] [--view-port N]
+  ${PRODUCT.cli} android setup [--sdk <dir>] [--accept-licenses] [--dry-run]
   ${PRODUCT.cli} android prepare <avd>
 
   (${PRODUCT.cliAlias} is a short alias for ${PRODUCT.cli})
@@ -46,8 +47,9 @@ examples   List the bundled example scenarios, or copy one out as <name>.yaml
            (into the current directory, or --out). Never overwrites a file.
 mcp        Serve the Model Context Protocol on stdin and stdout, for an AI
            agent such as Claude Code (see docs/mcp.md).
-android    prepare: save the AVD snapshot that \`snapshot: true\` android nodes boot
-           from (see docs/scenario-format.md, \`board: android\`).
+android    setup: install the Android SDK pieces and an AVD without Android Studio (see
+           docs/android.md). prepare: save the AVD snapshot that \`snapshot: true\` android
+           nodes boot from (see docs/scenario-format.md, \`board: android\`).
 
 Options:
   --out DIR   Write every output file into DIR instead of the scenario's own.

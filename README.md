@@ -66,7 +66,8 @@ The report ends with `RESULT: PASS` and the exit status is 0. The run's metrics,
 logs are in `out/`.
 
 ESP32 boards on real firmware need `libqemu-xtensa`
-([e2e-esp32.md](hertzbench/docs/e2e-esp32.md)); Android app nodes need the Android SDK and an AVD
+([e2e-esp32.md](hertzbench/docs/e2e-esp32.md)); Android app nodes need the Android SDK and an AVD:
+`hertzbench android setup` installs them without Android Studio
 ([Android without Android Studio](hertzbench/docs/android.md#android-without-android-studio)).
 
 ## A scenario
