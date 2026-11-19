@@ -9,13 +9,20 @@
 //   UNSUBSCRIBE, PUBLISH fanned out to every matching subscription, PINGREQ
 //   and DISCONNECT. A QoS 1 PUBLISH is acknowledged and delivered at QoS 0. One retained
 //   message is kept per topic and sent to a client when it subscribes to a matching filter.
-//   No will, no sessions.
+//   Keep-alive: a client that declared K > 0 and sends nothing for 1.5 x K seconds of the
+//   simulation's clock is closed (MQTT 3.1.1 §3.1.2.10). Last Will: the will from CONNECT is
+//   published (delivered at QoS 0, RETAIN kept) when the session ends without DISCONNECT: keep-alive
+//   expiry, the socket closing, or a takeover; a DISCONNECT discards it. Takeover: a CONNECT with a
+//   client id that is already connected closes the old connection first (MQTT-3.1.4-2), and
+//   nothing that arrives on it later is published. Without a clock in the context there is no
+//   keep-alive expiry. No persistent sessions: every connection starts clean.
 //
 // Serial lines, for `serial:` assertions:
 //   http <METHOD> <path> from <ip>
 //   ws open <path> from <ip> / ws rx "<text>" from <ip> / ws closed from <ip>
 //   mqtt connect <client id> from <ip> / mqtt subscribe <filter> from <client id>
 //   mqtt publish <topic> "<payload>" from <client id>
+//   mqtt keep-alive expired <client id> / mqtt will <topic> from <client id> / mqtt takeover <client id>
 // MqttClient is the other side: a scripted board's own connection to a broker.
 
 import type { Clock, TcpConnection } from "../../../engine/mod.ts";
@@ -96,6 +103,8 @@ export function parseWebsocketFrame(buf: Uint8Array): WsFrame | null {
 export interface ServiceContext {
   node: string;
   onSerial(line: string): void;
+  /** The simulation's clock: the broker's keep-alive timers run on it. Without one they do not run. */
+  clock?: Clock;
 }
 
 /** Serve one HTTP connection: one response, or a WebSocket echo after an upgrade. */
@@ -271,6 +280,15 @@ interface MqttSession {
   conn: TcpConnection;
   clientId: string;
   filters: Set<string>;
+  /** The keep-alive the client declared, in ms; 0 turns the check off. */
+  keepAliveMs: number;
+  /** When the broker last received a byte from the client, on the simulation's clock. */
+  lastHeardMs: number;
+  /** The will from CONNECT; null when there is none or a DISCONNECT discarded it. */
+  will: { topic: string; payload: Uint8Array; retain: boolean } | null;
+  cancelTimer: (() => void) | null;
+  /** The session is over: later frames on its connection are dropped. */
+  ended: boolean;
 }
 
 /** One broker per node, shared by every connection to its MQTT port. */
@@ -305,11 +323,23 @@ export class MqttBroker {
   }
 
   serve(conn: TcpConnection): void {
-    const session: MqttSession = { conn, clientId: "", filters: new Set() };
+    const session: MqttSession = {
+      conn,
+      clientId: "",
+      filters: new Set(),
+      keepAliveMs: 0,
+      lastHeardMs: this.#ctx.clock?.now() ?? 0,
+      will: null,
+      cancelTimer: null,
+      ended: false,
+    };
     let buffer: Uint8Array = new Uint8Array(0);
     let connected = false;
     const send = (packet: Uint8Array) => void conn.write(packet).catch(() => {});
     conn.onData((chunk) => {
+      // A connection that was taken over or timed out is dead: whatever still arrives is dropped.
+      if (session.ended) return;
+      session.lastHeardMs = this.#ctx.clock?.now() ?? 0;
       buffer = concat(buffer, chunk);
       for (;;) {
         let packet;
@@ -321,6 +351,7 @@ export class MqttBroker {
         }
         if (!packet) return;
         buffer = buffer.slice(packet.size);
+        if (session.ended) return;
         if (!connected && packet.type !== MQTT.connect) return conn.abort("MQTT without CONNECT");
         this.#handle(session, packet, send, () => {
           connected = true;
@@ -329,7 +360,41 @@ export class MqttBroker {
       }
     });
     conn.onEnd(() => conn.end());
-    conn.onClose(() => this.#sessions.delete(session));
+    conn.onClose(() => this.#end(session));
+  }
+
+  /**
+   * The session is over, however it ended: drop it, stop its timer, and publish its will if no
+   * DISCONNECT discarded it. Safe to call again.
+   */
+  #end(session: MqttSession): void {
+    if (session.ended) return;
+    session.ended = true;
+    session.cancelTimer?.();
+    session.cancelTimer = null;
+    // Out of the table first, so the will is never fanned out to the session that left.
+    this.#sessions.delete(session);
+    const { will } = session;
+    session.will = null;
+    if (will) {
+      this.#ctx.onSerial(`mqtt will ${will.topic} from ${session.clientId}`);
+      this.publish(will.topic, will.payload, will.retain, session.clientId);
+    }
+  }
+
+  /** Close the session after 1.5 x keep-alive of silence; each timer fire re-arms from the last byte heard. */
+  #arm(session: MqttSession): void {
+    const { clock } = this.#ctx;
+    if (!clock || session.keepAliveMs <= 0 || session.ended) return;
+    const limitMs = session.keepAliveMs * 1.5;
+    session.cancelTimer = clock.schedule(session.lastHeardMs + limitMs, () => {
+      session.cancelTimer = null;
+      if (session.ended) return;
+      if (clock.now() - session.lastHeardMs < limitMs) return this.#arm(session);
+      this.#ctx.onSerial(`mqtt keep-alive expired ${session.clientId}`);
+      this.#end(session);
+      session.conn.abort("MQTT keep-alive expired");
+    });
   }
 
   #handle(
@@ -343,14 +408,36 @@ export class MqttBroker {
       case MQTT.connect: {
         const [protocol, afterName] = readString(body, 0);
         // Level at afterName, flags, keep-alive (2 bytes), then the client id.
-        const [clientId] = readString(body, afterName + 4);
+        const connectFlags = body[afterName + 1] ?? 0;
+        const keepAliveSeconds = ((body[afterName + 2] ?? 0) << 8) | (body[afterName + 3] ?? 0);
+        const [clientId, afterId] = readString(body, afterName + 4);
         if (protocol !== "MQTT" || body[afterName] !== 4) {
           send(mqttPacket(MQTT.connack, 0, [0, 0x01])); // unacceptable protocol version
           session.conn.end();
           return;
         }
         session.clientId = clientId || `client-${session.conn.remote.port}`;
+        // MQTT-3.1.4-2: a client id that is already connected has its old connection closed first.
+        for (const old of this.#sessions) {
+          if (old === session || old.clientId !== session.clientId) continue;
+          this.#ctx.onSerial(`mqtt takeover ${old.clientId}`);
+          this.#end(old);
+          old.conn.abort("MQTT client id taken over");
+        }
+        session.keepAliveMs = keepAliveSeconds * 1000;
+        session.will = null;
+        if ((connectFlags & 0x04) !== 0) {
+          // Will flag: topic, then a message of its own length prefix (binary, not UTF-8).
+          const [topic, afterTopic] = readString(body, afterId);
+          const length = ((body[afterTopic] ?? 0) << 8) | (body[afterTopic + 1] ?? 0);
+          session.will = {
+            topic,
+            payload: body.slice(afterTopic + 2, afterTopic + 2 + length),
+            retain: (connectFlags & 0x20) !== 0, // the will's QoS is not kept: delivery is at QoS 0
+          };
+        }
         onConnect();
+        this.#arm(session);
         this.#ctx.onSerial(`mqtt connect ${session.clientId} from ${session.conn.remote.ip}`);
         send(mqttPacket(MQTT.connack, 0, [0, 0]));
         return;
@@ -399,6 +486,8 @@ export class MqttBroker {
         send(mqttPacket(MQTT.pingresp, 0, []));
         return;
       case MQTT.disconnect:
+        session.will = null; // a clean DISCONNECT discards the will (§3.14.4)
+        this.#end(session); // and the session is over now: no keep-alive left to expire
         session.conn.end();
         return;
     }
