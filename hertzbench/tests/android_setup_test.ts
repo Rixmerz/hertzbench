@@ -3,7 +3,7 @@
 // records its calls and writes what the real tools would leave behind, and a downloader that never
 // touches the network. The SDK and AVD folders are real temp dirs.
 
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { androidCommand } from "../cli/android.ts";
 import {
@@ -179,7 +179,7 @@ Deno.test("android setup --dry-run prints every step with the URL and changes no
       run.out,
       "[1/4] command-line tools: would download https://dl.google.com/",
     );
-    assertStringIncludes(run.out, `unpack it to ${join(m.sdk, "cmdline-tools", "latest")}`);
+    assertStringIncludes(run.out, `unpack it to ${posix.join(m.sdk, "cmdline-tools", "latest")}`);
     assertStringIncludes(
       run.out,
       "[2/4] sdkmanager installs platform-tools, emulator, " +
@@ -209,8 +209,8 @@ Deno.test("android setup installs everything once, and a second run skips every 
     // The URL is printed before the download starts, and the zip was fetched exactly once.
     assertStringIncludes(first.out, "downloading https://dl.google.com/android/repository/");
     assertEquals(m.downloads.length, 1);
-    const latest = join(m.sdk, "cmdline-tools", "latest");
-    const sdkmanager = join(latest, "bin", "sdkmanager");
+    const latest = posix.join(m.sdk, "cmdline-tools", "latest");
+    const sdkmanager = posix.join(latest, "bin", "sdkmanager");
     assertEquals(
       m.calls.map((c) =>
         `${c.cmd === "unzip" ? "unzip" : c.cmd.split("/").at(-1)}${c.attached ? " (attached)" : ""}`
@@ -224,7 +224,7 @@ Deno.test("android setup installs everything once, and a second run skips every 
     assertEquals(install!.args, [`--sdk_root=${m.sdk}`, "platform-tools", "emulator", IMAGE_X86]);
     assertEquals(create!.args, ["create", "avd", "-n", "pixel8", "-k", IMAGE_X86, "-d", "pixel_8"]);
     assertEquals(create!.input, "no\n");
-    assertEquals(accel!.cmd, join(m.sdk, "emulator", "emulator"));
+    assertEquals(accel!.cmd, posix.join(m.sdk, "emulator", "emulator"));
     // The 2G that avdmanager wrote is replaced by the RAM in MB.
     assertEquals(
       await Deno.readTextFile(join(m.avdHome, "pixel8.avd", "config.ini")),
