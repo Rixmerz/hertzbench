@@ -1,0 +1,250 @@
+name: Hertzbench macOS (Apple Silicon)
+
+# Opt-in: runs by hand only, never on a pull request or a schedule. Nothing in it has run yet
+# (hertzbench/docs/missing-tests.md, "Opt-in CI workflow `hertzbench-macos`").
+#
+# It has three parts, from the one that must pass to the one that cannot:
+#   1. `deno task check && deno task test` on macos-14 (Apple Silicon). Required.
+#   2. libqemu-xtensa built from the public lcgamboa fork with hertzbench's patch 3, following
+#      hertzbench/docs/e2e-esp32.md ("macOS" and "Setting up a host without root"), then one ESP32
+#      scenario (udp-3-nodes.yaml). The build is unverified on macOS, so a failed build is reported
+#      and the scenario is skipped; it does not turn the job red.
+#   3. The Android emulator half (android-web-scripted.yaml) with an arm64-v8a API 36 image.
+#      GitHub's Apple Silicon runners do not support nested virtualization, so the emulator cannot
+#      boot there. Those steps are continue-on-error and say so in their log; the emulator half
+#      needs a real Mac.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hertzbench-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The fork commit hertzbench's patch 3 was written against (hertzbench/docs/upstream-sync.md).
+  QEMU_FORK_COMMIT: 9c298984
+  SYSTEM_IMAGE: system-images;android-36;google_apis;arm64-v8a
+
+jobs:
+  suite-and-esp32:
+    name: suite-and-esp32
+    runs-on: macos-14
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: hertzbench
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
+        with:
+          deno-version: v2.x
+
+      # The compile-helper and SPI-link tests run python3, as in hertzbench-ci.yml; the ESP32
+      # worker and the sketch compile below use the same interpreter.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Type check
+        run: deno task check
+
+      - name: Test
+        run: deno task test
+
+      # Restoring the build avoids the QEMU compile on later runs. The key names the fork commit
+      # and this workflow file, so a change to the build steps starts from scratch.
+      - name: Cache libqemu
+        id: libqemu-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/opt/velxio-qemu
+          key: libqemu-macos-14-${{ env.QEMU_FORK_COMMIT }}-${{ hashFiles('.github/workflows/hertzbench-macos.yml', 'hertzbench/docs/upstream-sync.md') }}
+
+      # Unverified on macOS (e2e-esp32.md, "macOS"): the fork's Darwin branch, signing and patch 3
+      # have never run on a Mac. A failure here is the result this job exists to produce.
+      - name: Build libqemu-xtensa (best effort)
+        id: libqemu
+        if: steps.libqemu-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          brew install gnu-sed coreutils ninja pkg-config meson glib pixman libgcrypt libslirp
+          export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          export OBJC=clang OBJCXX=clang++
+          python3 -m venv "$HOME/.local/opt/qemu-build-venv"
+          "$HOME/.local/opt/qemu-build-venv/bin/pip" install meson ninja distlib
+          git clone --filter=blob:none --no-checkout -b picsimlab-esp32 \
+            https://github.com/lcgamboa/qemu "$HOME/.local/src/lcgamboa-qemu"
+          cd "$HOME/.local/src/lcgamboa-qemu"
+          git checkout "$QEMU_FORK_COMMIT"
+          # Patch 3 is the heredoc in upstream-sync.md; applying it from there keeps one copy.
+          sed -n "/^git apply <<'PATCH'\$/,/^PATCH\$/p" \
+            "$GITHUB_WORKSPACE/hertzbench/docs/upstream-sync.md" | sed '1d;$d' | git apply
+          sed 's/--enable-debug --enable-debug-info/--enable-debug-info/' build_libqemu-esp32.sh \
+            > ../build_libqemu-esp32-optimized.sh
+          PATH="$HOME/.local/opt/qemu-build-venv/bin:$PATH" bash ../build_libqemu-esp32-optimized.sh
+          # Stage the files and move the directory into place last: the cache path then exists
+          # only after a complete build, so a failure cannot leave an empty directory to be saved
+          # under the key (a later run would hit it, skip the build and find no library).
+          stage="$HOME/.local/opt/velxio-qemu.stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp build/libqemu-xtensa.dylib build/libqemu-riscv32.dylib "$stage/"
+          cp pc-bios/esp32-v3-rom.bin pc-bios/esp32-v3-rom-app.bin pc-bios/esp32c3-rom.bin \
+            pc-bios/esp32s3_rev0_rom.bin "$stage/"
+          mv "$stage" "$HOME/.local/opt/velxio-qemu"
+
+      - name: Locate libqemu-xtensa
+        id: locate
+        run: |
+          lib="$HOME/.local/opt/velxio-qemu/libqemu-xtensa.dylib"
+          if [ -f "$lib" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "QEMU_ESP32_LIB=$lib" >> "$GITHUB_ENV"
+            otool -L "$lib"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::no libqemu-xtensa.dylib: the ESP32 scenario is skipped. The macOS build is unverified (hertzbench/docs/e2e-esp32.md, 'macOS'); read the 'Build libqemu-xtensa' step."
+          fi
+
+      - name: Install the worker's Python packages and arduino-cli
+        if: steps.locate.outputs.found == 'true'
+        working-directory: .
+        run: |
+          python3 -m pip install -r backend/requirements.txt pyserial
+          brew install arduino-cli
+          url=https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core update-index --additional-urls "$url"
+          arduino-cli core install esp32:esp32@2.0.17 --additional-urls "$url"
+
+      - name: Run the ESP32 UDP scenario
+        if: steps.locate.outputs.found == 'true'
+        run: |
+          export HERTZBENCH_PYTHON="$(command -v python3)"
+          deno task hertzbench run scenarios/examples/udp-3-nodes.yaml --out "$RUNNER_TEMP/esp32-udp"
+
+      - name: Upload run outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-esp32-run
+          path: ${{ runner.temp }}/esp32-udp
+          if-no-files-found: ignore
+          retention-days: 7
+
+  android-emulator:
+    name: android-emulator (needs a real Mac)
+    runs-on: macos-14
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: hertzbench
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
+        with:
+          deno-version: v2.x
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The tree has no Gradle wrapper; the example app is built with Gradle 8.13.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4
+        with:
+          gradle-version: '8.13'
+
+      # The runner image sets ANDROID_HOME. The pixel_8 device definition needs recent
+      # cmdline-tools, so they are updated in place, as hertzbench-android.yml does on Linux.
+      - name: Install the emulator, the platform and the arm64-v8a system image
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true # `yes` ends with SIGPIPE
+          "$sdkmanager" --install "cmdline-tools;latest"
+          tools="$ANDROID_HOME/cmdline-tools"
+          if [ -d "$tools/latest-2" ]; then
+            rm -rf "$tools/latest"
+            mv "$tools/latest-2" "$tools/latest"
+          fi
+          sdkmanager="$tools/latest/bin/sdkmanager"
+          "$sdkmanager" --install "emulator" "platform-tools" "platforms;android-35" \
+            "build-tools;35.0.0" "$SYSTEM_IMAGE"
+
+      # Hertzbench never creates an AVD; the scenario only depends on the name pixel8.
+      - name: Create the pixel8 AVD
+        run: |
+          avdmanager="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          "$avdmanager" list device -c > "$RUNNER_TEMP/devices.txt"
+          device=
+          for candidate in pixel_8 pixel_7 pixel_6 pixel_5; do
+            if grep -qxF "$candidate" "$RUNNER_TEMP/devices.txt"; then
+              device="$candidate"
+              break
+            fi
+          done
+          if [ -z "$device" ]; then
+            echo "avdmanager lists no pixel_8, pixel_7, pixel_6 or pixel_5 device:" >&2
+            cat "$RUNNER_TEMP/devices.txt" >&2
+            exit 1
+          fi
+          echo "using device definition $device for the pixel8 AVD"
+          echo no | "$avdmanager" create avd \
+            --force --name pixel8 --device "$device" --package "$SYSTEM_IMAGE"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee "$RUNNER_TEMP/avds.txt"
+          grep -qxF pixel8 "$RUNNER_TEMP/avds.txt"
+
+      - name: Build the example app
+        working-directory: hertzbench/examples/android/iot-app
+        run: gradle --no-daemon assembleDebug
+
+      # Hypervisor.framework is not available inside GitHub's Apple Silicon VMs, so this is
+      # expected to say "no acceleration" and fail. It is here to put that on record.
+      - name: Emulator version and acceleration
+        continue-on-error: true
+        run: |
+          "$ANDROID_HOME/emulator/emulator" -version | sed -n 1p
+          "$ANDROID_HOME/emulator/emulator-check" accel
+
+      - name: Validate the scenario
+        run: deno task hertzbench validate scenarios/examples/android-web-scripted.yaml
+
+      - name: Run the Android scenario (emulator half, needs a real Mac)
+        continue-on-error: true
+        run: |
+          echo "NOTE: GitHub's Apple Silicon runners do not support nested virtualization."
+          echo "NOTE: The Android emulator half needs a real Mac; a failure below is expected here."
+          echo "::notice::The Android emulator half needs a real Mac. GitHub's macos-14 runners cannot boot the emulator."
+          if deno task hertzbench run scenarios/examples/android-web-scripted.yaml \
+            --out "$RUNNER_TEMP/android-green"; then
+            echo "The emulator booted on this runner and the scenario passed: record it in hertzbench/docs/missing-tests.md."
+          else
+            code=$?
+            echo "The scenario exited with status $code. The emulator half needs a real Mac (no nested virtualization on GitHub's Apple Silicon runners)." >&2
+            exit "$code"
+          fi
+
+      - name: Upload run outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-android-run
+          path: ${{ runner.temp }}/android-green
+          if-no-files-found: ignore
+          retention-days: 7
