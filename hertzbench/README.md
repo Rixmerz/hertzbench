@@ -1,9 +1,13 @@
 # Hertzbench
 
-Simulate the radio network between microcontroller boards: N boards running real firmware, talking
-over simulated wireless links with a distance, a path loss, a latency and a loss. Local, free,
-AGPLv3, based on [Velxio](https://github.com/davidmonterocrespo24/velxio) (which does the CPU
-emulation).
+Hertzbench is a local, scriptable test bench for the radio network between microcontroller boards.
+It runs several boards at once: ESP32 boards with real firmware under QEMU, scripted boards that
+replay traffic, and Android apps in the Android emulator. They share one simulated network with
+Wi-Fi, BLE, LoRa, nRF24, ESP-NOW and SPI-attached radio chips. Each board has a position in metres,
+so walls, distance, path loss, latency and loss shape the traffic between them. You describe the
+experiment in a YAML scenario, with its boards, links, timed faults and assertions, and the run ends
+with `RESULT: PASS` or `RESULT: FAIL`. It is free software under AGPLv3, built on
+[Velxio](https://github.com/davidmonterocrespo24/velxio), which does the CPU emulation.
 
 Website and downloads: **<https://rixmerz.github.io/hertzbench/>** (the page's source is in
 [`site/`](../site/)).
@@ -14,18 +18,87 @@ _Live view of a finished run of
 [`espnow-mesh-5-nodes.yaml`](scenarios/examples/espnow-mesh-5-nodes.yaml): five ESP32 boards on real
 firmware, 60 s, seed 42._
 
-The plan is in [docs/PLAN.md](docs/PLAN.md). This is **Phase 1**, N ESP32 boards over Wi-Fi/IP with
-a channel model, run headless from a scenario file, **Phase 2**, an MCP server so an AI agent can
-build, run and steer those scenarios, **Phase 3**, LoRa and nRF24 radio chips modelled at their SPI
-interface, **Phase 4**, ESP-NOW between the boards, **Phase 5**, a mobile bridge that lets a real
-phone reach a simulated board over Wi-Fi/IP or BLE, **Phase 6**, BLE between the boards through a
-virtual controller on an HCI UART, and **Phase 7**, an optional live view in the browser.
+The plan and the phases are in [docs/PLAN.md](docs/PLAN.md).
 
 Velxio emulates one circuit: a board's CPU, its components and the wires between its pins.
 Hertzbench keeps that and adds the air between boards: N boards, each at a position in metres,
 talking over simulated radio links. The only Velxio file it patches is `esp32_worker.py`. MCP,
 ESP-NOW, BLE, the mobile bridge and the view touch no Velxio file
 ([docs/upstream-sync.md](docs/upstream-sync.md)).
+
+## Features
+
+**Boards and firmware**
+
+- ESP32 boards on real firmware under QEMU, from a sketch directory or a `.bin`. See
+  [e2e-esp32.md](docs/e2e-esp32.md).
+- Scripted boards that replay traffic with no firmware and no QEMU. See
+  [scenario-format.md](docs/scenario-format.md).
+
+**Radios, network and channel model**
+
+- Wi-Fi/IP, ESP-NOW, LoRa (SX127x), nRF24L01+ and BLE on one medium, with distance, path loss,
+  walls, retries, latency and loss from a seeded random number generator. See
+  [fidelity.md](docs/fidelity.md).
+- Faults on a timeline in the scenario: node moves, link loss and latency, doors, interference
+  sources. Changes while a run plays come through MCP. See
+  [scenario-format.md](docs/scenario-format.md) and [mcp.md](docs/mcp.md).
+- Assertions on serial output and metrics. The outputs are `metrics.json`, `air.pcap` for Wireshark,
+  `events.jsonl` and one serial log per board. See [scenario-format.md](docs/scenario-format.md).
+
+**Mobile bridge**
+
+- IP bridge: a phone, or the Android emulator at `10.0.2.2`, reaches a simulated node over HTTP,
+  WebSocket, MQTT or any TCP. mDNS advertises it on the LAN. See
+  [mobile-bridge.md](docs/mobile-bridge.md#5a-the-ip-bridge).
+- BLE bridge: a real phone sees a simulated peripheral's GATT through BlueZ (Linux only), and an app
+  in the Android emulator sees it through netsim. See
+  [mobile-bridge.md](docs/mobile-bridge.md#5b-the-ble-bridge) and
+  [the netsim path](docs/mobile-bridge.md#5b-with-netsim-an-app-in-the-android-emulator).
+
+**Android app nodes**
+
+- `board: android` boots an AVD headless, installs an APK, launches it and streams logcat, with the
+  app on the same Wi-Fi as the other boards. Validated on Linux with KVM. See
+  [android.md](docs/android.md).
+
+**Agents and the live view**
+
+- MCP server (`hertzbench mcp`): an agent builds, runs and steers scenarios, and reads the metrics,
+  serial output and events. See [mcp.md](docs/mcp.md).
+- Live view (`hertzbench view`): a map of the nodes, links coloured by signal or loss, drag to move,
+  and a packet timeline. See [view.md](docs/view.md).
+
+**CLI and release binaries**
+
+- Commands: `run`, `validate`, `examples`, `view`, `mcp` and `android prepare`.
+- Release binaries for Linux, macOS and Windows, on x64 and arm64, with a `SHA256SUMS` file. See
+  [Install](#install).
+
+## Quick start
+
+1. Download the binary for your system from the
+   [latest release](https://github.com/Rixmerz/hertzbench/releases/latest), and check it against
+   `SHA256SUMS` ([details](#download-and-check-the-file)). The Linux x64 file is used below.
+2. List the example scenarios inside the binary, then write one out to the current folder:
+
+   ```bash
+   ./hertzbench-linux-x64 examples
+   ./hertzbench-linux-x64 examples udp-3-scripted
+   ```
+
+3. Run it. `run` takes a scenario file, not an example name:
+
+   ```bash
+   ./hertzbench-linux-x64 run udp-3-scripted.yaml --out out
+   ```
+
+   The report's last assertion line is followed by `RESULT: PASS`, and the exit status is 0.
+
+The three scripted boards need nothing else. For ESP32 boards and Android app nodes, see
+[Android without Android Studio](docs/android.md#android-without-android-studio) and
+[e2e-esp32.md](docs/e2e-esp32.md). The full walk-through is in
+[Getting started with the binary](#getting-started-with-the-binary).
 
 ## Getting started with the binary
 
@@ -203,7 +276,7 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 | ESP-NOW                                                                                                         | done; **`espnow-mesh-5-nodes.yaml` passes 7/7 on real firmware** (2026-10-24, with a patch to the fork), see [ESP-NOW](#esp-now)                                                                                                                                                                                                                                                   |
 | LoRa (SX127x) and nRF24L01+                                                                                     | done; `lora-gateway-6-nodes.yaml` **passes on real firmware**; no nRF24 example has an ESP32 board                                                                                                                                                                                                                                                                                 |
 | BLE                                                                                                             | done; `ble-sensors-3-nodes.yaml` **passes on real firmware** (Bluedroid host-only, ESP-IDF v5.3.6), see [BLE](#ble)                                                                                                                                                                                                                                                                |
-| Mobile bridge (Phase 5)                                                                                         | done; on real firmware the IP bridge serves the ESP32's `WebServer` to the host's `curl`, and BlueZ advertises `hzb sensor` on `hci0`. On the maintainer's host no phone was used, but community report [#37](https://github.com/Rixmerz/hertzbench/issues/37) has a real phone reaching the IP bridge over HTTP, and [#110](https://github.com/Rixmerz/hertzbench/issues/110) has the Android emulator on an Apple Silicon Mac exchanging MQTT both ways with a scripted node through `10.0.2.2` (WebSocket not run), see [Mobile bridge](#mobile-bridge) |
+| Mobile bridge (Phase 5)                                                                                         | done; on real firmware the IP bridge serves the ESP32's `WebServer` to the host's `curl`, and BlueZ advertises `hzb sensor` on `hci0`. On the maintainer's host no phone was used, but community report [#37](https://github.com/Rixmerz/hertzbench/issues/37) has a real phone reaching the IP bridge over HTTP, [#110](https://github.com/Rixmerz/hertzbench/issues/110) has the Android emulator on an Apple Silicon Mac exchanging MQTT both ways with a scripted node through `10.0.2.2` (WebSocket not run), and [#116](https://github.com/Rixmerz/hertzbench/issues/116) has a Kotlin/Compose app with Paho MQTT in the Android 17 emulator on that Mac, as panel and as node, through `10.0.2.2`, with a link cut by `inject_fault`, see [Mobile bridge](#mobile-bridge) |
 | Android app over Wi-Fi to real ESP32 firmware ([PR #96](https://github.com/Rixmerz/hertzbench/pull/96))         | **passes**: `android-web-esp32.yaml` 3 of 3 on the `pixel8` AVD (2026-11-09, again 2026-11-10); Linux with KVM, not in CI                                                                                                                                                                                                                                                          |
 | Android app over simulated BLE to real ESP32 firmware ([PR #98](https://github.com/Rixmerz/hertzbench/pull/98)) | **passes**: `android-ble-esp32.yaml` 3 of 3 on `pixel8` (2026-11-10, 96 to 103 s each); one Linux host only, not in CI                                                                                                                                                                                                                                                             |
 | Releases                                                                                                        | v0.4.1 (2026-11-16), after v0.4.0 (2026-11-14) and v0.3.0 and v0.3.1 (2026-11-11), publish binaries for Linux, macOS and Windows, x64 and arm64; v0.3.1 adds unsigned, non-notarized macOS `.dmg` images                                                                                                                                                                                                   |
@@ -213,6 +286,14 @@ terminal or `CI` is set. The view serves until Ctrl-C, and the scenario runs for
 
 Newest first. Each entry links the PR, release or document that holds the result.
 
+- **2026-11-17**: community report from an Apple Silicon Mac: a Kotlin/Compose app with Paho MQTT
+  runs in the Android 17 emulator, as panel and as node, through the IP bridge at `10.0.2.2`. An
+  `inject_fault` that cuts the link sends the app into its safe mode, and it reconnects when the
+  link returns. The report was made by the community tester, not rerun by the maintainer
+  ([issue #116](https://github.com/Rixmerz/hertzbench/issues/116)). An app that targets Android 17
+  needs the `ACCESS_LOCAL_NETWORK` permission for that
+  ([issue #114](https://github.com/Rixmerz/hertzbench/issues/114),
+  [mobile-bridge.md](docs/mobile-bridge.md#5a-the-ip-bridge)).
 - **2026-11-16**: v0.4.1 released: `deno task compile` works with the Deno from Homebrew
   ([#111](https://github.com/Rixmerz/hertzbench/pull/111)).
 - **2026-11-16**: community report from an Apple Silicon Mac: the Android emulator exchanges MQTT
@@ -261,7 +342,10 @@ Newest first. Each entry links the PR, release or document that holds the result
   and tool lookup ran on a real machine with v0.4.0
   ([issue #102](https://github.com/Rixmerz/hertzbench/issues/102#issuecomment-6883607259)); the
   emulator then stopped for lack of RAM (4007 MiB, it asks for 4096), so no AVD has booted there.
-  Nothing has run on a Mac. Plan: [android.md](docs/android.md#platforms).
+  No `board: android` node has run on a Mac. By hand, an emulator on a Mac ran the MQTT apps of
+  [#110](https://github.com/Rixmerz/hertzbench/issues/110) and
+  [#116](https://github.com/Rixmerz/hertzbench/issues/116). Plan:
+  [android.md](docs/android.md#platforms).
 - **Two real Android nodes in one run.** The `android prepare` procedure is implemented and tested
   with a fake SDK. No run has booted two emulators. Plan: [android.md](docs/android.md).
 - **Android snapshot boot time, and the snapshot's MAC and network steps.** Not measured; see
@@ -278,9 +362,10 @@ Newest first. Each entry links the PR, release or document that holds the result
   [PR #97](https://github.com/Rixmerz/hertzbench/pull/97), not merged.
 - **The macOS `.dmg` opened on a real Mac.** Released unsigned and not notarized, and nobody has
   opened one on a Mac yet. Plan: [community-testing.md](docs/community-testing.md#platforms).
-- **A physical phone.** Not used through the BLE bridge, over WebSocket or MQTT on the IP bridge
-  (MQTT ran from the Android emulator on a Mac, [#110](https://github.com/Rixmerz/hertzbench/issues/110)),
-  against real ESP32 firmware, or with the Android app on a device. Plan:
+- **A physical phone.** Not used through the BLE bridge, over WebSocket on the IP bridge, against
+  real ESP32 firmware, or with the Android app on a device. MQTT ran from the Android emulator on a
+  Mac ([#110](https://github.com/Rixmerz/hertzbench/issues/110),
+  [#116](https://github.com/Rixmerz/hertzbench/issues/116)), not from a physical phone. Plan:
   [mobile-bridge.md](docs/mobile-bridge.md) and
   [community-testing.md](docs/community-testing.md#real-hardware-and-networks).
 - **LAN mDNS seen from another host.** Not run. Plan:
