@@ -72,7 +72,10 @@ jobs:
             sudo xattr -d com.apple.quarantine /usr/local/bin/hertzbench
             hertzbench --help
           TXT
-            hdiutil create -volname Hertzbench -srcfolder "$stage" -format UDZO -ov "hertzbench-macos-$arch.dmg"
+            # hdiutil's own size estimate for -srcfolder can come out too small
+            # ("No space left on device"), so give it the folder size plus headroom.
+            size_mb=$(( $(du -sm "$stage" | cut -f1) + 64 ))
+            hdiutil create -volname Hertzbench -srcfolder "$stage" -size "${size_mb}m" -format UDZO -ov "hertzbench-macos-$arch.dmg"
           done
           shasum -a 256 hertzbench-macos-*.dmg >> SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" hertzbench-macos-*.dmg
